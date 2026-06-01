@@ -1,0 +1,15 @@
+[project]
+name = "deepseek-middleware"
+version = "0.1.0"
+description = "DeepSeek OpenAI-compatible proxy with tool calling"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "aiodeepseek>=0.1.1",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.4.0",
+    "requests>=2.31.0",
+    "tiktoken>=0.13.0",
+    "dotenv>=0.9.9",
+]
