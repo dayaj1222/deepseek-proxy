@@ -9,3 +9,12 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Vim
+Session.vim
+
+# Databases
+*.db
+
+# Scratch / experiments
+c/

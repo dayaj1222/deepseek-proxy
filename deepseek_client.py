@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 from typing import AsyncGenerator, Dict, Optional
 import threading
 from aiodeepseek import DeepSeekClient
@@ -12,13 +14,46 @@ _model_map = {
     "VISION": ModelType.VISION,
 }
 
+_model_id_map = {
+    "deepseek-v4-pro": ModelType.EXPERT,
+    "deepseek-v4-flash": ModelType.DEFAULT,
+    "deepseek-chat": ModelType.DEFAULT,
+    "deepseek-reasoner": ModelType.EXPERT,
+}
+
 def _get_model_type() -> ModelType:
     return _model_map.get(MODEL_TYPE.upper(), ModelType.DEFAULT)
 
+def _resolve_model(model_id: str) -> ModelType:
+    lower = model_id.lower()
+    if "vision" in lower:
+        return ModelType.VISION
+    return _model_id_map.get(lower, _get_model_type())
+
 _client: Optional[DeepSeekClient] = None
 _conversations: Dict[str, Conversation] = {}
-_sent_counts: Dict[str, int] = {}  # thread_id -> number of messages already sent to DeepSeek
 _lock = threading.Lock()
+
+STATE_PATH = Path(__file__).parent / "session_state.json"
+
+def _load_state() -> dict:
+    try:
+        data = json.loads(STATE_PATH.read_text())
+        data.setdefault("session_id", None)
+        data.setdefault("threads", {})
+        return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"session_id": None, "threads": {}}
+
+def _save_state(session_id: str, thread_id: str, parent_message_id: str):
+    if not session_id or not parent_message_id:
+        return
+    state = _load_state()
+    state["session_id"] = session_id
+    state["threads"][thread_id] = parent_message_id
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
 
 async def _ensure_client():
     global _client
@@ -37,25 +72,30 @@ async def get_or_create_conversation(thread_id: str) -> Conversation:
     assert _client is not None
     with _lock:
         if thread_id not in _conversations:
-            _conversations[thread_id] = _client.new_conversation()
+            conv = _client.new_conversation()
+            _conversations[thread_id] = conv
+            state = _load_state()
+            if thread_id in state.get("threads", {}):
+                saved_session = state.get("session_id")
+                saved_parent = state["threads"][thread_id]
+                if saved_session:
+                    _client._session_id = saved_session
+                if saved_parent:
+                    conv._parent_message_id = saved_parent
         return _conversations[thread_id]
 
-def get_sent_count(thread_id: str) -> int:
-    with _lock:
-        return _sent_counts.get(thread_id, 0)
-
-def set_sent_count(thread_id: str, count: int):
-    with _lock:
-        _sent_counts[thread_id] = count
-
-async def generate_response(thread_id: str, prompt: str, stream: bool = False):
+async def generate_response(thread_id: str, prompt: str, model: str = "", stream: bool = False):
     conv = await get_or_create_conversation(thread_id)
+    model_type = _resolve_model(model) if model else None
     if stream:
-        async for chunk in conv.ask_stream(prompt):
+        async for chunk in conv.ask_stream(prompt, model=model_type):
             yield chunk
     else:
-        response = await conv.ask(prompt)
+        response = await conv.ask(prompt, model=model_type)
         yield response.text
+    with _lock:
+        if _client and _client._session_id and conv.parent_message_id:
+            _save_state(_client._session_id, thread_id, conv.parent_message_id)
 
 async def shutdown_client():
     global _client

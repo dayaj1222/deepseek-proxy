@@ -9,7 +9,4 @@ dependencies = [
     "aiodeepseek>=0.1.1",
     "python-dotenv>=1.0.0",
     "pydantic>=2.4.0",
-    "requests>=2.31.0",
-    "tiktoken>=0.13.0",
-    "dotenv>=0.9.9",
 ]
