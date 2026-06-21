@@ -168,6 +168,7 @@ async def handle_chat_request(request: ChatRequest):
     prompt = build_prompt(
         new_messages, request.tools, include_system=is_first, include_tools=is_first
     )
+    prompt_tokens = estimate_tokens(str(request.messages))
 
     if REQUEST_DELAY > 0:
         log.info("Delaying request by %.2f seconds", REQUEST_DELAY)
@@ -176,7 +177,7 @@ async def handle_chat_request(request: ChatRequest):
     if request.stream:
         response_gen = generate_response(thread_id, prompt, model=request.model, stream=True)
         return StreamingResponse(
-            hybrid_stream_generator(response_gen, request.model, thread_id, request.messages),
+            hybrid_stream_generator(response_gen, request.model, thread_id, prompt_tokens),
             media_type="text/event-stream",
         )
 
@@ -193,7 +194,6 @@ async def handle_chat_request(request: ChatRequest):
             "  tool: %s  args=%s", tc["function"]["name"], tc["function"]["arguments"]
         )
 
-    prompt_tokens = estimate_tokens(str(request.messages))
     completion_tokens = estimate_tokens(full_response or json.dumps(tool_calls))
 
     if tool_calls:

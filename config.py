@@ -1,4 +1,5 @@
 import os
+import tiktoken
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,7 +18,9 @@ REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0"))
 TOOL_BUFFER_LIMIT = int(os.getenv("TOOL_BUFFER_LIMIT", "100000"))
 
 
+_enc = tiktoken.get_encoding("cl100k_base")
+
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    return len(text) // 4
+    return len(_enc.encode(text, disallowed_special=()))
