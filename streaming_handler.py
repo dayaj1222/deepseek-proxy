@@ -4,23 +4,31 @@ import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from config import TOOL_BUFFER_LIMIT, estimate_tokens
-from tool_parser import extract_tool_calls
+from config import estimate_tokens
+from tool_parser import parse_tool_call_json
 
 
 log = logging.getLogger(__name__)
 
-TOOL_MARKER = "⟿"
-TEXT_FLUSH_THRESHOLD = 200
+PREFIX = "[TOOL CALL]"
+SUFFIX = "[/TOOL CALL]"
+
+
+def _is_prefix(s: str, target: str) -> bool:
+    return target.startswith(s)
+
+
+def _backtrack(s: str, target: str) -> tuple[str, str]:
+    """Return (flushed, keep) — longest suffix of s that is a prefix of target."""
+    for i in range(1, len(s)):
+        suffix = s[i:]
+        if target.startswith(suffix):
+            return s[:i], suffix
+    return s, ""
 
 
 def format_sse(data: Dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def _has_complete_tool_call(buffer: str) -> bool:
-    calls = extract_tool_calls(buffer)
-    return len(calls) > 0
 
 
 async def hybrid_stream_generator(
@@ -29,68 +37,109 @@ async def hybrid_stream_generator(
     thread_id: str,
     prompt_tokens: int,
 ) -> AsyncGenerator[str, None]:
-    buffer = ""
+    state = "TEXT"
+    peek_buf = ""
+    json_buf = ""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    tool_mode = False
+    tool_calls: List[Dict[str, Any]] = []
+    text_buf = ""
 
     try:
         async for chunk in response_gen:
-            buffer += chunk
-
-            if not tool_mode:
-                if TOOL_MARKER in buffer:
-                    tool_mode = True
-                    idx = buffer.index(TOOL_MARKER)
-                    text_before = buffer[:idx]
-                    buffer = buffer[idx:]
-                    if text_before.strip():
+            for char in chunk:
+                if state == "TEXT":
+                    if char == "[":
+                        state = "PEEK"
+                        peek_buf = "["
+                    else:
+                        text_buf += char
                         yield format_sse({
                             "id": chunk_id, "object": "chat.completion.chunk",
                             "created": created, "model": model,
-                            "choices": [{"index": 0, "delta": {"content": text_before}, "finish_reason": None}],
+                            "choices": [{"index": 0, "delta": {"content": char}, "finish_reason": None}],
                         })
 
-            if tool_mode:
-                if _has_complete_tool_call(buffer):
-                    calls = extract_tool_calls(buffer)
-                    async for _ in response_gen:
-                        pass
-                    indexed_calls = [
-                        {"index": i, **tc} for i, tc in enumerate(calls)
-                    ]
-                    yield format_sse({
-                        "id": chunk_id, "object": "chat.completion.chunk",
-                        "created": created, "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": None, "tool_calls": indexed_calls},
-                            "finish_reason": "tool_calls",
-                        }],
-                    })
-                    yield "data: [DONE]\n\n"
-                    return
-                if len(buffer) > TOOL_BUFFER_LIMIT:
-                    log.warning("Tool buffer exceeded hard limit, flushing as text")
-                    tool_mode = False
-                    yield format_sse({
-                        "id": chunk_id, "object": "chat.completion.chunk",
-                        "created": created, "model": model,
-                        "choices": [{"index": 0, "delta": {"content": buffer}, "finish_reason": None}],
-                    })
-                    buffer = ""
-                continue
+                elif state == "PEEK":
+                    peek_buf += char
+                    if peek_buf == PREFIX:
+                        state = "TOOL"
+                        json_buf = ""
+                    elif not _is_prefix(peek_buf, PREFIX):
+                        flushed, keep = _backtrack(peek_buf, PREFIX)
+                        for c in flushed:
+                            text_buf += c
+                            yield format_sse({
+                                "id": chunk_id, "object": "chat.completion.chunk",
+                                "created": created, "model": model,
+                                "choices": [{"index": 0, "delta": {"content": c}, "finish_reason": None}],
+                            })
+                        peek_buf = keep
+                        if not peek_buf:
+                            state = "TEXT"
 
-            if len(buffer) > TEXT_FLUSH_THRESHOLD:
-                if _has_complete_tool_call(buffer):
-                    tool_mode = True
-                    continue
+                elif state == "TOOL":
+                    json_buf += char
+                    if json_buf.endswith(SUFFIX):
+                        content = json_buf[:-len(SUFFIX)]
+                        try:
+                            tc = parse_tool_call_json(content)
+                            if tc:
+                                tool_calls.append(tc)
+                                idx = len(tool_calls) - 1
+                                yield format_sse({
+                                    "id": chunk_id, "object": "chat.completion.chunk",
+                                    "created": created, "model": model,
+                                    "choices": [{"index": 0, "delta": {
+                                        "role": "assistant", "content": None,
+                                        "tool_calls": [{"index": idx, **tc}],
+                                    }, "finish_reason": None}],
+                                })
+                        except Exception:
+                            log.exception("Failed to parse tool call JSON")
+                        state = "TEXT"
+                        peek_buf = ""
+                        json_buf = ""
+
+        # Stream ended
+        if tool_calls:
+            all_args = json.dumps([tc["function"]["arguments"] for tc in tool_calls])
+            yield format_sse({
+                "id": chunk_id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": estimate_tokens(all_args),
+                    "total_tokens": prompt_tokens + estimate_tokens(all_args),
+                },
+            })
+            yield "data: [DONE]\n\n"
+            return
+
+        if state == "TOOL":
+            text_buf += json_buf
+        elif state == "PEEK":
+            for c in peek_buf:
+                text_buf += c
                 yield format_sse({
                     "id": chunk_id, "object": "chat.completion.chunk",
                     "created": created, "model": model,
-                    "choices": [{"index": 0, "delta": {"content": buffer}, "finish_reason": None}],
+                    "choices": [{"index": 0, "delta": {"content": c}, "finish_reason": None}],
                 })
-                buffer = ""
+
+        yield format_sse({
+            "id": chunk_id, "object": "chat.completion.chunk",
+            "created": created, "model": model,
+            "choices": [{"index": 0, "delta": {"content": text_buf}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": estimate_tokens(text_buf),
+                "total_tokens": prompt_tokens + estimate_tokens(text_buf),
+            },
+        })
+        yield "data: [DONE]\n\n"
+
     except Exception as e:
         log.error("Stream error [%s]: %s", type(e).__name__, repr(e))
         yield format_sse({
@@ -98,42 +147,9 @@ async def hybrid_stream_generator(
             "created": created, "model": model,
             "choices": [{
                 "index": 0,
-                "delta": {"content": buffer} if buffer else {},
+                "delta": {"content": text_buf + json_buf} if (text_buf or json_buf) else {},
                 "finish_reason": "stop",
             }],
         })
         yield "data: [DONE]\n\n"
         return
-
-    if buffer:
-        if _has_complete_tool_call(buffer):
-            calls = extract_tool_calls(buffer)
-            indexed_calls = [
-                {"index": i, **tc} for i, tc in enumerate(calls)
-            ]
-            yield format_sse({
-                "id": chunk_id, "object": "chat.completion.chunk",
-                "created": created, "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": None, "tool_calls": indexed_calls},
-                    "finish_reason": "tool_calls",
-                }],
-            })
-            yield "data: [DONE]\n\n"
-            return
-
-        full_text = buffer
-        completion_tokens = estimate_tokens(full_text)
-        yield format_sse({
-            "id": chunk_id, "object": "chat.completion.chunk",
-            "created": created, "model": model,
-            "choices": [{"index": 0, "delta": {"content": full_text}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-        })
-
-    yield "data: [DONE]\n\n"

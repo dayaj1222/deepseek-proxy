@@ -15,8 +15,6 @@ PROXY_PORT = int(os.getenv("PROXY_PORT", "8000"))
 
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0"))
 
-TOOL_BUFFER_LIMIT = int(os.getenv("TOOL_BUFFER_LIMIT", "100000"))
-
 
 _enc = tiktoken.get_encoding("cl100k_base")
 

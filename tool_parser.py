@@ -1,8 +1,5 @@
 """
 Tool‑call extraction and tool‑description injection for the DeepSeek OpenAI proxy.
-
-The module parses raw model output to extract OpenAI‑compatible tool_call objects
-and builds a system prompt that instructs the model how to format them.
 """
 
 import json
@@ -15,124 +12,58 @@ log = logging.getLogger(__name__)
 
 
 def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """
-    Extract OpenAI‑style tool calls from plain‑text model output.
-
-    Returns a list of tool_call dicts, each with ``id``, ``type``, and ``function`` keys.
-
-    Parsing strips the ``⟿`` delimiter if present and attempts:
-    1. Markdown fenced JSON blocks (`` ```json ... ``` ``)
-    2. Bare JSON objects that contain a ``"function"`` key
-    3. Balanced‑brace scanning (handles nested JSON correctly)
-    """
-    text = text.replace("⟿", "").strip()
+    """Extract tool calls from text — parses JSON wrapped in [TOOL CALL]...[/TOOL CALL]."""
     tool_calls: List[Dict[str, Any]] = []
+    matches = re.findall(r'\[TOOL CALL\](.*?)\[/TOOL CALL\]', text, re.DOTALL)
 
-    # 1. Markdown fenced JSON blocks
-    fenced_blocks = re.findall(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-    for block in fenced_blocks:
-        parsed = _parse_block(block.strip())
-        if parsed:
-            tool_calls.extend(parsed)
-            log.debug("Extracted %d tool call(s) from fenced block", len(parsed))
+    for match in matches:
+        content = match.strip()
+        if not content:
+            continue
+        tc = parse_tool_call_json(content)
+        if tc:
+            tool_calls.append(tc)
+
     if tool_calls:
-        return tool_calls
-
-    # 2. Bare JSON objects containing the word "function"
-    bare_json = re.findall(r'\{[^`]*?"function"[^`]*?\}', text, re.DOTALL)
-    for candidate in bare_json:
-        parsed = _parse_block(candidate.strip())
-        if parsed:
-            tool_calls.extend(parsed)
-    if tool_calls:
-        log.debug("Extracted %d tool call(s) from bare JSON", len(tool_calls))
-        return tool_calls
-
-    # 3. Balanced‑brace scan (last resort, handles nested structures)
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == '{':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0 and start != -1:
-                candidate = text[start:i + 1]
-                parsed = _parse_block(candidate.strip())
-                if parsed:
-                    tool_calls.extend(parsed)
-                start = -1
-    if tool_calls:
-        log.debug("Extracted %d tool call(s) via brace scan", len(tool_calls))
-
+        log.debug("Extracted %d tool call(s) from [TOOL CALL] markers", len(tool_calls))
     return tool_calls
 
 
-def _parse_block(block: str) -> List[Dict[str, Any]]:
-    """
-    Parse a JSON string and convert any tool‑call structures.
-
-    Returns a list of tool_call dicts.  The input can be a single JSON object,
-    a list of objects, or a combination.
-    """
+def parse_tool_call_json(json_str: str) -> Optional[Dict[str, Any]]:
+    """Parse a JSON string and convert to an OpenAI tool_call object."""
     try:
-        data = json.loads(block)
+        data = json.loads(json_str)
     except json.JSONDecodeError:
-        return []
+        return None
 
     if isinstance(data, dict):
-        tc = _to_tool_call(data)
-        return [tc] if tc else []
-
+        return _to_tool_call(data)
     if isinstance(data, list):
-        results = []
         for item in data:
-            tc = _to_tool_call(item)
-            if tc:
-                results.append(tc)
-        return results
-
-    return []
+            if isinstance(item, dict):
+                tc = _to_tool_call(item)
+                if tc:
+                    return tc
+    return None
 
 
 def _to_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a parsed dictionary to an OpenAI tool_call object.
+
+    Only one shape is accepted:
+    * ``{"function": "<name>", "arguments": {...}}``
     """
-    Convert a parsed dictionary to an OpenAI tool_call object.
-
-    Supported shapes:
-    * ``{"function": "<name>", "arguments": {...}}``   (most common raw output)
-    * ``{"name": "<name>", "arguments": {...}}``       (alternative)
-    * ``{"function": {"name": "...", "arguments": {...}}}`` (native OpenAI format)
-    """
-    func_name: Optional[str] = None
-    arguments: Any = {}
-
-    func_value = data.get("function")
-
-    if isinstance(func_value, str):
-        # {"function": "tool_name", "arguments": {...}}
-        func_name = func_value
-        arguments = data.get("arguments", {})
-    elif isinstance(func_value, dict):
-        # {"function": {"name": "...", "arguments": {...}}}
-        func_name = func_value.get("name")
-        arguments = func_value.get("arguments", {})
-    elif "name" in data:
-        # {"name": "tool_name", "arguments": {...}}
-        func_name = data["name"]
-        arguments = data.get("arguments", {})
-
-    if not func_name:
+    func_name = data.get("function")
+    if not isinstance(func_name, str):
         return None
 
-    # Normalise arguments to a JSON string
+    arguments = data.get("arguments", {})
+
     if isinstance(arguments, dict):
         args_str = json.dumps(arguments)
     elif isinstance(arguments, str):
         try:
-            json.loads(arguments)      # Validate existing JSON
+            json.loads(arguments)
             args_str = arguments
         except json.JSONDecodeError:
             args_str = json.dumps({"input": arguments})
@@ -153,12 +84,7 @@ def _to_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) -> str:
-    """
-    Append tool definitions and usage instructions to the system prompt.
-
-    The generated block matches the format expected by :func:`_to_tool_call`,
-    so the model knows exactly what JSON shape to emit.
-    """
+    """Append tool definitions and usage instructions to the system prompt."""
     if not tools:
         return system_prompt
 
@@ -179,33 +105,14 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
     instruction = (
         "\n\n"
         "---\n"
-        "## Proxy Wire Protocol (CRITICAL)\n\n"
-        "Your response is processed by an OpenAI-compatible proxy. "
-        "The following rules are REQUIRED for tool calls to work.\n\n"
-        "### 1. Required Delimiter\n\n"
-        "MUST wrap every tool call with the marker character ⟿ (U+27FF):\n"
-        "⟿{\"function\": \"tool_name\", \"arguments\": {...}}⟿\n\n"
-        "FAILURE MODE: Without ⟿, the proxy cannot detect tool calls in "
-        "streaming mode and will emit them as plain text.\n\n"
-        "### 2. Prohibited Formatting\n\n"
-        "MUST NOT use:\n"
-        "- Code fences (```json ... ```)\n"
-        "- Markdown code blocks\n"
-        "- Any text outside the ⟿ delimiters within the tool call\n\n"
-        "FAILURE MODE: Code fences break the streaming parser and cause "
-        "tool calls to be treated as plain text.\n\n"
-        "### 3. Accepted JSON Shapes (all valid)\n\n"
-        "1. {\"function\": \"name\", \"arguments\": {...}}\n"
-        "2. {\"function\": {\"name\": \"...\", \"arguments\": {...}}}\n"
-        "3. {\"name\": \"name\", \"arguments\": {...}}\n"
-        "4. {\"function\": \"name\", \"arguments\": \"raw_string\"}\n\n"
-        "### 4. Tool Call ID\n\n"
-        "Do NOT include an \"id\" or \"tool_call_id\" field — the proxy "
-        "auto-generates one.\n\n"
-        "### 5. Size Limit\n\n"
-        "Total JSON text per tool call MUST stay under 100KB. "
-        "EXCEEDING THIS LIMIT causes the proxy to abandon tool call "
-        "detection and flush the raw text as a plain response.\n\n"
+        "## Tool Call Format\n\n"
+        "Wrap every tool call with the tags:\n"
+        "[TOOL CALL]{\"function\": \"tool_name\", \"arguments\": {...}}[/TOOL CALL]\n\n"
+        "You may emit multiple tool calls in a single response — "
+        "each one wrapped in its own pair of tags.\n"
+        "Only pure JSON between the tags — no text, no markdown, no extra whitespace.\n"
+        "Do NOT include an \"id\" field — the proxy auto-generates one.\n"
+        "Only the format above is accepted.\n\n"
         "## Available Tools\n\n"
         f"{tools_block}\n"
         "---"

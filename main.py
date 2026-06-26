@@ -18,7 +18,7 @@ from tool_parser import extract_tool_calls, inject_tool_descriptions
 
 
 logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 log = logging.getLogger(__name__)
 
@@ -146,7 +146,6 @@ def build_prompt(
         parts.append("Now continue with the task based on the tool result above.")
 
     prompt = "\n\n".join(parts)
-    log.debug("Built prompt (%d chars, include_system=%s)", len(prompt), include_system)
     return prompt
 
 
@@ -185,7 +184,7 @@ async def handle_chat_request(request: ChatRequest):
     async for chunk in generate_response(thread_id, prompt, model=request.model, stream=False):
         full_response = chunk
 
-    log.debug("DeepSeek response:\n%s", full_response)
+    log.info("Response received, %d chars", len(full_response))
 
     tool_calls = extract_tool_calls(full_response) if request.tools else []
     log.info("Tool calls detected: %d", len(tool_calls))
@@ -260,17 +259,6 @@ app = FastAPI(title="DeepSeek OpenAI Proxy", lifespan=lifespan)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     body = await request.body()
-    if body:
-        try:
-            parsed = json.loads(body)
-            log.debug(
-                "Incoming %s %s\n%s",
-                request.method,
-                request.url.path,
-                json.dumps(parsed, indent=2)[:10000],
-            )
-        except Exception:
-            pass
     # Store the body so downstream consumers can read it again
     request._body = body
     return await call_next(request)
