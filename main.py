@@ -75,16 +75,39 @@ class ChatRequest(BaseModel):
 
 
 # ---- Helper functions ----
+_TITLE_PROMPT_MARKER = "You name chat sessions"
+
+
+def is_title_request(request: ChatRequest) -> bool:
+    """Detect Hermes' session-title generation requests.
+
+    Hermes fires title-gen auxiliary calls whose system prompt starts
+    with "You name chat sessions" and whose first user message is the
+    same as the real chat request for that turn. If both map to the
+    same thread_id they share one DeepSeek Conversation, and the two
+    concurrent asks can cross responses — the chat then receives the
+    title JSON (observed in production). Routing title requests to
+    their own thread namespace makes the collision impossible.
+    """
+    for msg in request.messages:
+        if msg.role == "system":
+            content = normalize_content(msg.content)
+            if content.startswith(_TITLE_PROMPT_MARKER):
+                return True
+    return False
+
+
 def get_thread_id(request: ChatRequest) -> str:
     """Derive a stable thread ID from the request, or use the provided one."""
     if request.thread_id:
         return request.thread_id
+    prefix = "title_" if is_title_request(request) else "thread_"
     for msg in request.messages:
         content = normalize_content(msg.content)
         if msg.role == "user" and content:
-            return "thread_" + hashlib.sha256(content.encode()).hexdigest()[:24]
+            return prefix + hashlib.sha256(content.encode()).hexdigest()[:24]
     all_content = "".join(normalize_content(m.content) for m in request.messages)
-    return "thread_" + hashlib.sha256(all_content.encode()).hexdigest()[:24]
+    return prefix + hashlib.sha256(all_content.encode()).hexdigest()[:24]
 
 
 def get_new_messages(messages: List[Message]) -> List[Message]:
