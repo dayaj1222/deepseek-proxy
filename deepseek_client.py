@@ -40,26 +40,81 @@ _lock = threading.Lock()
 
 STATE_PATH = Path(__file__).parent / "session_state.json"
 
-def _load_state() -> dict:
+# In-memory cache — loaded once at startup, flushed to disk on shutdown.
+# Runtime writes hit memory only so we don't rewrite the JSON every request.
+_state_cache: Optional[dict] = None
+
+
+def init_state():
+    """Load session state from disk into memory."""
+    global _state_cache
     try:
         data = json.loads(STATE_PATH.read_text())
-        data.setdefault("threads", {})
-        return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"threads": {}}
+        data = {}
+    data.setdefault("threads", {})
+    _state_cache = data
 
-def _save_state(thread_id: str, session_id: str, parent_message_id: str):
-    state = _load_state()
-    state.setdefault("threads", {})
-    state["threads"][thread_id] = {
-        "session_id": session_id,
-        "parent_message_id": parent_message_id,
-    }
+
+def flush_state():
+    """Write the in-memory state back to disk (single atomic write)."""
+    if _state_cache is None:
+        return
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_PATH.with_suffix(".tmp")
     with open(tmp, "w") as f:
-        json.dump(state, f, indent=2)
+        json.dump(_state_cache, f, indent=2)
     tmp.replace(STATE_PATH)
+
+
+def _load_state() -> dict:
+    """Return the in-memory state dict (lazy-loads on first use)."""
+    if _state_cache is None:
+        init_state()
+    return _state_cache
+
+def _save_state(thread_id: str, session_id: str, parent_message_id: str):
+    """Update thread state in memory only — merges keys so extra fields like
+    total_tokens survive; skips write when nothing changed."""
+    state = _load_state()
+    entry = state.setdefault("threads", {}).setdefault(thread_id, {})
+    if (
+        entry.get("session_id") == session_id
+        and entry.get("parent_message_id") == parent_message_id
+    ):
+        return
+    entry["session_id"] = session_id
+    entry["parent_message_id"] = parent_message_id
+
+
+def get_thread_tokens(thread_id: str) -> int:
+    """Cumulative context-size estimate (tokens) tracked per thread."""
+    state = _load_state()
+    return int(state.get("threads", {}).get(thread_id, {}).get("total_tokens", 0))
+
+
+def add_thread_tokens(thread_id: str, n: int) -> None:
+    """Accumulate tokens for a thread (memory only; persisted on flush)."""
+    if not n:
+        return
+    state = _load_state()
+    entry = state.setdefault("threads", {}).setdefault(thread_id, {})
+    entry["total_tokens"] = int(entry.get("total_tokens", 0)) + n
+
+
+def get_thread_exchanges(thread_id: str) -> int:
+    """Cumulative user/tool exchange count for a thread (for reminder pacing)."""
+    state = _load_state()
+    return int(state.get("threads", {}).get(thread_id, {}).get("exchanges", 0))
+
+
+def bump_thread_exchanges(thread_id: str, n: int) -> None:
+    """Count n new exchanges for a thread (memory only; persisted on flush)."""
+    if not n:
+        return
+    state = _load_state()
+    entry = state.setdefault("threads", {}).setdefault(thread_id, {})
+    entry["exchanges"] = int(entry.get("exchanges", 0)) + n
 
 async def _ensure_client():
     global _client

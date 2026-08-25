@@ -5,6 +5,7 @@ import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
 from config import estimate_tokens
+from deepseek_client import add_thread_tokens
 from tool_parser import parse_tool_call_json
 
 
@@ -36,6 +37,7 @@ async def hybrid_stream_generator(
     model: str,
     thread_id: str,
     prompt_tokens: int,
+    turn_prompt: int,
 ) -> AsyncGenerator[str, None]:
     state = "TEXT"
     peek_buf = ""
@@ -102,16 +104,40 @@ async def hybrid_stream_generator(
                         json_buf = ""
 
         # Stream ended
+        if state == "TOOL" and json_buf:
+            # Truncated mid-call: salvage via repair, emit as tool_call,
+            # otherwise drop silently — never leak raw JSON as chat text.
+            try:
+                tc = parse_tool_call_json(json_buf)
+            except Exception:
+                tc = None
+            if tc:
+                tool_calls.append(tc)
+                idx = len(tool_calls) - 1
+                yield format_sse({
+                    "id": chunk_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {
+                        "role": "assistant", "content": None,
+                        "tool_calls": [{"index": idx, **tc}],
+                    }, "finish_reason": None}],
+                })
+            else:
+                log.warning("Dropped unparseable truncated tool call (%d chars)", len(json_buf))
+            json_buf = ""
+
         if tool_calls:
             all_args = json.dumps([tc["function"]["arguments"] for tc in tool_calls])
+            completion_tokens = estimate_tokens(all_args)
+            add_thread_tokens(thread_id, turn_prompt + completion_tokens)
             yield format_sse({
                 "id": chunk_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
-                    "completion_tokens": estimate_tokens(all_args),
-                    "total_tokens": prompt_tokens + estimate_tokens(all_args),
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
                 },
             })
             yield "data: [DONE]\n\n"
@@ -128,14 +154,16 @@ async def hybrid_stream_generator(
                     "choices": [{"index": 0, "delta": {"content": c}, "finish_reason": None}],
                 })
 
+        completion_tokens = estimate_tokens(text_buf)
+        add_thread_tokens(thread_id, turn_prompt + completion_tokens)
         yield format_sse({
             "id": chunk_id, "object": "chat.completion.chunk",
             "created": created, "model": model,
-            "choices": [{"index": 0, "delta": {"content": text_buf}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": prompt_tokens,
-                "completion_tokens": estimate_tokens(text_buf),
-                "total_tokens": prompt_tokens + estimate_tokens(text_buf),
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
             },
         })
         yield "data: [DONE]\n\n"

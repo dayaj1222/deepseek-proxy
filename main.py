@@ -1,7 +1,10 @@
 import asyncio
+import atexit
 import hashlib
 import json
 import logging
+import os
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -12,7 +15,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import PROXY_HOST, PROXY_PORT, REQUEST_DELAY, estimate_tokens
-from deepseek_client import generate_response, shutdown_client
+from deepseek_client import (
+    add_thread_tokens,
+    bump_thread_exchanges,
+    flush_state,
+    generate_response,
+    get_thread_exchanges,
+    get_thread_tokens,
+    init_state,
+    shutdown_client,
+)
 from streaming_handler import hybrid_stream_generator
 from tool_parser import extract_tool_calls, inject_tool_descriptions
 
@@ -128,6 +140,7 @@ def build_prompt(
     tools: Optional[List[Tool]] = None,
     include_system: bool = True,
     include_tools: bool = True,
+    exchange_offset: int = 0,
 ) -> str:
     """Build a plain‑text prompt from the message list."""
     parts = []
@@ -168,6 +181,22 @@ def build_prompt(
     if last_role == "tool":
         parts.append("Now continue with the task based on the tool result above.")
 
+    # Re-anchor the tool-call format every 2nd user message OR tool result.
+    # Prompts are deltas (only new messages), so exchange_offset carries the
+    # per-thread cumulative count across requests — without it the counter
+    # restarts at 0 each turn and never reaches N in agent sessions.
+    if tools:
+        reminder = '[TOOL CALL]{"function": "name", "arguments": {...}}[/TOOL CALL]'
+        exchange_count = exchange_offset
+        final_parts = []
+        for part in parts:
+            final_parts.append(part)
+            if part.startswith("User: ") or part.startswith("Tool result (id="):
+                exchange_count += 1
+                if exchange_count % 2 == 0:
+                    final_parts.append(f"Tool format reminder: {reminder}")
+        parts = final_parts
+
     prompt = "\n\n".join(parts)
     return prompt
 
@@ -187,10 +216,22 @@ async def handle_chat_request(request: ChatRequest):
         is_first,
     )
 
-    prompt = build_prompt(
-        new_messages, request.tools, include_system=is_first, include_tools=is_first
+    # Count this turn's exchanges (user/tool messages) for reminder pacing
+    prev_exchanges = get_thread_exchanges(thread_id)
+    turn_exchanges = sum(
+        1 for m in new_messages if m.role in ("user", "tool")
     )
-    prompt_tokens = estimate_tokens(str(request.messages))
+
+    prompt = build_prompt(
+        new_messages, request.tools, include_system=is_first, include_tools=is_first,
+        exchange_offset=prev_exchanges,
+    )
+    bump_thread_exchanges(thread_id, turn_exchanges)
+    # Cumulative accounting: report the full context the model sees this turn
+    # (DeepSeek holds prior turns server-side), then grow the stored total.
+    base_tokens = get_thread_tokens(thread_id)
+    turn_prompt_tokens = estimate_tokens(prompt)
+    prompt_tokens = base_tokens + turn_prompt_tokens
 
     if REQUEST_DELAY > 0:
         log.info("Delaying request by %.2f seconds", REQUEST_DELAY)
@@ -199,7 +240,7 @@ async def handle_chat_request(request: ChatRequest):
     if request.stream:
         response_gen = generate_response(thread_id, prompt, model=request.model, stream=True)
         return StreamingResponse(
-            hybrid_stream_generator(response_gen, request.model, thread_id, prompt_tokens),
+            hybrid_stream_generator(response_gen, request.model, thread_id, prompt_tokens, turn_prompt_tokens),
             media_type="text/event-stream",
         )
 
@@ -217,6 +258,7 @@ async def handle_chat_request(request: ChatRequest):
         )
 
     completion_tokens = estimate_tokens(full_response or json.dumps(tool_calls))
+    add_thread_tokens(thread_id, turn_prompt_tokens + completion_tokens)
 
     if tool_calls:
         chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -271,9 +313,29 @@ async def handle_chat_request(request: ChatRequest):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Proxy starting up")
-    yield
-    log.info("Proxy shutting down")
-    await shutdown_client()
+    init_state()
+
+    def _flush_and_die(signum, _frame):
+        log.info("Signal %s received — flushing state to disk", signum)
+        flush_state()
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    # uvicorn handles SIGINT/SIGTERM gracefully (runs the shutdown below);
+    # these would otherwise kill the process with no flush:
+    for sig in (signal.SIGHUP, signal.SIGQUIT):
+        try:
+            signal.signal(sig, _flush_and_die)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    atexit.register(flush_state)
+    try:
+        yield
+    finally:
+        log.info("Proxy shutting down")
+        flush_state()
+        await shutdown_client()
 
 
 app = FastAPI(title="DeepSeek OpenAI Proxy", lifespan=lifespan)

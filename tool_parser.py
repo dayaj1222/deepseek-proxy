@@ -29,12 +29,84 @@ def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
     return tool_calls
 
 
+def _repair_json_object(s: str) -> Optional[str]:
+    """Best-effort structural repair of a near-miss JSON object.
+
+    Handles DeepSeek's two observed failure modes without touching valid JSON:
+    1. Missing closers (truncated output, e.g. outer ``}`` omitted before
+       ``[/TOOL CALL]``) — appends the needed ``]``/``}``.
+    2. Stray closers in the tail (e.g. ``"}]}}``) — drops ``]`` when no array
+       is open and truncates past the top-level object's close.
+
+    String-aware (braces inside quoted values are ignored). Returns None if
+    the repaired result still doesn't parse.
+    """
+    s = s.strip()
+    if not s.startswith("{"):
+        return None
+    out: List[str] = []
+    depth = 0   # { } nesting
+    bd = 0      # [ ] nesting
+    in_str = False
+    esc = False
+    closed = False
+    for ch in s:
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch == "{":
+            depth += 1
+            out.append(ch)
+        elif ch == "}":
+            depth -= 1
+            out.append(ch)
+            if depth == 0:
+                closed = True
+                break  # truncate anything after the top-level object closes
+        elif ch == "[":
+            bd += 1
+            out.append(ch)
+        elif ch == "]":
+            if bd > 0:
+                bd -= 1
+                out.append(ch)
+            # else: stray closer — drop it
+        else:
+            out.append(ch)
+    if in_str:
+        out.append('"')  # unterminated string — close it
+    core = "".join(out)
+    if not closed:
+        core += "]" * bd + "}" * depth
+    try:
+        json.loads(core)
+    except json.JSONDecodeError:
+        return None
+    return core
+
+
 def parse_tool_call_json(json_str: str) -> Optional[Dict[str, Any]]:
     """Parse a JSON string and convert to an OpenAI tool_call object."""
+    data = None
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError:
-        return None
+        repaired = _repair_json_object(json_str)
+        if repaired is None:
+            return None
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
 
     if isinstance(data, dict):
         return _to_tool_call(data)
@@ -105,14 +177,28 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
     instruction = (
         "\n\n"
         "---\n"
-        "## Tool Call Format\n\n"
-        "Wrap every tool call with the tags:\n"
-        "[TOOL CALL]{\"function\": \"tool_name\", \"arguments\": {...}}[/TOOL CALL]\n\n"
-        "You may emit multiple tool calls in a single response — "
-        "each one wrapped in its own pair of tags.\n"
-        "Only pure JSON between the tags — no text, no markdown, no extra whitespace.\n"
-        "Do NOT include an \"id\" field — the proxy auto-generates one.\n"
-        "Only the format above is accepted.\n\n"
+        "## Tool Call Format — MANDATORY\n\n"
+        "To call a tool, output exactly this and nothing else:\n"
+        '[TOOL CALL]{"function": "tool_name", "arguments": {"param": "value"}}[/TOOL CALL]\n\n'
+        "### Rules — a violation means your call is silently discarded\n"
+        '1. Between the tags: ONE complete, balanced JSON object. Every "{" you open '
+        'needs its matching "}". The tail of every call is exactly:\n'
+        "} }[/TOOL CALL]\n"
+        "(first } closes arguments, second } closes the object).\n"
+        '2. Top-level keys are exactly "function" and "arguments". Raw parameters at '
+        'top level (e.g. {"command": ...} alone) are INVALID.\n'
+        "3. [/TOOL CALL] at the end is mandatory. Unclosed or truncated calls are dropped.\n"
+        '4. Inside string values, escape quotes as \\\".\n'
+        "5. NEVER use any other calling syntax — no XML, no <parameter>, "
+        "<function_calls>, or similar. Only this bracket format works here.\n"
+        "6. Multiple calls: emit multiple complete [TOOL CALL]...[/TOOL CALL] blocks "
+        "back to back, with no text between them.\n"
+        "7. Do NOT include an \"id\" field — the proxy auto-generates one.\n\n"
+        "### Correct example\n"
+        '[TOOL CALL]{"function": "terminal", "arguments": {"command": "ls -la"}}[/TOOL CALL]\n\n'
+        "### Wrong examples\n"
+        '[TOOL CALL]{"function": "terminal", "arguments": {"command": "ls"}[/TOOL CALL]  <- missing final }\n'
+        '[TOOL CALL]{"command": "ls"}[/TOOL CALL]  <- missing function/arguments wrapper\n\n'
         "## Available Tools\n\n"
         f"{tools_block}\n"
         "---"
