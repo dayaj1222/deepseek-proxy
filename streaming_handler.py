@@ -1,5 +1,6 @@
 import json
 import logging
+from logger import get_logger
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -14,7 +15,7 @@ from tool_parser import (
     extract_name_from_header,
 )
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 OPEN = TOOL_TAG_OPEN
 CLOSE = TOOL_TAG_CLOSE

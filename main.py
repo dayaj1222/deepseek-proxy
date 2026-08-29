@@ -15,12 +15,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import (
+    MODELS,
     PROXY_HOST,
     PROXY_PORT,
     REQUEST_DELAY,
     TOOL_CALL_TEMPLATE,
     TOOL_REMINDER_INTERVAL,
     estimate_tokens,
+    render_prompt,
+    settings,
 )
 from deepseek_client import (
     add_thread_tokens,
@@ -39,10 +42,9 @@ from tool_parser import (
     inject_tool_descriptions,
 )
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
-log = logging.getLogger(__name__)
+from logger import clear_request_id, get_logger, set_request_id
+
+log = get_logger(__name__)
 
 
 # ---- Pydantic models ----
@@ -152,7 +154,13 @@ def build_prompt(
     include_tools: bool = True,
     exchange_offset: int = 0,
 ) -> str:
-    """Build a plain‑text prompt from the message list."""
+    """Build a plain-text prompt from the message list.
+
+    Role prefixes, the continuation line, and the periodic format reminder all
+    come from config.toml [prompts], rendered through render_prompt (which
+    resolves the tool-call tag placeholders).
+    """
+    prompts = settings.prompts
     parts = []
     system_content = None
     other_messages = []
@@ -170,41 +178,55 @@ def build_prompt(
                 system_text, [t.model_dump() for t in tools]
             )
         if system_text:
-            parts.append(f"System: {system_text}")
+            prefix = prompts.get("role_prefix_system", "System: {content}")
+            parts.append(render_prompt(prefix, content=system_text))
 
     last_role = None
     for msg in other_messages:
         content = normalize_content(msg.content)
         if msg.role == "user":
-            parts.append(f"User: {content}")
+            prefix = prompts.get("role_prefix_user", "User: {content}")
+            parts.append(render_prompt(prefix, content=content))
         elif msg.role == "assistant":
             if msg.tool_calls:
                 if content:
-                    parts.append(f"Assistant: {content}")
+                    prefix = prompts.get("role_prefix_assistant", "Assistant: {content}")
+                    parts.append(render_prompt(prefix, content=content))
+                prefix = prompts.get(
+                    "role_prefix_assistant_tool", "Assistant:\n{content}"
+                )
                 parts.append(
-                    "Assistant:\n" + format_tool_calls_for_history(msg.tool_calls)
+                    render_prompt(
+                        prefix, content=format_tool_calls_for_history(msg.tool_calls)
+                    )
                 )
             else:
-                parts.append(f"Assistant: {content}")
+                prefix = prompts.get("role_prefix_assistant", "Assistant: {content}")
+                parts.append(render_prompt(prefix, content=content))
         elif msg.role == "tool":
-            parts.append(f"Tool result (id={msg.tool_call_id}):\n{content}")
+            prefix = prompts.get(
+                "role_prefix_tool", "Tool result (id={tool_call_id}):\n{content}"
+            )
+            parts.append(
+                render_prompt(
+                    prefix, tool_call_id=msg.tool_call_id, content=content
+                )
+            )
         last_role = msg.role
 
     if last_role == "tool":
-        parts.append("Now continue with the task based on the tool result above.")
-
-    # Re-anchor the tool-call format every N user/tool messages (N from TOOL_REMINDER_INTERVAL).
-    # Prompts are deltas (only new messages), so exchange_offset carries the
-    # per-thread cumulative count across requests — without it the counter
-    # restarts at 0 each turn.
-    if tools and TOOL_REMINDER_INTERVAL > 0:
-        hard_reminder = (
-            "[FORMAT REMINDER] Tool calls must use exactly this shape:\n"
-            f"{TOOL_CALL_TEMPLATE}\n"
-            "Tool name in the <invoke> name attribute; one "
-            '<parameter name="...">value</parameter> element per argument. '
-            "Malformed calls are silently discarded."
+        parts.append(
+            prompts.get(
+                "continue_after_tool",
+                "Now continue with the task based on the tool result above.",
+            )
         )
+
+    # Re-anchor the tool-call format every N user/tool messages (N from
+    # TOOL_REMINDER_INTERVAL). Prompts are deltas (only new messages), so
+    # exchange_offset carries the per-thread cumulative count across requests.
+    if tools and TOOL_REMINDER_INTERVAL > 0:
+        hard_reminder = render_prompt(prompts.get("format_reminder", ""))
         exchange_count = exchange_offset
         final_parts = []
         for part in parts:
@@ -218,11 +240,23 @@ def build_prompt(
     return prompt
 
 
+
 # ---- Main request handler ----
 async def handle_chat_request(request: ChatRequest):
     thread_id = get_thread_id(request)
+    set_request_id(thread_id)
+    try:
+        return await _handle(request, thread_id)
+    finally:
+        clear_request_id()
+
+
+async def _handle(request: ChatRequest, thread_id: str):
     is_first = not any(m.role == "assistant" for m in request.messages)
     new_messages = get_new_messages(request.messages)
+
+    if settings.debug:
+        log.debug("Request body: %s", request.model_dump_json(indent=2))
 
     log.info(
         "chat/completions  thread=%s  total=%d  new=%d  tools=%d  first=%s",
@@ -250,6 +284,9 @@ async def handle_chat_request(request: ChatRequest):
     base_tokens = get_thread_tokens(thread_id)
     turn_prompt_tokens = estimate_tokens(prompt)
     prompt_tokens = base_tokens + turn_prompt_tokens
+
+    if settings.debug:
+        log.debug("Prompt (%d chars):\n%s", len(prompt), prompt)
 
     if REQUEST_DELAY > 0:
         log.info("Delaying request by %.2f seconds", REQUEST_DELAY)
@@ -280,6 +317,8 @@ async def handle_chat_request(request: ChatRequest):
 
     tool_calls = extract_tool_calls(full_response) if request.tools else []
     log.info("Tool calls detected: %d", len(tool_calls))
+    if settings.debug and tool_calls:
+        log.debug("Extracted tool calls: %s", json.dumps(tool_calls, indent=2))
     for tc in tool_calls:
         log.info(
             "  tool: %s  args=%s", tc["function"]["name"], tc["function"]["arguments"]
@@ -401,48 +440,7 @@ async def chat_completions(request: Request):
 async def list_models():
     return {
         "object": "list",
-        "data": [
-            {
-                "id": "deepseek-v4-pro",
-                "object": "model",
-                "created": 1745452800,
-                "owned_by": "deepseek",
-                "context_length": 1000000,
-                "max_completion_tokens": 384000,
-            },
-            {
-                "id": "deepseek-v4-flash",
-                "object": "model",
-                "created": 1745452800,
-                "owned_by": "deepseek",
-                "context_length": 1000000,
-                "max_completion_tokens": 384000,
-            },
-            {
-                "id": "deepseek-chat",
-                "object": "model",
-                "created": 1677610602,
-                "owned_by": "deepseek",
-                "context_length": 1000000,
-                "max_completion_tokens": 384000,
-            },
-            {
-                "id": "deepseek-reasoner",
-                "object": "model",
-                "created": 1745452800,
-                "owned_by": "deepseek",
-                "context_length": 1000000,
-                "max_completion_tokens": 384000,
-            },
-            {
-                "id": "deepseek-v4",
-                "object": "model",
-                "created": 1745452800,
-                "owned_by": "deepseek",
-                "context_length": 1000000,
-                "max_completion_tokens": 384000,
-            },
-        ],
+        "data": MODELS,
     }
 
 

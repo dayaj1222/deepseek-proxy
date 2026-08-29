@@ -19,19 +19,21 @@ before parsing and unmasked in final values.
 
 import json
 import logging
+from logger import get_logger
 import re
 import uuid
 from typing import Any, Dict, List, Optional
 
 from config import (
-    TOOL_CALL_TEMPLATE,
     TOOL_PARAM_CLOSE,
     TOOL_PARAM_OPEN,
     TOOL_TAG_CLOSE,
     TOOL_TAG_OPEN,
+    render_prompt,
+    settings,
 )
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # Regex for complete blocks. Group 1 = header attrs, group 2 = body.
 _INVOKE_RE = re.compile(
@@ -48,7 +50,7 @@ MAX_HEADER_LEN = 256
 
 # XML parameter format
 _XML_PARAM_RE = re.compile(
-    r"""<parameter\s+name\s*=\s*(["'])([^"']+)\1\s*>(.*?)</parameter>""",
+    r"""<parameter\s+name\s*=\s*(["'])([^"']+)\1[^>]*>(.*?)</parameter>""",
     re.DOTALL,
 )
 
@@ -389,11 +391,17 @@ def _to_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) -> str:
-    """Append tool definitions and usage instructions to the system prompt."""
+    """Append tool definitions and usage instructions to the system prompt.
+
+    All prompt text comes from config.toml [prompts]; the raw tool-call tag
+    strings are substituted from Settings. Returns the system prompt unchanged
+    when no tools are supplied.
+    """
     if not tools:
         return system_prompt
 
-    tool_sections = []
+    prompts = settings.prompts
+    sections = []
     for tool in tools:
         if tool.get("type") != "function":
             continue
@@ -402,70 +410,38 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
         if not name:
             continue
         params = json.dumps(func.get("parameters") or {}, indent=2, ensure_ascii=False)
-        tool_sections.append(
-            f"### {name}\n"
-            f"Description: {func.get('description', 'No description provided.')}\n"
-            f"Parameters (JSON Schema):\n```json\n{params}\n```"
+        description = func.get("description") or "No description provided."
+        sections.append(
+            render_prompt(
+                prompts.get(
+                    "tool_section",
+                    "### {name}\nDescription: {description}\nParameters (JSON Schema):\n```json\n{params}\n```",
+                ),
+                name=name,
+                description=description,
+                params=params,
+            )
         )
 
-    tools_block = "\n\n".join(tool_sections)
+    tools_block = "\n\n".join(sections)
 
-    instruction = (
+    instruction = prompts.get("tool_instruction", "")
+    instruction = render_prompt(instruction, tools_block=tools_block)
+
+    header = prompts.get(
+        "protocol_header", "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
+    )
+    tools_header = prompts.get("tools_header", "## Available Tools")
+    final_reminder = prompts.get("final_reminder", "")
+    final_reminder = render_prompt(final_reminder, tools_block=tools_block)
+
+    block = (
         "\n\n---\n"
-        "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT\n\n"
-        "To call a tool, emit a block in EXACTLY this format:\n\n"
-        f"{TOOL_CALL_TEMPLATE}\n\n"
-        "The tool name goes in the name attribute of the opening <invoke> tag. "
-        "Each argument is one <parameter> element: the parameter name goes in "
-        "its name attribute, and the value is the raw text between "
-        "<parameter> and </parameter>. Each property in a tool's Parameters "
-        "(JSON Schema) below corresponds to one <parameter> element.\n\n"
-        "### Hard rules — violating any rule means your call is silently discarded\n"
-        "1. ATTRIBUTES: the opening tag MUST carry a name attribute: "
-        '<invoke name="tool_name">. Extra attributes (e.g. type) are ignored, '
-        "but name is required.\n"
-        "2. PARAMETERS: every argument MUST be its own "
-        '<parameter name="...">value</parameter> element. Do NOT put a JSON '
-        "object between the <invoke> tags.\n"
-        "3. VALUES: the text between <parameter> tags is taken literally. "
-        "Write strings, paths, code and multi-line text as plain text with NO "
-        'escaping (no \\n, no \\"). Numbers, booleans and arrays may be '
-        'written as JSON (42, true, ["a", "b"]) and are converted automatically.\n'
-        "4. LITERAL MARKERS: if a value must contain the literal text <invoke, "
-        "</invoke>, <parameter or </parameter> (e.g. code that parses tool "
-        "calls), write a backslash directly before it: \\</parameter>. The "
-        "proxy removes the backslash and stores the marker as plain text. To "
-        "write a backslash immediately before a marker, double it: \\\\<invoke. "
-        "Inside JSON payloads use <\\/invoke> instead.\n"
-        "5. NO EXTRAS: never add an id field (auto-generated), never wrap the "
-        "block in ``` code fences ```.\n"
-        "6. MULTIPLE CALLS: emit multiple complete blocks back to back.\n"
-        "7. You may write normal text before or after tool call blocks — but "
-        "NEVER write text inside the tags, and never emit <invoke> without "
-        "calling a tool. Outside tool blocks, the same backslash rule applies "
-        "if you need to SHOW the literal text <invoke> or </invoke> in a reply.\n\n"
-        "### Correct examples\n"
-        '<invoke name="terminal">\n'
-        '<parameter name="command">ls -la</parameter>\n'
-        "</invoke>\n\n"
-        '<invoke name="write_file">\n'
-        '<parameter name="path">src/main.py</parameter>\n'
-        '<parameter name="content">def main():\n    print("hello")\n</parameter>\n'
-        "</invoke>\n\n"
-        '<invoke name="get_time"></invoke>\n\n'
-        "### Wrong examples (silently discarded)\n"
-        '<invoke name="terminal">{"command": "ls"}</invoke>  <- JSON payload: '
-        "arguments must be <parameter> elements, not a JSON object\n"
-        '<invoke name="terminal">command: ls</invoke>  <- bare text: arguments '
-        "must be wrapped in <parameter> tags\n"
-        '<invoke>{"command": "ls"}</invoke>  <- missing name attribute\n\n'
-        "## Available Tools\n\n"
+        f"{header}\n\n"
+        f"{instruction}\n\n"
+        f"{tools_header}\n\n"
         f"{tools_block}\n"
         "---\n"
-        "FINAL REMINDER: tool calls use exactly this form:\n"
-        f"{TOOL_CALL_TEMPLATE}\n"
-        'name in the <invoke> attribute; one <parameter name="...">value</parameter> '
-        "element per argument."
+        f"{final_reminder}"
     )
-
-    return system_prompt + instruction
+    return system_prompt + block

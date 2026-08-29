@@ -1,0 +1,124 @@
+# DeepSeek OpenAI Proxy configuration — source of truth.
+# Precedence: process env vars override these values; else these are used.
+
+# --- DeepSeek credentials (prefer token over email+password) ---
+deepseek_token = ''
+deepseek_email = 'REDACTED_EMAIL'
+deepseek_password = 'REDACTED_PASSWORD'
+
+# Model type: DEFAULT, EXPERT, or VISION
+model_type = "DEFAULT"
+
+# --- Server ---
+proxy_host = "0.0.0.0"
+proxy_port = 8000
+
+# --- Behaviour ---
+request_delay = 0.0
+tool_reminder_interval = 0
+tool_buffer_limit = 100000
+
+# --- Persistence ---
+state_path = "session_state.json"
+
+# --- Logging ---
+log_level = "INFO"
+log_format = "pretty"
+debug = false
+
+# --- Prompt templates injected by the proxy ---
+[prompts]
+protocol_header = "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
+tool_instruction = """
+To call a tool, emit a block in EXACTLY this format:
+
+{tool_call_template}
+
+The tool name goes in the name attribute of the opening TOOL_CALL_OPEN tag.
+Each argument is one TOOL_PARAM_OPEN element: the parameter name goes in its
+name attribute, and the value is the raw text between TOOL_PARAM_OPEN and
+TOOL_PARAM_CLOSE. Each property in a tool's Parameters (JSON Schema) below
+corresponds to one TOOL_PARAM_OPEN element.
+
+### Hard rules — violating any rule means your call is silently discarded
+1. ATTRIBUTES: the opening tag MUST carry a name attribute:
+   TOOL_CALL_OPEN name="tool_name". Extra attributes (e.g. type) are ignored,
+   but name is required.
+2. PARAMETERS: every argument MUST be its own
+   TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element. Do NOT put a JSON
+   object between the TOOL_CALL_OPEN tags.
+3. VALUES: the text between TOOL_PARAM_OPEN tags is taken literally.
+4. LITERAL MARKERS: if a value must contain the literal text TOOL_CALL_OPEN,
+   TOOL_CALL_CLOSE, TOOL_PARAM_OPEN or TOOL_PARAM_CLOSE, write a backslash
+   directly before it.
+5. NO EXTRAS: never add an id field, never wrap the block in code fences.
+6. MULTIPLE CALLS: emit multiple complete blocks back to back.
+7. You may write normal text before or after tool call blocks.
+"""
+
+tools_header = "## Available Tools"
+final_reminder = """FINAL REMINDER: tool calls use exactly this form:
+
+{tool_call_template}
+
+name in the TOOL_CALL_OPEN attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument."""
+
+format_reminder = """[FORMAT REMINDER] Tool calls must use exactly this shape:
+{tool_call_template}
+Tool name in the TOOL_CALL_OPEN name attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument. Malformed calls are silently discarded."""
+
+tool_section = """### {name}
+Description: {description}
+Parameters (JSON Schema):
+```json
+{params}
+```"""
+
+continue_after_tool = "Now continue with the task based on the tool result above."
+
+role_prefix_system = "System: {content}"
+role_prefix_user = "User: {content}"
+role_prefix_assistant = "Assistant: {content}"
+role_prefix_assistant_tool = "Assistant:\n{content}"
+role_prefix_tool = "Tool result (id={tool_call_id}):\n{content}"
+
+# --- Model catalog served by /v1/models ---
+[[models]]
+id = "deepseek-v4-pro"
+object = "model"
+created = 1745452800
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[models]]
+id = "deepseek-v4-flash"
+object = "model"
+created = 1745452800
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[models]]
+id = "deepseek-chat"
+object = "model"
+created = 1677610602
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[models]]
+id = "deepseek-reasoner"
+object = "model"
+created = 1745452800
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[models]]
+id = "deepseek-v4"
+object = "model"
+created = 1745452800
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000

@@ -1,5 +1,6 @@
 import json
 import logging
+from logger import get_logger
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Optional
 import threading
@@ -9,7 +10,7 @@ from aiodeepseek.types.exceptions import DeepSeekError
 from aiodeepseek.conversation import Conversation
 from config import DEEPSEEK_TOKEN, DEEPSEEK_EMAIL, DEEPSEEK_PASSWORD, MODEL_TYPE
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _model_map = {
     "DEFAULT": ModelType.DEFAULT,
