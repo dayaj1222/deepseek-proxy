@@ -14,7 +14,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from config import PROXY_HOST, PROXY_PORT, REQUEST_DELAY, estimate_tokens
+from config import (
+    PROXY_HOST,
+    PROXY_PORT,
+    REQUEST_DELAY,
+    TOOL_CALL_TEMPLATE,
+    TOOL_REMINDER_INTERVAL,
+    estimate_tokens,
+)
 from deepseek_client import (
     add_thread_tokens,
     bump_thread_exchanges,
@@ -27,7 +34,6 @@ from deepseek_client import (
 )
 from streaming_handler import hybrid_stream_generator
 from tool_parser import extract_tool_calls, inject_tool_descriptions
-
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -181,22 +187,26 @@ def build_prompt(
     if last_role == "tool":
         parts.append("Now continue with the task based on the tool result above.")
 
-    # Re-anchor the tool-call format every 2nd user message OR tool result.
+    # Re-anchor the tool-call format every N user/tool messages (N from TOOL_REMINDER_INTERVAL).
     # Prompts are deltas (only new messages), so exchange_offset carries the
     # per-thread cumulative count across requests — without it the counter
-    # restarts at 0 each turn and never reaches N in agent sessions.
-    if tools:
-        reminder = '[TOOL CALL]{"function": "name", "arguments": {...}}[/TOOL CALL]'
+    # restarts at 0 each turn.
+    if tools and TOOL_REMINDER_INTERVAL > 0:
+        hard_reminder = (
+            "[FORMAT REMINDER] Tool calls must use exactly this shape:\n"
+            f"{TOOL_CALL_TEMPLATE}\n"
+            "Tool name goes in the name attribute; the tool's parameters are the "
+            "JSON object between the tags. Malformed calls are silently discarded."
+        )
         exchange_count = exchange_offset
         final_parts = []
         for part in parts:
             final_parts.append(part)
             if part.startswith("User: ") or part.startswith("Tool result (id="):
                 exchange_count += 1
-                if exchange_count % 2 == 0:
-                    final_parts.append(f"Tool format reminder: {reminder}")
+                if exchange_count % TOOL_REMINDER_INTERVAL == 0:
+                    final_parts.append(hard_reminder)
         parts = final_parts
-
     prompt = "\n\n".join(parts)
     return prompt
 
@@ -218,12 +228,13 @@ async def handle_chat_request(request: ChatRequest):
 
     # Count this turn's exchanges (user/tool messages) for reminder pacing
     prev_exchanges = get_thread_exchanges(thread_id)
-    turn_exchanges = sum(
-        1 for m in new_messages if m.role in ("user", "tool")
-    )
+    turn_exchanges = sum(1 for m in new_messages if m.role in ("user", "tool"))
 
     prompt = build_prompt(
-        new_messages, request.tools, include_system=is_first, include_tools=is_first,
+        new_messages,
+        request.tools,
+        include_system=is_first,
+        include_tools=is_first,
         exchange_offset=prev_exchanges,
     )
     bump_thread_exchanges(thread_id, turn_exchanges)
@@ -238,14 +249,24 @@ async def handle_chat_request(request: ChatRequest):
         await asyncio.sleep(REQUEST_DELAY)
 
     if request.stream:
-        response_gen = generate_response(thread_id, prompt, model=request.model, stream=True)
+        response_gen = generate_response(
+            thread_id, prompt, model=request.model, stream=True
+        )
         return StreamingResponse(
-            hybrid_stream_generator(response_gen, request.model, thread_id, prompt_tokens, turn_prompt_tokens),
+            hybrid_stream_generator(
+                response_gen,
+                request.model,
+                thread_id,
+                prompt_tokens,
+                turn_prompt_tokens,
+            ),
             media_type="text/event-stream",
         )
 
     full_response = ""
-    async for chunk in generate_response(thread_id, prompt, model=request.model, stream=False):
+    async for chunk in generate_response(
+        thread_id, prompt, model=request.model, stream=False
+    ):
         full_response = chunk
 
     log.info("Response received, %d chars", len(full_response))
@@ -358,7 +379,10 @@ async def chat_completions(request: Request):
         try:
             chat_req = ChatRequest(**parsed)
         except Exception as ve:
-            log.error("Validation error for request:\n%s", json.dumps(parsed, indent=2)[:10000])
+            log.error(
+                "Validation error for request:\n%s",
+                json.dumps(parsed, indent=2)[:10000],
+            )
             log.error("Validation error details: %s", ve)
             return JSONResponse(status_code=422, content={"detail": str(ve)})
         return await handle_chat_request(chat_req)

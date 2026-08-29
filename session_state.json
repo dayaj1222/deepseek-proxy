@@ -1489,6 +1489,159 @@
       "session_id": "9aa0f30a-92af-4706-acf9-18330e1a22ff",
       "parent_message_id": "746",
       "total_tokens": 301433
+    },
+    "title_af6d069c171d23cce75ea95d": {
+      "exchanges": 1,
+      "session_id": "32bd6900-ccf9-452a-9c41-ff303eaba918",
+      "parent_message_id": "2",
+      "total_tokens": 251
+    },
+    "thread_af6d069c171d23cce75ea95d": {
+      "exchanges": 31,
+      "session_id": "6722955c-f1de-49d5-acd9-6294cabca5df",
+      "parent_message_id": "60",
+      "total_tokens": 54254
+    },
+    "title_d53cc17a5b44c50db93761b3": {
+      "exchanges": 1,
+      "session_id": "59b1be8c-9f2d-40b6-ad43-0cc14cd03d13",
+      "parent_message_id": "2",
+      "total_tokens": 503
+    },
+    "thread_8e54e88a68875bb8de8b4173": {
+      "exchanges": 11,
+      "session_id": "d3a410fb-ea30-4883-979d-211174d90267",
+      "parent_message_id": "16",
+      "total_tokens": 36440
+    },
+    "title_a1170afd77ae469454999e29": {
+      "exchanges": 1,
+      "session_id": "10cbd321-cf49-4429-8c97-19f70b004360",
+      "parent_message_id": "2",
+      "total_tokens": 392
+    },
+    "thread_123c7dcd0b7b34ea67ce7c2a": {
+      "exchanges": 313,
+      "session_id": "bbe1a060-e4bc-49da-af72-0cd41b8cfc1d",
+      "parent_message_id": "512",
+      "total_tokens": 298103
+    },
+    "thread_d94d1cfe3988f133824c6bc1": {
+      "exchanges": 28,
+      "session_id": "5ffe394d-04b9-4702-bbb4-9c05df1be30d",
+      "parent_message_id": "54",
+      "total_tokens": 9743
+    },
+    "thread_48d10fd9f057f64ba560ed42": {
+      "exchanges": 67,
+      "session_id": "244c1f23-e698-48ee-9b36-df8a717c8963",
+      "parent_message_id": "136",
+      "total_tokens": 100321
+    },
+    "thread_53ba95e3d1e0b7cc09d7dd01": {
+      "exchanges": 53,
+      "session_id": "69f8da42-beca-4694-b003-6df42705a5ed",
+      "parent_message_id": "66",
+      "total_tokens": 85481
+    },
+    "title_cadde21d15fb7edec849d990": {
+      "exchanges": 1,
+      "session_id": "90191db2-aa75-4ff3-acee-93aa3dbacfaf",
+      "parent_message_id": "2",
+      "total_tokens": 255
+    },
+    "thread_9489fbd2069b3f494889e242": {
+      "exchanges": 123,
+      "session_id": "07a8250f-eec8-4a66-bafa-87a1d920c1ff",
+      "parent_message_id": "246",
+      "total_tokens": 133910
+    },
+    "title_9226bfd82918f756d1d0e1d4": {
+      "exchanges": 1,
+      "session_id": "4c447d43-bfcb-41e6-9c04-dbc7a6b95b74",
+      "parent_message_id": "2",
+      "total_tokens": 500
+    },
+    "thread_e218181e673f4f645eadb2ea": {
+      "exchanges": 207,
+      "session_id": "ca22e271-1cef-4434-9b6d-935b8de75810",
+      "parent_message_id": "386",
+      "total_tokens": 158882
+    },
+    "thread_cf05618e37238b50c70a765c": {
+      "exchanges": 6
+    },
+    "thread_dc57878c81210ae1e7f81e2f": {
+      "exchanges": 3,
+      "session_id": "802b90e3-0f5e-49b4-917e-238455cd1315",
+      "parent_message_id": "6",
+      "total_tokens": 1582
+    },
+    "thread_4c086305205fd3c712d9622c": {
+      "exchanges": 59,
+      "session_id": "53f58e97-fd58-4b8a-b071-60451726270b",
+      "parent_message_id": "76",
+      "total_tokens": 71746
+    },
+    "title_0e66a29c2cfa9155a98496a3": {
+      "exchanges": 2,
+      "session_id": "038bec8f-d496-463a-b2de-ce1f9c7475f9",
+      "parent_message_id": "2",
+      "total_tokens": 250
+    },
+    "thread_0e66a29c2cfa9155a98496a3": {
+      "exchanges": 3,
+      "session_id": "29e7925a-ffbd-477a-8816-94a6a12cdc9c",
+      "parent_message_id": "6",
+      "total_tokens": 2775
+    },
+    "title_93c4e48aba8e0c3680d3042b": {
+      "exchanges": 1,
+      "session_id": "48caaa69-1053-46fd-bc9e-dc3dfaa89096",
+      "parent_message_id": "2",
+      "total_tokens": 248
+    },
+    "thread_93c4e48aba8e0c3680d3042b": {
+      "exchanges": 2,
+      "session_id": "f54cb85b-4aea-4911-8ee7-d12db533984b",
+      "parent_message_id": "2",
+      "total_tokens": 21181
+    },
+    "title_6cd204ff636f4404984840ff": {
+      "exchanges": 1,
+      "session_id": "ceb21bab-d15d-4892-b722-d7a47329d959",
+      "parent_message_id": "2",
+      "total_tokens": 241
+    },
+    "thread_6cd204ff636f4404984840ff": {
+      "exchanges": 83,
+      "session_id": "059aaacd-b63e-4079-97fe-660b5a5910bd",
+      "parent_message_id": "92",
+      "total_tokens": 103177
+    },
+    "title_0c949823e92bd3ad2a419391": {
+      "exchanges": 1,
+      "session_id": "9e033125-24f1-4174-b817-46e4808c326c",
+      "parent_message_id": "2",
+      "total_tokens": 247
+    },
+    "thread_0c949823e92bd3ad2a419391": {
+      "exchanges": 47,
+      "session_id": "3d21cc68-9e01-4693-9482-19bdbd04e192",
+      "parent_message_id": "90",
+      "total_tokens": 77570
+    },
+    "title_a335e0a7f66180bd176d2179": {
+      "exchanges": 1,
+      "session_id": "ec1beb97-9437-4975-84ea-fe646fe70b50",
+      "parent_message_id": "2",
+      "total_tokens": 263
+    },
+    "thread_a335e0a7f66180bd176d2179": {
+      "exchanges": 5,
+      "session_id": "6fa9b424-4452-4228-bdb1-61c3e6f37fcb",
+      "parent_message_id": "8",
+      "total_tokens": 19812
     }
   }
 }
