@@ -1638,10 +1638,28 @@
       "total_tokens": 263
     },
     "thread_a335e0a7f66180bd176d2179": {
-      "exchanges": 5,
+      "exchanges": 63,
       "session_id": "6fa9b424-4452-4228-bdb1-61c3e6f37fcb",
-      "parent_message_id": "8",
-      "total_tokens": 19812
+      "parent_message_id": "90",
+      "total_tokens": 105484
+    },
+    "thread_9978947788ef11c91fe86014": {
+      "exchanges": 28,
+      "session_id": "2b56e65e-fd91-498a-94a6-ab5aa29c72ae",
+      "parent_message_id": "36",
+      "total_tokens": 50824
+    },
+    "title_9978947788ef11c91fe86014": {
+      "exchanges": 2,
+      "session_id": "586b35a2-4437-4438-b905-ce985456bdcc",
+      "parent_message_id": "2",
+      "total_tokens": 257
+    },
+    "thread_311f08004750f96f3608f5fd": {
+      "exchanges": 1,
+      "session_id": "0e870f58-42c3-4277-9d6a-1324500ca310",
+      "parent_message_id": "2",
+      "total_tokens": 7685
     }
   }
 }

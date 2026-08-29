@@ -33,7 +33,11 @@ from deepseek_client import (
     shutdown_client,
 )
 from streaming_handler import hybrid_stream_generator
-from tool_parser import extract_tool_calls, inject_tool_descriptions
+from tool_parser import (
+    extract_tool_calls,
+    format_tool_calls_for_history,
+    inject_tool_descriptions,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -175,8 +179,10 @@ def build_prompt(
             parts.append(f"User: {content}")
         elif msg.role == "assistant":
             if msg.tool_calls:
+                if content:
+                    parts.append(f"Assistant: {content}")
                 parts.append(
-                    f"Assistant (tool calls):\n{json.dumps(msg.tool_calls, indent=2)}"
+                    "Assistant:\n" + format_tool_calls_for_history(msg.tool_calls)
                 )
             else:
                 parts.append(f"Assistant: {content}")
@@ -195,8 +201,9 @@ def build_prompt(
         hard_reminder = (
             "[FORMAT REMINDER] Tool calls must use exactly this shape:\n"
             f"{TOOL_CALL_TEMPLATE}\n"
-            "Tool name goes in the name attribute; the tool's parameters are the "
-            "JSON object between the tags. Malformed calls are silently discarded."
+            "Tool name in the <invoke> name attribute; one "
+            '<parameter name="...">value</parameter> element per argument. '
+            "Malformed calls are silently discarded."
         )
         exchange_count = exchange_offset
         final_parts = []

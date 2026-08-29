@@ -7,7 +7,12 @@ from typing import Any, Dict, List, Optional
 
 from config import TOOL_TAG_CLOSE, TOOL_TAG_OPEN, estimate_tokens
 from deepseek_client import add_thread_tokens
-from tool_parser import MAX_HEADER_LEN, build_tool_call, extract_name_from_header
+from tool_parser import (
+    ESC_TO_SENTINEL,
+    MAX_HEADER_LEN,
+    build_tool_call,
+    extract_name_from_header,
+)
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +20,8 @@ OPEN = TOOL_TAG_OPEN
 CLOSE = TOOL_TAG_CLOSE
 TRIGGER = OPEN[0] if OPEN else None
 
-TEXT, PEEK, HEADER, TOOL = "TEXT", "PEEK", "HEADER", "TOOL"
+TEXT, PEEK, HEADER, TOOL, ESC = "TEXT", "PEEK", "HEADER", "TOOL", "ESC"
+ESC_MARKERS = list(ESC_TO_SENTINEL)
 
 
 def _is_prefix(s: str, target: str) -> bool:
@@ -92,6 +98,8 @@ async def hybrid_stream_generator(
     turn_prompt: int,
 ) -> AsyncGenerator[str, None]:
     state = TEXT
+    esc_from = TEXT
+    esc_buf = ""
     peek_buf = ""
     header_buf = ""
     json_buf = ""
@@ -109,8 +117,36 @@ async def hybrid_stream_generator(
                     yield _content_delta(chunk_id, created, model, char)
                     continue
 
-                if state == TEXT:
-                    if char == TRIGGER:
+                if state == ESC:
+                    cand = esc_buf + char
+                    if cand in ESC_TO_SENTINEL:
+                        if esc_from == TOOL:
+                            json_buf += ESC_TO_SENTINEL[cand]
+                        else:
+                            yield _content_delta(chunk_id, created, model, cand[1:])
+                        state = esc_from
+                        esc_buf = ""
+                    elif any(m.startswith(cand) for m in ESC_MARKERS):
+                        esc_buf = cand
+                    elif esc_buf == "\\" and char == "\\":
+                        if esc_from == TOOL:
+                            json_buf += "\\"
+                        else:
+                            yield _content_delta(chunk_id, created, model, "\\")
+                        esc_buf = "\\"  # stay armed for the next char
+                    else:
+                        literal = esc_buf + char
+                        if esc_from == TOOL:
+                            json_buf += literal
+                        else:
+                            yield _content_delta(chunk_id, created, model, literal)
+                        state = esc_from
+                        esc_buf = ""
+
+                elif state == TEXT:
+                    if char == "\\":
+                        esc_from, esc_buf, state = TEXT, "\\", ESC
+                    elif char == TRIGGER:
                         state = PEEK
                         peek_buf = char
                     else:
@@ -149,25 +185,41 @@ async def hybrid_stream_generator(
                         state = TEXT
 
                 elif state == TOOL:
-                    json_buf += char
-                    if CLOSE and json_buf.endswith(CLOSE):
-                        body = json_buf[: -len(CLOSE)]
-                        tc = build_tool_call(pending_name, body)
-                        if tc:
-                            tool_calls.append(tc)
-                            idx = len(tool_calls) - 1
-                            yield _tool_call_delta(chunk_id, created, model, idx, tc)
-                        else:
-                            log.warning(
-                                "Dropped unparseable <invoke> payload: %.300r", body
-                            )
-                        state = TEXT
-                        peek_buf = ""
-                        header_buf = ""
-                        json_buf = ""
-                        pending_name = None
+                    if char == "\\":
+                        esc_from, esc_buf, state = TOOL, "\\", ESC
+                    else:
+                        json_buf += char
+                        if CLOSE and json_buf.endswith(CLOSE):
+                            body = json_buf[: -len(CLOSE)]
+                            tc = build_tool_call(pending_name, body)
+                            if tc:
+                                tool_calls.append(tc)
+                                idx = len(tool_calls) - 1
+                                yield _tool_call_delta(
+                                    chunk_id, created, model, idx, tc
+                                )
+                            else:
+                                log.warning(
+                                    "Dropped unparseable <invoke> payload: %.300r",
+                                    body,
+                                )
+                            state = TEXT
+                            peek_buf = ""
+                            header_buf = ""
+                            json_buf = ""
+                            pending_name = None
 
         # ---- Stream ended ----
+        if state == ESC:
+            literal = esc_buf
+            if esc_from == TOOL:
+                json_buf += literal
+                state = TOOL
+            else:
+                state = TEXT
+            esc_buf = ""
+            # fall through to the matching EOF branch below
+
         if state == TOOL and json_buf:
             # Truncated mid-call: salvage via tolerant parse, else drop —
             # never leak raw JSON as chat text.
@@ -198,6 +250,12 @@ async def hybrid_stream_generator(
                 text_buf += c
                 yield _content_delta(chunk_id, created, model, c)
             peek_buf = ""
+
+        elif state == TEXT and esc_buf:
+            for c in esc_buf:
+                text_buf += c
+                yield _content_delta(chunk_id, created, model, c)
+            esc_buf = ""
 
         if tool_calls:
             all_args = json.dumps([tc["function"]["arguments"] for tc in tool_calls])
@@ -230,6 +288,8 @@ async def hybrid_stream_generator(
             leftover = peek_buf
         elif state == HEADER:
             leftover = OPEN + header_buf
+        elif state == ESC:
+            leftover = esc_buf if esc_from == TEXT else json_buf + esc_buf
         elif state == TOOL:
             leftover = json_buf
         if leftover:

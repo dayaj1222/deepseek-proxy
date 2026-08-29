@@ -1,15 +1,20 @@
 """
 Tool-call extraction and tool-description injection for the DeepSeek OpenAI proxy.
 
-Canonical wire format (matches DeepSeek's training prior):
+Canonical wire format (taught to the model via inject_tool_descriptions):
 
-    <invoke name="tool_name">{"param": "value"}</invoke>
+    <invoke name="tool_name">
+    <parameter name="param">value</parameter>
+    </invoke>
 
-Legacy fallback accepted during migration:
+Fallbacks still parsed (model drift / older transcripts):
 
-    <invoke>{"function": "tool_name", "arguments": {...}}</invoke>
+    <invoke name="tool_name">{"param": "value"}</invoke>            JSON payload
+    <invoke>{"function": "tool_name", "arguments": {...}}</invoke>  legacy shape
 
-Both resolve to standard OpenAI tool_call objects downstream.
+Escape convention: "\\<marker>" is a literal marker; the proxy strips the
+backslash. "\\X" is a literal backslash. Markers are masked to sentinels
+before parsing and unmasked in final values.
 """
 
 import json
@@ -18,7 +23,13 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-from config import TOOL_CALL_TEMPLATE, TOOL_TAG_CLOSE, TOOL_TAG_OPEN
+from config import (
+    TOOL_CALL_TEMPLATE,
+    TOOL_PARAM_CLOSE,
+    TOOL_PARAM_OPEN,
+    TOOL_TAG_CLOSE,
+    TOOL_TAG_OPEN,
+)
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +46,54 @@ _NAME_ATTR_RE = re.compile(r"""\bname\s*=\s*(["'])([^"']+)\1""")
 # Streaming handler flushes header as text beyond this length.
 MAX_HEADER_LEN = 256
 
-# XML format
+# XML parameter format
 _XML_PARAM_RE = re.compile(
     r"""<parameter\s+name\s*=\s*(["'])([^"']+)\1\s*>(.*?)</parameter>""",
     re.DOTALL,
 )
+
+# ---- Escape-mask machinery ----
+# Sentinels stand in for escaped markers during parsing so real markers
+# inside values can't confuse regexes or the streaming terminator.
+_S_OPEN, _S_CLOSE = "\x00OI", "\x00CI"
+_S_POPEN, _S_PCLOSE = "\x00OP", "\x00CP"
+_BSLASH = "\x01"
+
+ESC_TO_SENTINEL = {
+    "\\" + TOOL_TAG_OPEN: _S_OPEN,
+    "\\" + TOOL_TAG_CLOSE: _S_CLOSE,
+    "\\" + TOOL_PARAM_OPEN: _S_POPEN,
+    "\\" + TOOL_PARAM_CLOSE: _S_PCLOSE,
+}
+SENTINEL_TO_MARKER = {v: k for k, v in ESC_TO_SENTINEL.items()}
+
+
+def mask_escapes(text: str) -> str:
+    """Replace escaped markers with sentinels; '\\\\' -> literal-backslash sentinel."""
+    for esc, sent in ESC_TO_SENTINEL.items():
+        text = text.replace(esc, sent)
+    return text.replace("\\\\", _BSLASH)
+
+
+def unmask_markers(s: str) -> str:
+    """Sentinels -> literal markers; backslash sentinel -> '\\'."""
+    for sent, marker in SENTINEL_TO_MARKER.items():
+        s = s.replace(sent, marker)
+    return s.replace(_BSLASH, "\\")
+
+
+def _escape_markers(s: str) -> str:
+    """Inverse of the escape convention: prepend '\\' to any unescaped marker
+    (used when re-serializing tool calls into prompt history)."""
+    for marker in (TOOL_TAG_CLOSE, TOOL_TAG_OPEN, TOOL_PARAM_CLOSE, TOOL_PARAM_OPEN):
+        s = re.sub(r"(?<!\\)" + re.escape(marker), "\\" + marker, s)
+    return s
+
+
+def extract_name_from_header(header: str) -> Optional[str]:
+    """Pull the name attribute out of an <invoke ...> header. None if absent."""
+    m = _NAME_ATTR_RE.search(header or "")
+    return m.group(2).strip() if m else None
 
 
 def _parse_xml_params(body: str) -> Optional[Dict[str, Any]]:
@@ -52,14 +106,8 @@ def _parse_xml_params(body: str) -> Optional[Dict[str, Any]]:
         try:
             params[m.group(2)] = json.loads(raw)  # handles "100" -> 100, "*" stays str
         except json.JSONDecodeError:
-            params[m.group(2)] = raw
+            params[m.group(2)] = unmask_markers(raw)
     return params or None
-
-
-def extract_name_from_header(header: str) -> Optional[str]:
-    """Pull the name attribute out of an <invoke ...> header. None if absent."""
-    m = _NAME_ATTR_RE.search(header or "")
-    return m.group(2).strip() if m else None
 
 
 def _escape_raw_control_chars(s: str) -> str:
@@ -159,10 +207,22 @@ def _loads_tolerant(s: str) -> Optional[Any]:
             return None
 
 
+def _unmask_deep(o: Any) -> Any:
+    """Recursively convert sentinels back to literal markers in parsed JSON."""
+    if isinstance(o, str):
+        return unmask_markers(o)
+    if isinstance(o, list):
+        return [_unmask_deep(v) for v in o]
+    if isinstance(o, dict):
+        return {k: _unmask_deep(v) for k, v in o.items()}
+    return o
+
+
 def build_tool_call(name: Optional[str], body: str) -> Optional[Dict[str, Any]]:
     """Resolve (name, body) to an OpenAI tool_call, tolerantly. None if unusable.
 
-    name given  -> body is the bare arguments JSON object (empty -> {}).
+    name given  -> body is <parameter> XML or a bare arguments JSON object
+                   (empty -> {}).
     name absent -> body is the legacy {"function": ..., "arguments": ...} object.
     """
     body = body.strip()
@@ -171,7 +231,7 @@ def build_tool_call(name: Optional[str], body: str) -> Optional[Dict[str, Any]]:
         if data is None:
             data = _parse_xml_params(body)
             if data is not None:
-                log.info("Recovered XML-parameter payload for %s", name)
+                log.debug("Parsed XML-parameter payload for %s", name)
 
         if data is None:
             log.warning(
@@ -212,8 +272,11 @@ def build_tool_call(name: Optional[str], body: str) -> Optional[Dict[str, Any]]:
 
 
 def extract_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Extract tool calls from text — parses <invoke ...>...</invoke> blocks."""
+    """Extract tool calls from text — parses <invoke ...>...</invoke> blocks.
+    Escaped markers (\\<invoke etc.) are masked out first so they never match."""
     tool_calls: List[Dict[str, Any]] = []
+
+    text = mask_escapes(text)
 
     for m in _INVOKE_RE.finditer(text):
         tc = build_tool_call(extract_name_from_header(m.group(1)), m.group(2))
@@ -241,6 +304,49 @@ def parse_tool_call_json(json_str: str) -> Optional[Dict[str, Any]]:
     return build_tool_call(None, json_str)
 
 
+def _render_param_value(v: Any) -> str:
+    """Render a Python value as raw <parameter> text (inverse of _parse_xml_params)."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return json.dumps(v, ensure_ascii=False)  # lists / dicts
+
+
+def format_tool_calls_for_history(tool_calls: List[Dict[str, Any]]) -> str:
+    """Re-serialize OpenAI tool_call objects back into the wire format, so
+    the model sees its own past calls in exactly the shape it is taught
+    to emit (not the OpenAI JSON shape). Marker-escapes values on the way out."""
+    blocks: List[str] = []
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        func = tc.get("function") or {}
+        name = func.get("name")
+        if not name:
+            continue
+        raw_args = func.get("arguments")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except json.JSONDecodeError:
+            args = None
+        if isinstance(args, dict) and args:
+            lines = [
+                f'<parameter name="{k}">{_escape_markers(_render_param_value(v))}</parameter>'
+                for k, v in args.items()
+            ]
+            blocks.append(
+                f'<invoke name="{name}">\n' + "\n".join(lines) + "\n</invoke>"
+            )
+        else:
+            blocks.append(f'<invoke name="{name}"></invoke>')
+    return "\n".join(blocks)
+
+
 def _to_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert {"function": name, "arguments": ...} to an OpenAI tool_call."""
     func_name = data.get("function")
@@ -252,8 +358,10 @@ def _to_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         arguments = {}
 
     if isinstance(arguments, dict):
+        arguments = _unmask_deep(arguments)
         args_str = json.dumps(arguments, ensure_ascii=False)
     elif isinstance(arguments, str):
+        arguments = unmask_markers(arguments)
         try:
             json.loads(arguments)
             args_str = arguments
@@ -307,37 +415,57 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
         "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT\n\n"
         "To call a tool, emit a block in EXACTLY this format:\n\n"
         f"{TOOL_CALL_TEMPLATE}\n\n"
-        "The tool name goes in the name attribute of the opening tag. "
-        "The tool's parameters are the JSON object between the opening and "
-        "closing tags.\n\n"
+        "The tool name goes in the name attribute of the opening <invoke> tag. "
+        "Each argument is one <parameter> element: the parameter name goes in "
+        "its name attribute, and the value is the raw text between "
+        "<parameter> and </parameter>. Each property in a tool's Parameters "
+        "(JSON Schema) below corresponds to one <parameter> element.\n\n"
         "### Hard rules — violating any rule means your call is silently discarded\n"
-        '1. ATTRIBUTES: the opening tag MUST carry a name attribute: <invoke name="tool_name">. '
-        "Extra attributes (e.g. type) are ignored, but name is required.\n"
-        "2. PAYLOAD: between the tags is ONE complete, valid JSON object containing "
-        "the tool's parameters.\n"
-        "3. CLOSURE: the JSON must be fully balanced — every { has its matching }. "
-        "The last characters of every call are exactly:\n"
-        "} </invoke>\n"
-        "4. ESCAPING: escape all quotes, backslashes and newlines (\\n) inside JSON "
-        "string values so the payload is valid JSON. NEVER write the literal text "
-        '"</invoke>" inside a value.\n'
-        '5. NO EXTRAS: never add an "id" field (auto-generated), never wrap the '
+        "1. ATTRIBUTES: the opening tag MUST carry a name attribute: "
+        '<invoke name="tool_name">. Extra attributes (e.g. type) are ignored, '
+        "but name is required.\n"
+        "2. PARAMETERS: every argument MUST be its own "
+        '<parameter name="...">value</parameter> element. Do NOT put a JSON '
+        "object between the <invoke> tags.\n"
+        "3. VALUES: the text between <parameter> tags is taken literally. "
+        "Write strings, paths, code and multi-line text as plain text with NO "
+        'escaping (no \\n, no \\"). Numbers, booleans and arrays may be '
+        'written as JSON (42, true, ["a", "b"]) and are converted automatically.\n'
+        "4. LITERAL MARKERS: if a value must contain the literal text <invoke, "
+        "</invoke>, <parameter or </parameter> (e.g. code that parses tool "
+        "calls), write a backslash directly before it: \\</parameter>. The "
+        "proxy removes the backslash and stores the marker as plain text. To "
+        "write a backslash immediately before a marker, double it: \\\\<invoke. "
+        "Inside JSON payloads use <\\/invoke> instead.\n"
+        "5. NO EXTRAS: never add an id field (auto-generated), never wrap the "
         "block in ``` code fences ```.\n"
         "6. MULTIPLE CALLS: emit multiple complete blocks back to back.\n"
-        "7. You may write normal text before or after tool call blocks — but NEVER "
-        "write text inside the tags, and never emit <invoke> without calling a tool.\n\n"
+        "7. You may write normal text before or after tool call blocks — but "
+        "NEVER write text inside the tags, and never emit <invoke> without "
+        "calling a tool. Outside tool blocks, the same backslash rule applies "
+        "if you need to SHOW the literal text <invoke> or </invoke> in a reply.\n\n"
         "### Correct examples\n"
-        '<invoke name="terminal">{"command": "ls -la"}</invoke>\n'
-        '<invoke name="get_time">{}</invoke>\n\n'
-        "### Wrong examples (all silently discarded)\n"
-        '<invoke name="terminal">{"command": "ls"}</invoke>  <- truncated: missing final }\n'
-        '<invoke>{"command": "ls"}</invoke>  <- missing name attribute\n'
-        '<invoke name="terminal">command: ls</invoke>  <- payload must be a JSON object, not plain text\n\n'
+        '<invoke name="terminal">\n'
+        '<parameter name="command">ls -la</parameter>\n'
+        "</invoke>\n\n"
+        '<invoke name="write_file">\n'
+        '<parameter name="path">src/main.py</parameter>\n'
+        '<parameter name="content">def main():\n    print("hello")\n</parameter>\n'
+        "</invoke>\n\n"
+        '<invoke name="get_time"></invoke>\n\n'
+        "### Wrong examples (silently discarded)\n"
+        '<invoke name="terminal">{"command": "ls"}</invoke>  <- JSON payload: '
+        "arguments must be <parameter> elements, not a JSON object\n"
+        '<invoke name="terminal">command: ls</invoke>  <- bare text: arguments '
+        "must be wrapped in <parameter> tags\n"
+        '<invoke>{"command": "ls"}</invoke>  <- missing name attribute\n\n'
         "## Available Tools\n\n"
         f"{tools_block}\n"
         "---\n"
-        "FINAL REMINDER: tool calls use the form "
-        f"{TOOL_CALL_TEMPLATE} — name in the attribute, JSON parameters between the tags."
+        "FINAL REMINDER: tool calls use exactly this form:\n"
+        f"{TOOL_CALL_TEMPLATE}\n"
+        'name in the <invoke> attribute; one <parameter name="...">value</parameter> '
+        "element per argument."
     )
 
     return system_prompt + instruction
