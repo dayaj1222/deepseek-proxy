@@ -414,7 +414,7 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
         sections.append(
             render_prompt(
                 prompts.get(
-                    "tool_section",
+                    "TOOL_SECTION",
                     "### {name}\nDescription: {description}\nParameters (JSON Schema):\n```json\n{params}\n```",
                 ),
                 name=name,
@@ -425,14 +425,14 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
 
     tools_block = "\n\n".join(sections)
 
-    instruction = prompts.get("tool_instruction", "")
+    instruction = prompts.get("TOOL_INSTRUCTION", "")
     instruction = render_prompt(instruction, tools_block=tools_block)
 
     header = prompts.get(
-        "protocol_header", "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
+        "PROTOCOL_HEADER", "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
     )
-    tools_header = prompts.get("tools_header", "## Available Tools")
-    final_reminder = prompts.get("final_reminder", "")
+    tools_header = prompts.get("TOOLS_HEADER", "## Available Tools")
+    final_reminder = prompts.get("FINAL_REMINDER", "")
     final_reminder = render_prompt(final_reminder, tools_block=tools_block)
 
     block = (

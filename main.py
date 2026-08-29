@@ -178,22 +178,22 @@ def build_prompt(
                 system_text, [t.model_dump() for t in tools]
             )
         if system_text:
-            prefix = prompts.get("role_prefix_system", "System: {content}")
+            prefix = prompts.get("ROLE_PREFIX_SYSTEM", "System: {content}")
             parts.append(render_prompt(prefix, content=system_text))
 
     last_role = None
     for msg in other_messages:
         content = normalize_content(msg.content)
         if msg.role == "user":
-            prefix = prompts.get("role_prefix_user", "User: {content}")
+            prefix = prompts.get("ROLE_PREFIX_USER", "User: {content}")
             parts.append(render_prompt(prefix, content=content))
         elif msg.role == "assistant":
             if msg.tool_calls:
                 if content:
-                    prefix = prompts.get("role_prefix_assistant", "Assistant: {content}")
+                    prefix = prompts.get("ROLE_PREFIX_ASSISTANT", "Assistant: {content}")
                     parts.append(render_prompt(prefix, content=content))
                 prefix = prompts.get(
-                    "role_prefix_assistant_tool", "Assistant:\n{content}"
+                    "ROLE_PREFIX_ASSISTANT_TOOL", "Assistant:\n{content}"
                 )
                 parts.append(
                     render_prompt(
@@ -201,11 +201,11 @@ def build_prompt(
                     )
                 )
             else:
-                prefix = prompts.get("role_prefix_assistant", "Assistant: {content}")
+                prefix = prompts.get("ROLE_PREFIX_ASSISTANT", "Assistant: {content}")
                 parts.append(render_prompt(prefix, content=content))
         elif msg.role == "tool":
             prefix = prompts.get(
-                "role_prefix_tool", "Tool result (id={tool_call_id}):\n{content}"
+                "ROLE_PREFIX_TOOL", "Tool result (id={tool_call_id}):\n{content}"
             )
             parts.append(
                 render_prompt(
@@ -217,7 +217,7 @@ def build_prompt(
     if last_role == "tool":
         parts.append(
             prompts.get(
-                "continue_after_tool",
+                "CONTINUE_AFTER_TOOL",
                 "Now continue with the task based on the tool result above.",
             )
         )
@@ -226,7 +226,7 @@ def build_prompt(
     # TOOL_REMINDER_INTERVAL). Prompts are deltas (only new messages), so
     # exchange_offset carries the per-thread cumulative count across requests.
     if tools and TOOL_REMINDER_INTERVAL > 0:
-        hard_reminder = render_prompt(prompts.get("format_reminder", ""))
+        hard_reminder = render_prompt(prompts.get("FORMAT_REMINDER", ""))
         exchange_count = exchange_offset
         final_parts = []
         for part in parts:

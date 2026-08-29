@@ -11,16 +11,15 @@ No .env layer. Kept module-level names for backwards compatibility.
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import tiktoken
+import tomllib
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.getenv("DEEPSEEK_CONFIG", str(ROOT / "config.toml")))
-
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -50,16 +49,29 @@ def _float(name: str, default: float) -> float:
     return float(_env(name, default))
 
 
+def _to_bool(v: Any) -> bool:
+    """Coerce a config value to bool: bools pass through, strings are checked."""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     deepseek_token: Optional[str] = field(
-        default_factory=lambda: os.getenv("DEEPSEEK_TOKEN") or _TOML.get("deepseek_token")
+        default_factory=lambda: (
+            os.getenv("DEEPSEEK_TOKEN") or _TOML.get("DEEPSEEK_TOKEN")
+        )
     )
     deepseek_email: Optional[str] = field(
-        default_factory=lambda: os.getenv("DEEPSEEK_EMAIL") or _TOML.get("deepseek_email")
+        default_factory=lambda: (
+            os.getenv("DEEPSEEK_EMAIL") or _TOML.get("DEEPSEEK_EMAIL")
+        )
     )
     deepseek_password: Optional[str] = field(
-        default_factory=lambda: os.getenv("DEEPSEEK_PASSWORD") or _TOML.get("deepseek_password")
+        default_factory=lambda: (
+            os.getenv("DEEPSEEK_PASSWORD") or _TOML.get("DEEPSEEK_PASSWORD")
+        )
     )
     model_type: str = field(
         default_factory=lambda: _env("MODEL_TYPE", "DEFAULT").upper()
@@ -73,26 +85,32 @@ class Settings:
     tool_buffer_limit: int = field(
         default_factory=lambda: _int("TOOL_BUFFER_LIMIT", 100000)
     )
-    tool_tag_open: str = '<invoke'
-    tool_tag_close: str = '</invoke>'
-    tool_param_open: str = '<parameter'
-    tool_param_close: str = '</parameter>'
+    tool_tag_open: str = "<invoke"
+    tool_tag_close: str = "</invoke>"
+    tool_param_open: str = "<parameter"
+    tool_param_close: str = "</parameter>"
     title_prompt_marker: str = "You name chat sessions"
     thread_prefix: str = "thread_"
     title_prefix: str = "title_"
     thread_hash_len: int = 24
     models: List[Dict[str, Any]] = field(
-        default_factory=lambda: list(_TOML.get("models", []))
+        default_factory=lambda: list(_TOML.get("MODELS", []))
     )
     state_path: Path = field(
-        default_factory=lambda: Path(_env("STATE_PATH", str(ROOT / "session_state.json")))
+        default_factory=lambda: Path(
+            _env("STATE_PATH", str(ROOT / "session_state.json"))
+        )
     )
     prompts: Dict[str, Any] = field(
-        default_factory=lambda: dict(_TOML.get("prompts", {}))
+        default_factory=lambda: dict(_TOML.get("PROMPTS", {}))
     )
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
-    log_format: str = field(default_factory=lambda: _env("LOG_FORMAT", "pretty").lower())
-    debug: bool = field(default_factory=lambda: _env("DEBUG", "false").lower() in ("1", "true", "yes", "on"))
+    log_format: str = field(
+        default_factory=lambda: _env("LOG_FORMAT", "pretty").lower()
+    )
+    debug: bool = field(
+        default_factory=lambda: _to_bool(_env("DEBUG", False))
+    )
 
     @property
     def tool_call_template(self) -> str:
@@ -143,12 +161,12 @@ def render_prompt(template: str, **ctx: Any) -> str:
     resolved.setdefault("tool_call_template", settings.tool_call_template)
     resolved.setdefault("tools_block", "")
     out = template
-    # Replace tag tokens first (longest first to avoid partial matches)
+    # Replace placeholder token names in the config prose with the real tags.
     tag_map = {
-        '</parameter>': settings.tool_param_close,
-        '<parameter': settings.tool_param_open,
-        '</invoke>': settings.tool_tag_close,
-        '<invoke': settings.tool_tag_open,
+        "TOOL_CALL_CLOSE": settings.tool_tag_close,
+        "TOOL_CALL_OPEN": settings.tool_tag_open,
+        "TOOL_PARAM_CLOSE": settings.tool_param_close,
+        "TOOL_PARAM_OPEN": settings.tool_param_open,
     }
     for token, value in tag_map.items():
         out = out.replace(token, value)

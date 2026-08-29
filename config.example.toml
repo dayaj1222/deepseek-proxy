@@ -2,34 +2,34 @@
 # Precedence: process env vars override these values; else these are used.
 
 # --- DeepSeek credentials (prefer token over email+password) ---
-deepseek_token = ''
-deepseek_email = 'REDACTED_EMAIL'
-deepseek_password = 'REDACTED_PASSWORD'
+DEEPSEEK_TOKEN = ''
+DEEPSEEK_EMAIL = 'REDACTED_EMAIL'
+DEEPSEEK_PASSWORD = 'REDACTED_PASSWORD'
 
 # Model type: DEFAULT, EXPERT, or VISION
-model_type = "DEFAULT"
+MODEL_TYPE = "DEFAULT"
 
 # --- Server ---
-proxy_host = "0.0.0.0"
-proxy_port = 8000
+PROXY_HOST = "0.0.0.0"
+PROXY_PORT = 8000
 
 # --- Behaviour ---
-request_delay = 0.0
-tool_reminder_interval = 0
-tool_buffer_limit = 100000
+REQUEST_DELAY = 0.0
+TOOL_REMINDER_INTERVAL = 0
+TOOL_BUFFER_LIMIT = 100000
 
 # --- Persistence ---
-state_path = "session_state.json"
+STATE_PATH = "session_state.json"
 
 # --- Logging ---
-log_level = "INFO"
-log_format = "pretty"
-debug = false
+LOG_LEVEL = "INFO"
+LOG_FORMAT = "pretty"
+DEBUG = false
 
 # --- Prompt templates injected by the proxy ---
-[prompts]
-protocol_header = "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
-tool_instruction = """
+[PROMPTS]
+PROTOCOL_HEADER = "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
+TOOL_INSTRUCTION = """
 To call a tool, emit a block in EXACTLY this format:
 
 {tool_call_template}
@@ -56,34 +56,34 @@ corresponds to one TOOL_PARAM_OPEN element.
 7. You may write normal text before or after tool call blocks.
 """
 
-tools_header = "## Available Tools"
-final_reminder = """FINAL REMINDER: tool calls use exactly this form:
+TOOLS_HEADER = "## Available Tools"
+FINAL_REMINDER = """FINAL REMINDER: tool calls use exactly this form:
 
 {tool_call_template}
 
 name in the TOOL_CALL_OPEN attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument."""
 
-format_reminder = """[FORMAT REMINDER] Tool calls must use exactly this shape:
+FORMAT_REMINDER = """[FORMAT REMINDER] Tool calls must use exactly this shape:
 {tool_call_template}
 Tool name in the TOOL_CALL_OPEN name attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument. Malformed calls are silently discarded."""
 
-tool_section = """### {name}
+TOOL_SECTION = """### {name}
 Description: {description}
 Parameters (JSON Schema):
 ```json
 {params}
 ```"""
 
-continue_after_tool = "Now continue with the task based on the tool result above."
+CONTINUE_AFTER_TOOL = "Now continue with the task based on the tool result above."
 
-role_prefix_system = "System: {content}"
-role_prefix_user = "User: {content}"
-role_prefix_assistant = "Assistant: {content}"
-role_prefix_assistant_tool = "Assistant:\n{content}"
-role_prefix_tool = "Tool result (id={tool_call_id}):\n{content}"
+ROLE_PREFIX_SYSTEM = "System: {content}"
+ROLE_PREFIX_USER = "User: {content}"
+ROLE_PREFIX_ASSISTANT = "Assistant: {content}"
+ROLE_PREFIX_ASSISTANT_TOOL = "Assistant:\n{content}"
+ROLE_PREFIX_TOOL = "Tool result (id={tool_call_id}):\n{content}"
 
 # --- Model catalog served by /v1/models ---
-[[models]]
+[[MODELS]]
 id = "deepseek-v4-pro"
 object = "model"
 created = 1745452800
@@ -91,7 +91,7 @@ owned_by = "deepseek"
 context_length = 1000000
 max_completion_tokens = 384000
 
-[[models]]
+[[MODELS]]
 id = "deepseek-v4-flash"
 object = "model"
 created = 1745452800
@@ -99,7 +99,7 @@ owned_by = "deepseek"
 context_length = 1000000
 max_completion_tokens = 384000
 
-[[models]]
+[[MODELS]]
 id = "deepseek-chat"
 object = "model"
 created = 1677610602
@@ -107,7 +107,7 @@ owned_by = "deepseek"
 context_length = 1000000
 max_completion_tokens = 384000
 
-[[models]]
+[[MODELS]]
 id = "deepseek-reasoner"
 object = "model"
 created = 1745452800
@@ -115,7 +115,7 @@ owned_by = "deepseek"
 context_length = 1000000
 max_completion_tokens = 384000
 
-[[models]]
+[[MODELS]]
 id = "deepseek-v4"
 object = "model"
 created = 1745452800

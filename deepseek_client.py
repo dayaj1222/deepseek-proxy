@@ -18,21 +18,21 @@ _model_map = {
     "VISION": ModelType.VISION,
 }
 
+# The only model ids aiodeepseek actually supports (ModelType enum values).
 _model_id_map = {
-    "deepseek-v4-pro": ModelType.EXPERT,
-    "deepseek-v4-flash": ModelType.DEFAULT,
-    "deepseek-chat": ModelType.DEFAULT,
-    "deepseek-reasoner": ModelType.EXPERT,
+    "DEFAULT": ModelType.DEFAULT,
+    "EXPERT": ModelType.EXPERT,
+    "VISION": ModelType.VISION,
 }
 
 def _get_model_type() -> ModelType:
     return _model_map.get(MODEL_TYPE.upper(), ModelType.DEFAULT)
 
 def _resolve_model(model_id: str) -> ModelType:
-    lower = model_id.lower()
-    if "vision" in lower:
-        return ModelType.VISION
-    return _model_id_map.get(lower, _get_model_type())
+    key = model_id.upper().strip()
+    if not key:
+        return _get_model_type()
+    return _model_id_map.get(key, _get_model_type())
 
 _client: Optional[DeepSeekClient] = None
 _conversations: Dict[str, Conversation] = {}
