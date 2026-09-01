@@ -113,7 +113,21 @@ class ConnectionPool:
         self._thread_owner[thread_id] = chosen
         return chosen
 
+    def _assign_ephemeral(self) -> Connection:
+        """Return a throwaway connection for a title-gen request.
+
+        Title requests are one-shot: they must NOT bind a thread or touch
+        occupancy, because they would otherwise consume an account slot for a
+        request that never returns. Pick the least-crowded account at this
+        instant (ties -> lowest index) and hand it back without persisting.
+        """
+        occupancy = self._store.occupancy(self._idle_timeout)
+        return min(self._conns, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
+
     def route(self, thread_id: str) -> Connection:
+        # Title-gen threads use the `title_` prefix and must not be bound.
+        if thread_id.startswith("title_"):
+            return self._assign_ephemeral()
         conn = self._assign(thread_id)
         self._store.touch(thread_id)
         return conn
@@ -196,6 +210,9 @@ class ConnectionPool:
             self._save_resume(conn, thread_id, session_id, conv.parent_message_id)
 
     def _save_resume(self, conn: Connection, thread_id: str, session_id: str, parent_message_id: str) -> None:
+        # Title-gen threads are ephemeral — never persist their resume state.
+        if thread_id.startswith("title_"):
+            return
         self._store.set_resume(thread_id, conn.email, session_id, parent_message_id)
 
     # ---- token / exchange counters (delegated to store) ----
