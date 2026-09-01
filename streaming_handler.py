@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from typing import Any, Dict, List, Optional
 
 from config import TOOL_TAG_CLOSE, TOOL_TAG_OPEN, estimate_tokens
-from deepseek_client import add_thread_tokens
+from connections import add_thread_tokens
 from tool_parser import (
     ESC_TO_SENTINEL,
     MAX_HEADER_LEN,
