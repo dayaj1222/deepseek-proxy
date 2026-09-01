@@ -1,5 +1,3 @@
-import asyncio
-import atexit
 import hashlib
 import json
 import logging
@@ -15,6 +13,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import (
+    DB_PATH,
+    IDLE_TIMEOUT,
     MODELS,
     PROXY_HOST,
     PROXY_PORT,
@@ -24,15 +24,15 @@ from config import (
     render_prompt,
     settings,
 )
-from deepseek_client import (
+from connections import (
     add_thread_tokens,
     bump_thread_exchanges,
-    flush_state,
     generate_response,
     get_thread_exchanges,
     get_thread_tokens,
-    init_state,
-    shutdown_client,
+    get_pool,
+    init_pool,
+    shutdown_pool,
 )
 from streaming_handler import hybrid_stream_generator
 from tool_parser import (
@@ -375,11 +375,11 @@ async def _handle(request: ChatRequest, thread_id: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Proxy starting up")
-    init_state()
+    init_pool(str(DB_PATH), idle_timeout=IDLE_TIMEOUT)
 
     def _flush_and_die(signum, _frame):
         log.info("Signal %s received — flushing state to disk", signum)
-        flush_state()
+        get_pool()._store.snapshot()
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -391,13 +391,11 @@ async def lifespan(app: FastAPI):
         except (ValueError, OSError, AttributeError):
             pass
 
-    atexit.register(flush_state)
     try:
         yield
     finally:
         log.info("Proxy shutting down")
-        flush_state()
-        await shutdown_client()
+        await shutdown_pool()
 
 
 app = FastAPI(title="DeepSeek OpenAI Proxy", lifespan=lifespan)

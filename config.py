@@ -56,6 +56,33 @@ def _to_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _load_accounts(environ, toml: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Build the account list from indexed email/password env vars.
+
+    Scans DEEPSEEK_EMAIL_0/PASSWORD_0, _1, ... until a missing index. Falls
+    back to the single DEEPSEEK_EMAIL/PASSWORD (or token) pair when no
+    indexed accounts are present, so single-account setups behave exactly as
+    before. Each entry is {"email": str, "password": str}.
+    """
+    accounts: List[Dict[str, str]] = []
+    i = 0
+    while True:
+        email = environ.get(f"DEEPSEEK_EMAIL_{i}") or toml.get(f"DEEPSEEK_EMAIL_{i}")
+        password = environ.get(f"DEEPSEEK_PASSWORD_{i}") or toml.get(f"DEEPSEEK_PASSWORD_{i}")
+        if not email or not password:
+            break
+        accounts.append({"email": email, "password": password})
+        i += 1
+    if accounts:
+        return accounts
+    # Fallback: single account from the existing vars (token handled separately).
+    email = environ.get("DEEPSEEK_EMAIL") or toml.get("DEEPSEEK_EMAIL")
+    password = environ.get("DEEPSEEK_PASSWORD") or toml.get("DEEPSEEK_PASSWORD")
+    if email and password:
+        return [{"email": email, "password": password}]
+    return []
+
+
 @dataclass(frozen=True)
 class Settings:
     deepseek_token: Optional[str] = field(
@@ -75,6 +102,9 @@ class Settings:
     )
     model_type: str = field(
         default_factory=lambda: _env("MODEL_TYPE", "DEFAULT").upper()
+    )
+    accounts: List[Dict[str, str]] = field(
+        default_factory=lambda: _load_accounts(os.environ, _TOML)
     )
     proxy_host: str = field(default_factory=lambda: _env("PROXY_HOST", "0.0.0.0"))
     proxy_port: int = field(default_factory=lambda: _int("PROXY_PORT", 8000))
@@ -100,6 +130,14 @@ class Settings:
         default_factory=lambda: Path(
             _env("STATE_PATH", str(ROOT / "session_state.json"))
         )
+    )
+    db_path: Path = field(
+        default_factory=lambda: Path(
+            _env("DB_PATH", str(ROOT / "dispatch.db"))
+        )
+    )
+    idle_timeout: float = field(
+        default_factory=lambda: _float("IDLE_TIMEOUT", 300.0)
     )
     prompts: Dict[str, Any] = field(
         default_factory=lambda: dict(_TOML.get("PROMPTS", {}))
@@ -128,6 +166,7 @@ DEEPSEEK_TOKEN = settings.deepseek_token
 DEEPSEEK_EMAIL = settings.deepseek_email
 DEEPSEEK_PASSWORD = settings.deepseek_password
 MODEL_TYPE = settings.model_type
+ACCOUNTS = settings.accounts
 PROXY_HOST = settings.proxy_host
 PROXY_PORT = settings.proxy_port
 REQUEST_DELAY = settings.request_delay
@@ -142,6 +181,8 @@ TOOL_CALL_PREFIX = TOOL_TAG_OPEN
 TOOL_CALL_SUFFIX = TOOL_TAG_CLOSE
 MODELS = settings.models
 STATE_PATH = settings.state_path
+DB_PATH = settings.db_path
+IDLE_TIMEOUT = settings.idle_timeout
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
