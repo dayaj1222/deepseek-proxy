@@ -18,7 +18,6 @@ from config import (
     MODELS,
     PROXY_HOST,
     PROXY_PORT,
-    REQUEST_DELAY,
     TOOL_CALL_TEMPLATE,
     TOOL_REMINDER_INTERVAL,
     estimate_tokens,
@@ -287,10 +286,6 @@ async def _handle(request: ChatRequest, thread_id: str):
 
     if settings.debug:
         log.debug("Prompt (%d chars):\n%s", len(prompt), prompt)
-
-    if REQUEST_DELAY > 0:
-        log.info("Delaying request by %.2f seconds", REQUEST_DELAY)
-        await asyncio.sleep(REQUEST_DELAY)
 
     if request.stream:
         response_gen = generate_response(

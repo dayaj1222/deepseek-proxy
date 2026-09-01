@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time
 from logger import get_logger
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Optional
@@ -8,7 +10,7 @@ from aiodeepseek import DeepSeekClient
 from aiodeepseek.types.enums import ModelType
 from aiodeepseek.types.exceptions import DeepSeekError
 from aiodeepseek.conversation import Conversation
-from config import DEEPSEEK_TOKEN, DEEPSEEK_EMAIL, DEEPSEEK_PASSWORD, MODEL_TYPE
+from config import DEEPSEEK_TOKEN, DEEPSEEK_EMAIL, DEEPSEEK_PASSWORD, MODEL_TYPE, REQUEST_DELAY
 
 log = get_logger(__name__)
 
@@ -38,6 +40,11 @@ _client: Optional[DeepSeekClient] = None
 _conversations: Dict[str, Conversation] = {}
 _thread_sessions: Dict[str, str] = {}
 _lock = threading.Lock()
+
+# Per-connection rate gate: each account/client gets its own inter-request
+# gap clock so multiple accounts never interfere with each other's pacing.
+_rate_lock: Optional[asyncio.Lock] = None
+_last_fire: float = 0.0
 
 STATE_PATH = Path(__file__).parent / "session_state.json"
 
@@ -118,9 +125,11 @@ def bump_thread_exchanges(thread_id: str, n: int) -> None:
     entry["exchanges"] = int(entry.get("exchanges", 0)) + n
 
 async def _ensure_client():
-    global _client
+    global _client, _rate_lock
     if _client is not None:
         return
+    if _rate_lock is None:
+        _rate_lock = asyncio.Lock()
     if DEEPSEEK_TOKEN:
         _client = DeepSeekClient(token=DEEPSEEK_TOKEN, model=_get_model_type())
     elif DEEPSEEK_EMAIL and DEEPSEEK_PASSWORD:
@@ -151,6 +160,26 @@ async def get_or_create_conversation(thread_id: str) -> Conversation:
                     conv._parent_message_id = pid
         return _conversations[thread_id]
 
+async def _acquire_rate_slot():
+    """Ensure a minimum gap between model calls on THIS connection.
+
+    Each connection (account) has its own `_last_fire` timestamp and lock, so
+    multiple connections pace independently. Two simultaneous requests on the
+    same connection serialize their fire times; requests on different
+    connections never wait on each other.
+    """
+    global _last_fire
+    if REQUEST_DELAY <= 0 or _rate_lock is None:
+        return
+    async with _rate_lock:
+        now = time.monotonic()
+        wait = _last_fire + REQUEST_DELAY - now
+        if wait > 0:
+            log.info("Rate gate: waiting %.2fs for inter-request gap", wait)
+            await asyncio.sleep(wait)
+        _last_fire = time.monotonic()
+
+
 async def generate_response(thread_id: str, prompt: str, model: str = "", stream: bool = False):
     conv = await get_or_create_conversation(thread_id)
     model_type = _resolve_model(model) if model else None
@@ -163,6 +192,8 @@ async def generate_response(thread_id: str, prompt: str, model: str = "", stream
 
     saved_client_session = _client._session_id
     _client._session_id = session_id
+
+    await _acquire_rate_slot()
 
     try:
         if stream:
