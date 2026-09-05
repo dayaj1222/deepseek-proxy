@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import os
 import signal
 import time
@@ -18,7 +17,6 @@ from config import (
     MODELS,
     PROXY_HOST,
     PROXY_PORT,
-    TOOL_CALL_TEMPLATE,
     TOOL_REMINDER_INTERVAL,
     estimate_tokens,
     render_prompt,
@@ -28,20 +26,19 @@ from connections import (
     add_thread_tokens,
     bump_thread_exchanges,
     generate_response,
+    get_pool,
     get_thread_exchanges,
     get_thread_tokens,
-    get_pool,
     init_pool,
     shutdown_pool,
 )
+from logger import clear_request_id, get_logger, set_request_id
 from streaming_handler import hybrid_stream_generator
 from tool_parser import (
     extract_tool_calls,
     format_tool_calls_for_history,
     inject_tool_descriptions,
 )
-
-from logger import clear_request_id, get_logger, set_request_id
 
 log = get_logger(__name__)
 
@@ -189,7 +186,9 @@ def build_prompt(
         elif msg.role == "assistant":
             if msg.tool_calls:
                 if content:
-                    prefix = prompts.get("ROLE_PREFIX_ASSISTANT", "Assistant: {content}")
+                    prefix = prompts.get(
+                        "ROLE_PREFIX_ASSISTANT", "Assistant: {content}"
+                    )
                     parts.append(render_prompt(prefix, content=content))
                 prefix = prompts.get(
                     "ROLE_PREFIX_ASSISTANT_TOOL", "Assistant:\n{content}"
@@ -207,9 +206,7 @@ def build_prompt(
                 "ROLE_PREFIX_TOOL", "Tool result (id={tool_call_id}):\n{content}"
             )
             parts.append(
-                render_prompt(
-                    prefix, tool_call_id=msg.tool_call_id, content=content
-                )
+                render_prompt(prefix, tool_call_id=msg.tool_call_id, content=content)
             )
         last_role = msg.role
 
@@ -237,7 +234,6 @@ def build_prompt(
         parts = final_parts
     prompt = "\n\n".join(parts)
     return prompt
-
 
 
 # ---- Main request handler ----
