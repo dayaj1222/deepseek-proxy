@@ -14,9 +14,20 @@ PROXY_HOST = "0.0.0.0"
 PROXY_PORT = 8000
 
 # --- Behaviour ---
-REQUEST_DELAY = 0.0
+# Minimum seconds from one backend request finishing to the next beginning.
+REQUEST_DELAY = 2.0
 TOOL_REMINDER_INTERVAL = 0
+# Re-inject the original system prompt and tool definitions every N exchanges.
+# Set to 0 to disable periodic system re-anchoring.
+SYSTEM_PROMPT_INTERVAL = 10
 TOOL_BUFFER_LIMIT = 100000
+TOOL_REPAIR_MAX_RETRIES = 3
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BACKOFF_S = 10.0
+
+# --- Tool-call dialect: THE one switch (see tool_format.py DIALECTS) ---
+# "json_invoke" | "xml_params" | "dsml". Env var TOOL_FORMAT overrides this.
+TOOL_FORMAT = "json_invoke"
 
 # --- Persistence ---
 STATE_PATH = "session_state.json"
@@ -27,45 +38,12 @@ LOG_FORMAT = "pretty"
 DEBUG = false
 
 # --- Prompt templates injected by the proxy ---
+# NOTE: tool-call instruction/reminder prose lives with each dialect in
+# tool_format.py (it must match the taught tags).
 [PROMPTS]
 PROTOCOL_HEADER = "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
-TOOL_INSTRUCTION = """
-To call a tool, emit a block in EXACTLY this format:
-
-{tool_call_template}
-
-The tool name goes in the name attribute of the opening TOOL_CALL_OPEN tag.
-Each argument is one TOOL_PARAM_OPEN element: the parameter name goes in its
-name attribute, and the value is the raw text between TOOL_PARAM_OPEN and
-TOOL_PARAM_CLOSE. Each property in a tool's Parameters (JSON Schema) below
-corresponds to one TOOL_PARAM_OPEN element.
-
-### Hard rules — violating any rule means your call is silently discarded
-1. ATTRIBUTES: the opening tag MUST carry a name attribute:
-   TOOL_CALL_OPEN name="tool_name". Extra attributes (e.g. type) are ignored,
-   but name is required.
-2. PARAMETERS: every argument MUST be its own
-   TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element. Do NOT put a JSON
-   object between the TOOL_CALL_OPEN tags.
-3. VALUES: the text between TOOL_PARAM_OPEN tags is taken literally.
-4. LITERAL MARKERS: if a value must contain the literal text TOOL_CALL_OPEN,
-   TOOL_CALL_CLOSE, TOOL_PARAM_OPEN or TOOL_PARAM_CLOSE, write a backslash
-   directly before it.
-5. NO EXTRAS: never add an id field, never wrap the block in code fences.
-6. MULTIPLE CALLS: emit multiple complete blocks back to back.
-7. You may write normal text before or after tool call blocks.
-"""
 
 TOOLS_HEADER = "## Available Tools"
-FINAL_REMINDER = """FINAL REMINDER: tool calls use exactly this form:
-
-{tool_call_template}
-
-name in the TOOL_CALL_OPEN attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument."""
-
-FORMAT_REMINDER = """[FORMAT REMINDER] Tool calls must use exactly this shape:
-{tool_call_template}
-Tool name in the TOOL_CALL_OPEN name attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument. Malformed calls are silently discarded."""
 
 TOOL_SECTION = """### {name}
 Description: {description}

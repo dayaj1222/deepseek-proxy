@@ -15,6 +15,13 @@ Session.vim
 
 # Databases
 *.db
+*.db-shm
+*.db-wal
+*.db.lock
+session_state.json
+.pytest_cache/
+.ruff_cache/
+.coverage
 
 # Scratch / experiments
 c/

@@ -1,12 +1,38 @@
 [project]
 name = "deepseek-middleware"
-version = "0.1.0"
+version = "0.2.0"
 description = "DeepSeek OpenAI-compatible proxy with tool calling"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
     "aiodeepseek>=0.1.1",
     "pydantic>=2.4.0",
     "tiktoken>=0.5.0",
+    "aiohttp>=3.9",
+    "jsonschema>=4.20",
 ]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deepseek_proxy"]
+
+[project.scripts]
+deepseek-proxy = "deepseek_proxy.app:run"
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,5 +1,2 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-aiodeepseek==0.1.1
-pydantic==2.4.2
-tiktoken==0.7.0
+# Compatibility entry point. Canonical dependencies: pyproject.toml + uv.lock.
+.

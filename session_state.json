@@ -1831,6 +1831,18 @@
       "session_id": "45d16417-64b1-4eef-b1f6-d678075aa5a9",
       "parent_message_id": "74",
       "total_tokens": 19816
+    },
+    "title_eaf3420e92269a17078f8a72": {
+      "exchanges": 1,
+      "session_id": "fb69bde7-2721-4a2a-942f-551eec62a51f",
+      "parent_message_id": "2",
+      "total_tokens": 348
+    },
+    "thread_eaf3420e92269a17078f8a72": {
+      "exchanges": 208,
+      "session_id": "47e7022b-e19a-4bd0-9392-34eec83c0a96",
+      "parent_message_id": "394",
+      "total_tokens": 148882
     }
   }
 }
