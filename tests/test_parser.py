@@ -191,6 +191,16 @@ class ToolParserTests(unittest.TestCase):
         self.assertEqual([e.kind for e in result], ["tool", "malformed"])
         self.assertEqual(result[1].value["name"], "b")
 
+    def test_repeated_closing_tags_remain_observable(self):
+        source = '<invoke name="a">{}</invoke>\n</invoke>\n</invoke>'
+        self.invariant(
+            source,
+            [Event("tool", ("a", {})), Event("text", "\n</invoke>\n</invoke>")],
+        )
+
+    def test_orphan_closing_tags_are_protocol_syntax(self):
+        self.invariant("</invoke></parameter>", [Event("text", "</invoke></parameter>")])
+
     def test_mislabeled_salvage(self):
         source = '<parameter name="invoke name="run"><parameter name="parameter name="command" string="true">ls</parameter></parameter>'
         self.invariant(source, [Event("tool", ("run", {"command": "ls"}))])
@@ -239,6 +249,11 @@ class ToolParserTests(unittest.TestCase):
                 self.assertNotIn(
                     "silently discarded", dialect.instruction + dialect.format_reminder
                 )
+
+    def test_format_reminder_forbids_repeated_tool_tags(self):
+        for dialect in fmt.DIALECTS.values():
+            self.assertIn("exactly once", dialect.format_reminder)
+            self.assertIn("second closing tag", dialect.format_reminder)
 
 
 if __name__ == "__main__":

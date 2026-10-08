@@ -19,7 +19,13 @@ def load_config(path, env=None):
         "deepseek_proxy.settings", PACKAGE / "settings.py"
     )
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(os.environ, {"DEEPSEEK_CONFIG": str(path), **(env or {})}, clear=True):
+    # DEEPSEEK_ENV_FILE="" disables .env loading so a developer's real .env
+    # cannot leak into the deliberately clean environment these tests build.
+    with patch.dict(
+        os.environ,
+        {"DEEPSEEK_CONFIG": str(path), "DEEPSEEK_ENV_FILE": "", **(env or {})},
+        clear=True,
+    ):
         with patch.dict(sys.modules, {spec.name: module}):
             spec.loader.exec_module(module)
     return module

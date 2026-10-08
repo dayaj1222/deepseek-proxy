@@ -1,11 +1,19 @@
-"""Configuration loading: config.toml is the source of truth.
+"""Configuration loading.
+
+Two files, two jobs:
+    .env         secrets and per-environment settings (git-ignored)
+    config.toml  non-secret application behavior (git-ignored; see
+                 config.example.toml for the committed template)
 
 Precedence (highest wins):
-    1. Process environment variables (override without editing the file).
-    2. Values from config.toml (stdlib tomllib).
-    3. Built-in defaults.
+    1. Process environment variables (override without editing a file).
+    2. Values from .env (loaded into the environment below).
+    3. Values from config.toml (stdlib tomllib).
+    4. Built-in defaults.
 
-No .env layer. Kept module-level names for backwards compatibility.
+.env is loaded first so it populates os.environ before any settings read;
+actual environment variables still win over .env, and both win over TOML.
+Kept module-level names for backwards compatibility.
 """
 
 from __future__ import annotations
@@ -19,6 +27,22 @@ from typing import Any, Dict, List, Optional
 import tomllib
 
 ROOT = Path.cwd()
+
+# Load .env before anything reads os.environ. override=False preserves real
+# environment variables (e.g. those set by Render/systemd) over .env entries.
+#
+# DEEPSEEK_ENV_FILE overrides the path; set it to the empty string to skip
+# loading entirely (tests do this so a developer's real .env cannot leak into
+# an intentionally clean environment).
+_env_file = os.getenv("DEEPSEEK_ENV_FILE", str(ROOT / ".env"))
+if _env_file:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_env_file, override=False)
+    except ImportError:  # pragma: no cover - python-dotenv is a declared dependency
+        pass
+
 CONFIG_PATH = Path(os.getenv("DEEPSEEK_CONFIG", str(ROOT / "config.toml")))
 
 
@@ -128,7 +152,7 @@ class Settings:
     heartbeat_interval: float = field(default_factory=lambda: _float("HEARTBEAT_INTERVAL", 10.0))
     image_max_bytes: int = field(default_factory=lambda: _int("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
     tool_reminder_interval: int = field(default_factory=lambda: _int("TOOL_REMINDER_INTERVAL", 0))
-    system_prompt_interval: int = field(default_factory=lambda: _int("SYSTEM_PROMPT_INTERVAL", 10))
+    system_prompt_interval: int = field(default_factory=lambda: _int("SYSTEM_PROMPT_INTERVAL", 0))
     tool_buffer_limit: int = field(default_factory=lambda: _int("TOOL_BUFFER_LIMIT", 100000))
     tool_repair_max_retries: int = field(default_factory=lambda: _int("TOOL_REPAIR_MAX_RETRIES", 3))
     rate_limit_max_retries: int = field(default_factory=lambda: _int("RATE_LIMIT_MAX_RETRIES", 3))
@@ -155,11 +179,22 @@ class Settings:
         default_factory=lambda: Path(_env("STATE_PATH", str(ROOT / "session_state.json")))
     )
     db_path: Path = field(default_factory=lambda: Path(_env("DB_PATH", str(ROOT / "dispatch.db"))))
+    storage_backend: str = field(
+        default_factory=lambda: str(_env("STORAGE_BACKEND", "sqlite")).strip().lower()
+    )
+    mongodb_uri: str = field(default_factory=lambda: str(_env("MONGODB_URI", "")), repr=False)
+    mongodb_db: str = field(default_factory=lambda: str(_env("MONGODB_DB", "deepseek_proxy")))
     idle_timeout: float = field(default_factory=lambda: _float("IDLE_TIMEOUT", 300.0))
     prompts: Dict[str, Any] = field(default_factory=lambda: dict(_TOML.get("PROMPTS", {})))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
     log_format: str = field(default_factory=lambda: _env("LOG_FORMAT", "pretty").lower())
     debug: bool = field(default_factory=lambda: _to_bool(_env("DEBUG", False)))
+    thinking_enabled: bool = field(
+        default_factory=lambda: _to_bool(_env("THINKING_ENABLED", False))
+    )
+    search_enabled: bool = field(
+        default_factory=lambda: _to_bool(_env("SEARCH_ENABLED", True))
+    )
 
     def __post_init__(self) -> None:
         integer_minima = {
@@ -211,6 +246,10 @@ class Settings:
             raise ValueError("LOG_LEVEL is not a recognized logging level")
         if self.log_format not in ("pretty", "json"):
             raise ValueError("LOG_FORMAT must be pretty or json")
+        if self.storage_backend not in ("sqlite", "mongo"):
+            raise ValueError("STORAGE_BACKEND must be sqlite or mongo")
+        if self.storage_backend == "mongo" and not self.mongodb_uri:
+            raise ValueError("MONGODB_URI must be set when STORAGE_BACKEND=mongo")
 
     @property
     def tool_call_template(self) -> str:
@@ -225,6 +264,8 @@ DEEPSEEK_TOKEN = settings.deepseek_token
 DEEPSEEK_EMAIL = settings.deepseek_email
 DEEPSEEK_PASSWORD = settings.deepseek_password
 MODEL_TYPE = settings.model_type
+THINKING_ENABLED = settings.thinking_enabled
+SEARCH_ENABLED = settings.search_enabled
 ACCOUNTS = settings.accounts
 PROXY_HOST = settings.proxy_host
 PROXY_PORT = settings.proxy_port
@@ -271,6 +312,9 @@ def __dir__() -> List[str]:
 MODELS = settings.models
 STATE_PATH = settings.state_path
 DB_PATH = settings.db_path
+STORAGE_BACKEND = settings.storage_backend
+MONGODB_URI = settings.mongodb_uri
+MONGODB_DB = settings.mongodb_db
 IDLE_TIMEOUT = settings.idle_timeout
 
 _enc = None

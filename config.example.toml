@@ -19,7 +19,7 @@ REQUEST_DELAY = 2.0
 TOOL_REMINDER_INTERVAL = 0
 # Re-inject the original system prompt and tool definitions every N exchanges.
 # Set to 0 to disable periodic system re-anchoring.
-SYSTEM_PROMPT_INTERVAL = 10
+SYSTEM_PROMPT_INTERVAL = 0
 TOOL_BUFFER_LIMIT = 100000
 TOOL_REPAIR_MAX_RETRIES = 3
 RATE_LIMIT_MAX_RETRIES = 3
@@ -36,6 +36,17 @@ STATE_PATH = "session_state.json"
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "pretty"
 DEBUG = false
+
+# --- Thinking / search mode (opt-in) ---
+# When THINKING_ENABLED is true, ask DeepSeek to enable its internal "thinking"
+# pass and route the resulting thinking text to the OpenAI reasoning_content
+# channel (never into the reply text, tool-call parsing, or token counting).
+# SEARCH_ENABLED similarly enables DeepSeek's web search; search fragments are
+# dropped (citations already embedded in the reply text are preserved).
+# Clients may override thinking per request via reasoning_effort / reasoning /
+# thinking body params. When both are false (default), behaviour is unchanged.
+THINKING_ENABLED = false
+SEARCH_ENABLED = true
 
 # --- Prompt templates injected by the proxy ---
 # NOTE: tool-call instruction/reminder prose lives with each dialect in

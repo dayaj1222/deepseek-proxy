@@ -33,7 +33,7 @@ from .settings import (
     RATE_LIMIT_MAX_RETRIES,
     REQUEST_DELAY,
 )
-from .storage import StateStore
+from .storage import StateStore, build_backend
 from .observability import get_logger
 
 log = get_logger(__name__)
@@ -64,6 +64,8 @@ _RATE_LIMIT_MARKERS = (
     "throttl",
     "overloaded",
     "busy",
+    "generation_err",
+    "server is temporarily unavailable",
 )
 
 
@@ -75,6 +77,30 @@ def _is_rate_limit_error(e: Exception) -> bool:
 def _is_invalid_token_error(e: Exception) -> bool:
     s = f"{type(e).__name__}: {e}".lower()
     return "invalidtoken" in s or "invalid token" in s or "40003" in s
+
+
+_LOGIN_MARKERS = (
+    "login failed",
+    "risk_device",
+    "risk device",
+    "biz_code=11",
+    "biz_code': 11",
+    "unauthorized",
+    "auth failed",
+    "authentication failed",
+    "invalid password",
+    "wrong password",
+)
+
+
+def _is_login_error(e: Exception) -> bool:
+    s = f"{type(e).__name__}: {e}".lower()
+    return any(k in s for k in _LOGIN_MARKERS)
+
+
+# Login failures (bad password, banned/risky device) are not transient:
+# park the account for an hour so new threads avoid it.
+LOGIN_COOLDOWN_S = 3600.0
 
 
 _model_map = {
@@ -147,7 +173,7 @@ class Connection:
             try:
                 await client.__aexit__(None, None, None)
             except Exception as e:
-                log.warning("Error closing client for %s during reconnect: %s", self.email, e)
+                log.warning("Error closing client during reconnect: %s", e)
         return await self._ensure_client()
 
     async def acquire_rate_slot(self) -> None:
@@ -209,12 +235,26 @@ class ConversationTurn:
     _closed: bool = False
 
     def generate(
-        self, prompt: str, model: str = "", stream: bool = False, image: bytes | None = None
+        self,
+        prompt: str,
+        model: str = "",
+        stream: bool = False,
+        image: bytes | None = None,
+        replay_prompt: str | None = None,
+        thinking: bool = False,
+        search: bool = False,
     ):
         if self._closed:
             raise RuntimeError("This conversation turn has already ended")
         response = self.pool.generate_in_turn(
-            self.thread_id, prompt, model=model, stream=stream, image=image
+            self.thread_id,
+            prompt,
+            model=model,
+            stream=stream,
+            image=image,
+            replay_prompt=replay_prompt,
+            thinking=thinking,
+            search=search,
         )
         self._responses.append(response)
         return response
@@ -262,11 +302,11 @@ class ConnectionPool:
         self._turn_owners: dict = {}
 
     # ---- routing ----
-    def _find_conn(self, email: str) -> Connection:
+    def _find_conn(self, email: str) -> Optional[Connection]:
         for c in self._conns:
             if c.email == email:
                 return c
-        raise ValueError(f"Unknown backend email: {email}")
+        return None
 
     def _assign(self, thread_id: str) -> Connection:
         """Return the connection for a thread, assigning a NEW thread to the
@@ -275,17 +315,24 @@ class ConnectionPool:
         if existing is not None:
             return existing
 
-        # Persisted binding survives restart.
+        # Persisted binding survives restart. Unknown emails (removed/disabled
+        # accounts) fall through to fresh assignment so old threads migrate.
         bound_email = self._store.get_binding(thread_id)
         if bound_email is not None:
             conn = self._find_conn(bound_email)
-            self._thread_owner[thread_id] = conn
-            return conn
+            if conn is not None:
+                self._thread_owner[thread_id] = conn
+                return conn
+            # Stale binding: rebind below.
 
-        # New thread: least crowded.
+        # New thread: least crowded among healthy accounts. Accounts in login
+        # cooldown (bad password / risky device) are avoided when possible.
+        now = time.monotonic()
+        healthy = [c for c in self._conns if c.cooldown_until <= now]
+        candidates = healthy or list(self._conns)
         occupancy = self._store.occupancy(self._idle_timeout)
         # Ties broken by lowest index (deterministic spread).
-        chosen = min(self._conns, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
+        chosen = min(candidates, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
         self._store.bind(thread_id, chosen.email)
         self._thread_owner[thread_id] = chosen
         return chosen
@@ -298,8 +345,30 @@ class ConnectionPool:
         request that never returns. Pick the least-crowded account at this
         instant (ties -> lowest index) and hand it back without persisting.
         """
+        now = time.monotonic()
+        healthy = [c for c in self._conns if c.cooldown_until <= now]
+        candidates = healthy or list(self._conns)
         occupancy = self._store.occupancy(self._idle_timeout)
-        return min(self._conns, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
+        return min(candidates, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
+
+    def _failover(self, thread_id: str, bad: Connection) -> Optional[Connection]:
+        """Rebind a thread away from a login-dead account. Returns the new
+        connection, or None when every account is in cooldown."""
+        now = time.monotonic()
+        bad.cooldown_until = max(bad.cooldown_until, now + LOGIN_COOLDOWN_S)
+        self._thread_owner.pop(thread_id, None)
+        healthy = [c for c in self._conns if c is not bad and c.cooldown_until <= now]
+        if not healthy:
+            return None
+        occupancy = self._store.occupancy(self._idle_timeout)
+        chosen = min(healthy, key=lambda c: (occupancy.get(c.email, 0), self._conns.index(c)))
+        self._store.bind(thread_id, chosen.email)
+        self._thread_owner[thread_id] = chosen
+        # Owner tuple set by turn(): refresh its connection in place.
+        owner = self._turn_owners.get(thread_id)
+        if owner is not None:
+            self._turn_owners[thread_id] = (owner[0], chosen, owner[2])
+        return chosen
 
     def route(self, thread_id: str) -> Connection:
         # Title-gen threads use the `title_` prefix and must not be bound.
@@ -373,11 +442,23 @@ class ConnectionPool:
         model: str = "",
         stream: bool = False,
         image: bytes | None = None,
+        replay_prompt: str | None = None,
+        thinking: bool = False,
+        search: bool = False,
     ):
         """Standalone generation; also safe inside this task's existing turn."""
         async with self.turn(thread_id):
             async with aclosing(
-                self.generate_in_turn(thread_id, prompt, model=model, stream=stream, image=image)
+                self.generate_in_turn(
+                    thread_id,
+                    prompt,
+                    model=model,
+                    stream=stream,
+                    image=image,
+                    replay_prompt=replay_prompt,
+                    thinking=thinking,
+                    search=search,
+                )
             ) as response:
                 async for chunk in response:
                     yield chunk
@@ -389,13 +470,24 @@ class ConnectionPool:
         model: str = "",
         stream: bool = False,
         image: bytes | None = None,
+        replay_prompt: str | None = None,
+        thinking: bool = False,
+        search: bool = False,
     ):
         owner = self._turn_owners.get(thread_id)
         if owner is None or owner[0] is not asyncio.current_task():
             raise RuntimeError("generate_in_turn requires an active turn(thread_id) in this task")
         async with aclosing(
             self._generate_response_unlocked(
-                thread_id, prompt, model=model, stream=stream, image=image, conn=owner[1]
+                thread_id,
+                prompt,
+                model=model,
+                stream=stream,
+                image=image,
+                conn=owner[1],
+                replay_prompt=replay_prompt,
+                thinking=thinking,
+                search=search,
             )
         ) as response:
             async for chunk in response:
@@ -410,6 +502,9 @@ class ConnectionPool:
         image: bytes | None = None,
         *,
         conn: Connection,
+        replay_prompt: str | None = None,
+        thinking: bool = False,
+        search: bool = False,
     ):
         """Generate one turn; caller holds the per-thread generation lock.
 
@@ -430,7 +525,15 @@ class ConnectionPool:
                 try:
                     async with aclosing(
                         self._generate_once(
-                            conn, thread_id, prompt, model=model, stream=stream, image=image
+                            conn,
+                            thread_id,
+                            prompt,
+                            model=model,
+                            stream=stream,
+                            image=image,
+                            replay_prompt=replay_prompt,
+                            thinking=thinking,
+                            search=search,
                         )
                     ) as response:
                         async for chunk in response:
@@ -438,6 +541,17 @@ class ConnectionPool:
                             yield chunk
                     return
                 except DeepSeekError as e:
+                    if _is_login_error(e) and not yielded and not thread_id.startswith("title_"):
+                        log.error(
+                            "DeepSeek login dead, failing over: %r",
+                            e,
+                            extra={"thread_id": thread_id},
+                        )
+                        nxt = self._failover(thread_id, conn)
+                        if nxt is not None:
+                            conn = nxt
+                            refreshed = False
+                            continue
                     if _is_invalid_token_error(e) and not refreshed and not yielded:
                         refreshed = True
                         await conn._reconnect()
@@ -447,6 +561,14 @@ class ConnectionPool:
                         conn.cooldown_until = max(conn.cooldown_until, time.monotonic() + wait)
                         if not yielded and attempt < max_retries:
                             attempt += 1
+                            log.info(
+                                "Retrying DeepSeek request after transient backend error",
+                                extra={
+                                    "thread_id": thread_id,
+                                    "attempt": attempt,
+                                    "retry_delay_s": wait,
+                                },
+                            )
                             continue
                         if not yielded:
                             raise BackendRateLimited(
@@ -463,8 +585,15 @@ class ConnectionPool:
         model: str = "",
         stream: bool = False,
         image: bytes | None = None,
+        replay_prompt: str | None = None,
+        thinking: bool = False,
+        search: bool = False,
     ):
         # Caller holds the account gate, including initialization and cleanup.
+        log.debug(
+            "DeepSeek request",
+            extra={"thread_id": thread_id, "model": model, "stream": stream},
+        )
         await conn._ensure_client()
         conv = self._get_or_create_conversation(conn, thread_id)
         model_type = _resolve_model(model)
@@ -476,36 +605,53 @@ class ConnectionPool:
             if session_id is None:
                 session_id = await conn.client.create_chat_session(conn.client._token)
                 conn.thread_sessions[thread_id] = session_id
+                log.debug(
+                    "New remote session",
+                    extra={"thread_id": thread_id},
+                )
             conn.client._session_id = session_id
 
             if image:
                 try:
                     uploaded = await conn.client.upload_image(image)
-                    log.info("Image uploaded: file_id=%s", uploaded.file_id)
+                    log.debug("Image uploaded: file_id=%s", uploaded.file_id)
                 except Exception as e:
                     if _is_rate_limit_error(e) or _is_invalid_token_error(e):
                         raise
                     log.warning("Image upload failed, continuing text-only: %s", e)
 
             if stream:
-                async with aclosing(
-                    conv.ask_stream(prompt, image=uploaded, model=model_type)
-                ) as response:
+                from .thinking import stream_reasoning
+
+                async with aclosing(stream_reasoning(
+                    conv.ask_stream(prompt, image=uploaded, model=model_type),
+                    thinking=thinking, search=search,
+                )) as response:
                     async for chunk in response:
                         yielded = True
                         yield chunk
             else:
-                response = await conv.ask(prompt, image=uploaded, model=model_type)
+                from .thinking import Reasoning, reasoning_capture, request_flags
+
+                with request_flags(thinking, search), reasoning_capture() as sink:
+                    response = await conv.ask(prompt, image=uploaded, model=model_type)
+                if sink:
+                    yield Reasoning("".join(sink))
                 yield response.text
         except DeepSeekError as e:
             log.error(
-                "DeepSeek API error [%s] (%s thread=%s): %s",
+                "DeepSeek API error [%s]: %s",
                 type(e).__name__,
-                conn.email,
-                thread_id,
                 repr(e),
+                extra={"thread_id": thread_id},
             )
             if "input_exceeds_limit" in str(e).lower() and not yielded:
+                if not replay_prompt:
+                    raise
+                log.warning(
+                    "DeepSeek context limit reached; rebuilding thread=%s in a new remote session",
+                    thread_id,
+                )
                 await asyncio.sleep(conn.request_delay)
                 session_id = await conn.client.create_chat_session(conn.client._token)
                 with conn.map_lock:
@@ -513,14 +659,24 @@ class ConnectionPool:
                     conv = conn.client.new_conversation()
                     conn.conversations[thread_id] = conv
                 conn.client._session_id = session_id
+                prompt = replay_prompt
                 if stream:
-                    async with aclosing(
-                        conv.ask_stream(prompt, image=uploaded, model=model_type)
-                    ) as response:
+                    from .thinking import stream_reasoning
+
+                    async with aclosing(stream_reasoning(
+                        conv.ask_stream(prompt, image=uploaded, model=model_type),
+                        thinking=thinking, search=search,
+                    )) as response:
                         async for chunk in response:
+                            yielded = True
                             yield chunk
                 else:
-                    response = await conv.ask(prompt, image=uploaded, model=model_type)
+                    from .thinking import Reasoning, reasoning_capture, request_flags
+
+                    with request_flags(thinking, search), reasoning_capture() as sink:
+                        response = await conv.ask(prompt, image=uploaded, model=model_type)
+                    if sink:
+                        yield Reasoning("".join(sink))
                     yield response.text
                 return
             raise
@@ -562,9 +718,15 @@ def init_pool(
     queue_limit: int = 64,
     queue_timeout: float = 120.0,
     request_delay: float | None = None,
+    storage_backend: str = "sqlite",
+    mongo_uri: str = "",
+    mongo_db: str = "deepseek_proxy",
 ) -> ConnectionPool:
     global _pool
-    store = StateStore(db_path, snapshot_interval=snapshot_interval)
+    backend = build_backend(
+        storage_backend, db_path=db_path, mongo_uri=mongo_uri, mongo_db=mongo_db
+    )
+    store = StateStore(db_path, snapshot_interval=snapshot_interval, backend=backend)
     store.open()
     _pool = ConnectionPool(
         ACCOUNTS,
@@ -592,11 +754,27 @@ async def shutdown_pool() -> None:
 
 
 async def generate_response(
-    thread_id: str, prompt: str, model: str = "", stream: bool = False, image: bytes | None = None
+    thread_id: str,
+    prompt: str,
+    model: str = "",
+    stream: bool = False,
+    image: bytes | None = None,
+    replay_prompt: str | None = None,
+    thinking: bool = False,
+    search: bool = False,
 ):
     pool = get_pool()
     async with aclosing(
-        pool.generate_response(thread_id, prompt, model=model, stream=stream, image=image)
+        pool.generate_response(
+            thread_id,
+            prompt,
+            model=model,
+            stream=stream,
+            image=image,
+            replay_prompt=replay_prompt,
+            thinking=thinking,
+            search=search,
+        )
     ) as response:
         async for chunk in response:
             yield chunk
@@ -607,10 +785,26 @@ def turn(thread_id: str):
 
 
 async def generate_in_turn(
-    thread_id: str, prompt: str, model: str = "", stream: bool = False, image: bytes | None = None
+    thread_id: str,
+    prompt: str,
+    model: str = "",
+    stream: bool = False,
+    image: bytes | None = None,
+    replay_prompt: str | None = None,
+    thinking: bool = False,
+    search: bool = False,
 ):
     async with aclosing(
-        get_pool().generate_in_turn(thread_id, prompt, model=model, stream=stream, image=image)
+        get_pool().generate_in_turn(
+            thread_id,
+            prompt,
+            model=model,
+            stream=stream,
+            image=image,
+            replay_prompt=replay_prompt,
+            thinking=thinking,
+            search=search,
+        )
     ) as response:
         async for chunk in response:
             yield chunk

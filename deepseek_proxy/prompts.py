@@ -10,6 +10,7 @@ from .tools.format import (
     format_reminder_text,
 )
 from .observability import get_logger
+from .transport import thread_id_from_headers
 
 log = get_logger(__name__)
 
@@ -34,6 +35,16 @@ def normalize_content(content: Any) -> str:
     return str(content) if content else ""
 
 
+def system_prompt_signature(messages: List[Message]) -> str:
+    """Return a stable fingerprint of the request's system/developer prompt."""
+    system = "\n\n".join(
+        normalize_content(message.content)
+        for message in messages
+        if message.role in ("system", "developer")
+    )
+    return hashlib.sha256(system.encode("utf-8")).hexdigest()
+
+
 _TITLE_PROMPT_MARKER = "You name chat sessions"
 
 
@@ -56,22 +67,39 @@ def is_title_request(request: ChatRequest) -> bool:
     return False
 
 
-def get_thread_id(request: ChatRequest) -> str:
-    """Derive a stable thread ID from the request, or use the provided one."""
+def _hash_thread_id(prefix: str, seed: str, user: Optional[str] = None) -> str:
+    payload = ((user + "\0" if user else "") + seed).encode()
+    return prefix + hashlib.sha256(payload).hexdigest()[:24]
+
+
+def get_thread_id(request: ChatRequest, headers=None) -> str:
+    """Derive a stable thread ID from the request, or use the provided one.
+
+    Precedence: an explicit ``thread_id`` body field, then the client-advertised
+    session id, then a hash of the first user message.
+
+    The session id is what keeps a thread alive across compaction. Compaction
+    rewrites the first user message into a summary, so the first-message hash
+    changes mid-conversation and would otherwise strand the conversation on an
+    empty DeepSeek session. Clients that do not advertise a session id (plain
+    OpenAI SDK calls) still fall back to the hash, which is correct for them
+    because they send the full history every turn.
+    """
     if request.thread_id:
         return request.thread_id
+    # Title generation inherits the parent session's headers, so it must be
+    # detected before the session id is consulted or the title call would share
+    # the conversation's DeepSeek session and their responses would cross.
     prefix = "title_" if is_title_request(request) else "thread_"
+    session_id = thread_id_from_headers(headers)
+    if session_id is not None:
+        return _hash_thread_id(prefix, session_id)
     for msg in request.messages:
         content = normalize_content(msg.content)
         if msg.role == "user" and content:
-            return (
-                prefix
-                + hashlib.sha256(
-                    ((request.user + "\0" if request.user else "") + content).encode()
-                ).hexdigest()[:24]
-            )
+            return _hash_thread_id(prefix, content, request.user)
     all_content = "".join(normalize_content(m.content) for m in request.messages)
-    return prefix + hashlib.sha256(all_content.encode()).hexdigest()[:24]
+    return _hash_thread_id(prefix, all_content, request.user)
 
 
 def get_new_messages(messages: List[Message]) -> List[Message]:

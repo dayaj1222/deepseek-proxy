@@ -1,5 +1,4 @@
 """Single source of truth for the tool-call wire format.
-
 Everything that governs the format lives here and ONLY here:
 
   - the DIALECTS registry (tag spellings, body kind, instruction text)
@@ -124,10 +123,32 @@ Parameters (JSON Schema) below corresponds to one key of that object.
 
 {tool_call_template}
 
-name in the TOOL_CALL_OPEN attribute; one JSON object between the tags.""",
-        format_reminder="""[FORMAT REMINDER] Tool calls must use exactly this shape:
+name in the TOOL_CALL_OPEN attribute; one JSON object between the tags.
+Emit each tool call exactly once. Never repeat an opening tag, closing tag,
+or the complete tool-call block after it has been emitted.""",
+        format_reminder="""⚠ HARD FORMAT REQUIREMENT — READ BEFORE EMITTING ANY TOOL CALL.
+Violations are NOT repaired for you: a malformed or repeated block is DROPPED
+and never executed, and you will burn this turn on a correction loop instead
+of progressing the task. The ONLY valid shape is exactly:
 {tool_call_template}
-Tool name in the TOOL_CALL_OPEN name attribute; one JSON object between the tags. Malformed calls require correction before execution.""",
+Zero-tolerance rules:
+1. ONE complete block per call, emitted exactly once. NEVER re-emit, echo,
+   quote, or repeat any opening tag, closing tag, or completed block — repeats
+   are discarded, including any second closing tag.
+2. Tool name ONLY in the opening tag's name attribute. Body is ONE JSON object
+   with exactly the schema's arguments — no code fences, no bare JSON outside
+   tags, no invented parameters.
+3. After a tool result arrives, CONTINUE the task. Do NOT re-emit the same call.
+Get the format wrong and your tool call silently does nothing.
+!!IMPORTANT!!
+FOLLOW THE EXACT FORMAT SPECIFIED ABOVE:
+FORBIDDEN STRING, NEVER EMIT ANYTHIN WITH THESE
+｜｜DSML｜｜
+｜｜DSML｜｜
+
+!!IMPORTANT!!
+YOU HAVE A PROBLEM that you emit the last tag(</invoke>) multiple times emit it only ONCE, you look stupid when you emit it multiple time.
+ """,
     ),
     "xml_params": Dialect(
         name="xml_params",
@@ -171,10 +192,23 @@ corresponds to one TOOL_PARAM_OPEN element.
 
 {tool_call_template}
 
-name in the TOOL_CALL_OPEN attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument.""",
-        format_reminder="""[FORMAT REMINDER] Tool calls must use exactly this shape:
+name in the TOOL_CALL_OPEN attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument.
+Emit each tool call exactly once. Never repeat an opening tag, closing tag,
+parameter tag, or the complete tool-call block after it has been emitted.""",
+        format_reminder="""⚠ HARD FORMAT REQUIREMENT — READ BEFORE EMITTING ANY TOOL CALL.
+Violations are NOT repaired for you: a malformed or repeated block is DROPPED
+and never executed, and you will burn this turn on a correction loop instead
+of progressing the task. The ONLY valid shape is exactly:
 {tool_call_template}
-Tool name in the TOOL_CALL_OPEN name attribute; one TOOL_PARAM_OPEN name="...">valueTOOL_PARAM_CLOSE element per argument. Malformed calls require correction before execution.""",
+Zero-tolerance rules:
+1. ONE complete block per call, emitted exactly once. NEVER re-emit, echo,
+   quote, or repeat any opening, parameter, or closing tag, or any completed
+   block — repeats are discarded, including any second closing tag.
+2. Tool name ONLY in the opening tag's name attribute; every argument is its
+   own parameter element — no JSON object between the tags, no code fences,
+   no invented parameters.
+3. After a tool result arrives, CONTINUE the task. Do NOT re-emit the same call.
+Get the format wrong and your tool call silently does nothing.""",
     ),
     "dsml": Dialect(
         name="dsml",

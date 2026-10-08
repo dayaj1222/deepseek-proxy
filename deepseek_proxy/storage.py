@@ -1,21 +1,29 @@
-"""SQLite state store for thread→account binding and per-account resume state.
+"""State store for thread→account binding and per-account resume state.
 
-Single source of truth on disk, with a hot in-memory cache for reads. Runtime
-updates hit memory only. The application periodically calls flush (and closes
-on shutdown); only changed rows are persisted.
+Single logical source of truth, with a hot in-memory cache for reads.
+Runtime updates hit memory only. The application periodically calls
+snapshot() (and closes on shutdown); only changed rows are persisted.
 
-Two tables:
+Two logical tables (regardless of backend):
 
   threads(thread_id, backend_email, last_active, created_at)
       Routing truth: which account (email) owns a thread. last_active is the
       epoch of the most recent request, used for idle-TTL occupancy.
 
-  resume(thread_id, backend_email, session_id, parent_message_id)
+  resume(thread_id, backend_email, session_id, parent_message_id,
+         total_tokens, exchanges)
       DeepSeek continuation tokens, keyed by thread. Written by whichever
       connection owns the thread so it can resume after restart.
 
 Threads never leave `threads` (the binding is permanent); idle threads are
 simply not counted by the occupancy query.
+
+Persistence is pluggable behind StorageBackend:
+
+  - SqliteBackend  (default; local runs, tests)
+  - MongoBackend   (deployment, e.g. MongoDB Atlas free tier)
+
+Select with STORAGE_BACKEND=sqlite|mongo. See settings.py.
 """
 
 from __future__ import annotations
@@ -24,10 +32,41 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Protocol, Tuple
 
 
-_SCHEMA = """
+# ---------------------------------------------------------------------------
+# Backend protocol
+# ---------------------------------------------------------------------------
+
+ThreadsMap = Dict[str, Dict]
+ResumeMap = Dict[str, Dict]
+
+
+class StorageBackend(Protocol):
+    """Persistence seam. StateStore owns the caches; the backend owns disk/network.
+
+    Contract:
+      - open() runs once before any load()/write() call.
+      - load() returns (threads, resume) as plain dicts keyed by thread_id.
+      - write(threads, resume) persists only the supplied (already-diffed) rows.
+      - close() flushes and releases resources; safe to call once.
+    """
+
+    def open(self) -> None: ...
+
+    def load(self) -> Tuple[ThreadsMap, ResumeMap]: ...
+
+    def write(self, threads: ThreadsMap, resume: ResumeMap) -> None: ...
+
+    def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# SQLite backend (previous StateStore persistence, unchanged in behavior)
+# ---------------------------------------------------------------------------
+
+_SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
     thread_id    TEXT PRIMARY KEY,
     backend_email TEXT NOT NULL,
@@ -48,27 +87,20 @@ CREATE TABLE IF NOT EXISTS resume (
 """
 
 
-class StateStore:
-    """In-memory + debounced-SQLite store. Thread-safe within one process."""
+class SqliteBackend:
+    """SQLite persistence. One connection, WAL mode, INSERT OR REPLACE upserts."""
 
-    def __init__(self, db_path: str, snapshot_interval: float = 5.0):
+    def __init__(self, db_path: str):
         self._db_path = Path(db_path)
-        self._snapshot_interval = snapshot_interval
-        self._lock = threading.RLock()
-        self._flush_lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.RLock()
 
-        # Hot cache (source of truth during operation).
-        self._threads: Dict[str, Dict] = {}  # thread_id -> {backend_email, last_active, created_at}
-        self._resume: Dict[str, Dict] = {}  # thread_id -> {session_id, parent_message_id}
-        self._dirty = False
-        self._dirty_threads: set[str] = set()
-        self._dirty_resume: set[str] = set()
-        self._last_snapshot = 0.0
+    @property
+    def path(self) -> Path:
+        return self._db_path
 
-    # ---- lifecycle ----
     def open(self) -> None:
-        with self._flush_lock, self._lock:
+        with self._lock:
             if self._conn is not None:
                 return
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,41 +108,260 @@ class StateStore:
             try:
                 self._conn.execute("PRAGMA journal_mode=WAL;")
                 self._conn.execute("PRAGMA busy_timeout=5000;")
-                self._conn.executescript(_SCHEMA)
-                self._load()
+                self._conn.executescript(_SQLITE_SCHEMA)
             except Exception:
                 self._conn.close()
                 self._conn = None
                 raise
 
+    def load(self) -> Tuple[ThreadsMap, ResumeMap]:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            threads: ThreadsMap = {}
+            resume: ResumeMap = {}
+            cur = self._conn.execute(
+                "SELECT thread_id, backend_email, last_active, created_at FROM threads"
+            )
+            for tid, email, last_active, created_at in cur.fetchall():
+                threads[tid] = {
+                    "backend_email": email,
+                    "last_active": last_active,
+                    "created_at": created_at,
+                }
+            cur = self._conn.execute(
+                "SELECT thread_id, backend_email, session_id, parent_message_id, total_tokens, exchanges FROM resume"
+            )
+            for tid, email, sid, pid, tokens, exchanges in cur.fetchall():
+                resume[tid] = {
+                    "backend_email": email,
+                    "session_id": sid,
+                    "parent_message_id": pid,
+                    "total_tokens": tokens,
+                    "exchanges": exchanges,
+                }
+            return threads, resume
+
+    def write(self, threads: ThreadsMap, resume: ResumeMap) -> None:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            self._conn.execute("BEGIN")
+            try:
+                for tid, e in threads.items():
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO threads (thread_id, backend_email, last_active, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (tid, e["backend_email"], e["last_active"], e["created_at"]),
+                    )
+                for tid, e in resume.items():
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO resume (thread_id, backend_email, session_id, parent_message_id, total_tokens, exchanges) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            tid,
+                            e.get("backend_email", ""),
+                            e.get("session_id"),
+                            e.get("parent_message_id"),
+                            int(e.get("total_tokens", 0)),
+                            int(e.get("exchanges", 0)),
+                        ),
+                    )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def close(self) -> None:
-        with self._flush_lock:
-            self.snapshot()
+        with self._lock:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
 
-    def _load(self) -> None:
-        cur = self._conn.execute(
-            "SELECT thread_id, backend_email, last_active, created_at FROM threads"
-        )
-        for tid, email, last_active, created_at in cur.fetchall():
-            self._threads[tid] = {
-                "backend_email": email,
-                "last_active": last_active,
-                "created_at": created_at,
+
+# ---------------------------------------------------------------------------
+# MongoDB backend (deployment; e.g. MongoDB Atlas free tier)
+# ---------------------------------------------------------------------------
+
+
+class MongoBackend:
+    """MongoDB persistence. Two collections, `_id = thread_id`.
+
+    Uses the sync pymongo driver, matching the sync StateStore API; call sites
+    that need to keep the event loop free wrap snapshot() in asyncio.to_thread,
+    exactly as they do for SQLite. Writes are bulk upserts of only the changed
+    rows, so this preserves the debounced-flush semantics.
+
+    pymongo is an optional dependency: installed only when
+    STORAGE_BACKEND=mongo is actually used.
+    """
+
+    def __init__(self, uri: str, database: str = "deepseek_proxy"):
+        self._uri = uri
+        self._database = database
+        self._client = None
+        self._threads = None
+        self._resume = None
+
+    def open(self) -> None:
+        try:
+            from pymongo import MongoClient
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "STORAGE_BACKEND=mongo requires pymongo; install it with "
+                "`pip install pymongo` (or the project's mongo extra)"
+            ) from exc
+        if not self._uri:
+            raise RuntimeError("MONGODB_URI must be set when STORAGE_BACKEND=mongo")
+        self._client = MongoClient(self._uri, appname="deepseek-proxy", tz_aware=False)
+        db = self._client[self._database]
+        self._threads = db["threads"]
+        self._resume = db["resume"]
+        # Fail fast on bad credentials / unreachable cluster rather than on the
+        # first flush, which is fire-and-forget from the app's perspective.
+        self._client.admin.command("ping")
+
+    def load(self) -> Tuple[ThreadsMap, ResumeMap]:
+        if self._threads is None or self._resume is None:
+            raise RuntimeError("backend is not open")
+        threads: ThreadsMap = {}
+        resume: ResumeMap = {}
+        for doc in self._threads.find({}):
+            threads[doc["_id"]] = {
+                "backend_email": doc.get("backend_email", ""),
+                "last_active": float(doc.get("last_active", 0.0)),
+                "created_at": float(doc.get("created_at", 0.0)),
             }
-        cur = self._conn.execute(
-            "SELECT thread_id, backend_email, session_id, parent_message_id, total_tokens, exchanges FROM resume"
-        )
-        for tid, email, sid, pid, tokens, exchanges in cur.fetchall():
-            self._resume[tid] = {
-                "backend_email": email,
-                "session_id": sid,
-                "parent_message_id": pid,
-                "total_tokens": tokens,
-                "exchanges": exchanges,
+        for doc in self._resume.find({}):
+            resume[doc["_id"]] = {
+                "backend_email": doc.get("backend_email", ""),
+                "session_id": doc.get("session_id"),
+                "parent_message_id": doc.get("parent_message_id"),
+                "total_tokens": int(doc.get("total_tokens", 0)),
+                "exchanges": int(doc.get("exchanges", 0)),
             }
+        return threads, resume
+
+    def write(self, threads: ThreadsMap, resume: ResumeMap) -> None:
+        if self._threads is None or self._resume is None:
+            raise RuntimeError("backend is not open")
+        from pymongo import UpdateOne
+
+        thread_ops = []
+        for tid, e in threads.items():
+            thread_ops.append(
+                UpdateOne(
+                    {"_id": tid},
+                    {
+                        "$set": {
+                            "backend_email": e["backend_email"],
+                            "last_active": e["last_active"],
+                            "created_at": e["created_at"],
+                        }
+                    },
+                    upsert=True,
+                )
+            )
+        resume_ops = []
+        for tid, e in resume.items():
+            resume_ops.append(
+                UpdateOne(
+                    {"_id": tid},
+                    {
+                        "$set": {
+                            "backend_email": e.get("backend_email", ""),
+                            "session_id": e.get("session_id"),
+                            "parent_message_id": e.get("parent_message_id"),
+                            "total_tokens": int(e.get("total_tokens", 0)),
+                            "exchanges": int(e.get("exchanges", 0)),
+                        }
+                    },
+                    upsert=True,
+                )
+            )
+        if thread_ops:
+            self._threads.bulk_write(thread_ops, ordered=False)
+        if resume_ops:
+            self._resume.bulk_write(resume_ops, ordered=False)
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+            self._threads = None
+            self._resume = None
+
+
+# ---------------------------------------------------------------------------
+# Backend factory
+# ---------------------------------------------------------------------------
+
+
+def build_backend(kind: str, *, db_path: str, mongo_uri: str = "", mongo_db: str = "deepseek_proxy") -> StorageBackend:
+    """Select a persistence backend by name. Defaults to SQLite for local runs."""
+    normalized = (kind or "sqlite").strip().lower()
+    if normalized == "sqlite":
+        return SqliteBackend(db_path)
+    if normalized == "mongo":
+        return MongoBackend(mongo_uri, mongo_db)
+    raise ValueError(f"unknown STORAGE_BACKEND {kind!r}; expected 'sqlite' or 'mongo'")
+
+
+# ---------------------------------------------------------------------------
+# StateStore — caches + public API; delegates persistence to a backend
+# ---------------------------------------------------------------------------
+
+
+class StateStore:
+    """In-memory + debounced persistence. Thread-safe within one process.
+
+    The public API is unchanged: all routing/resume reads and mutations are
+    served from the hot cache, and only `snapshot()`/`close()` touch the
+    backend.
+    """
+
+    def __init__(self, db_path: str, snapshot_interval: float = 5.0, backend: Optional[StorageBackend] = None):
+        self._snapshot_interval = snapshot_interval
+        self._lock = threading.RLock()
+        self._flush_lock = threading.RLock()
+        self._backend: StorageBackend = backend or SqliteBackend(db_path)
+
+        # Hot cache (source of truth during operation).
+        self._threads: ThreadsMap = {}  # thread_id -> {backend_email, last_active, created_at}
+        self._resume: ResumeMap = {}  # thread_id -> {session_id, parent_message_id, ...}
+        self._dirty = False
+        self._dirty_threads: set[str] = set()
+        self._dirty_resume: set[str] = set()
+        self._last_snapshot = 0.0
+
+    # ---- lifecycle ----
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Backward-compat accessor for tests and legacy callers.
+
+        Only valid when the SQLite backend is in use. Keeps existing tests that
+        inspect the connection (total_changes, triggers, trace callbacks) working
+        unchanged after persistence was factored into SqliteBackend.
+        """
+        backend = self._backend
+        conn = getattr(backend, "_conn", None)
+        if conn is None:
+            raise AttributeError(
+                "_conn is only available with the SQLite backend"
+            )
+        return conn
+
+    def open(self) -> None:
+        with self._flush_lock, self._lock:
+            self._backend.open()
+            threads, resume = self._backend.load()
+            self._threads.update(threads)
+            self._resume.update(resume)
+
+    def close(self) -> None:
+        with self._flush_lock:
+            self.snapshot()
+            self._backend.close()
 
     # ---- binding (thread -> account) ----
     def get_binding(self, thread_id: str) -> Optional[str]:
@@ -214,14 +465,14 @@ class StateStore:
         self._dirty = True
 
     def snapshot(self) -> None:
-        """Flush changed rows; safe to run via asyncio.to_thread.
+        """Flush changed rows to the backend; safe to run via asyncio.to_thread.
 
-        Serialize SQLite access separately from the cache lock so requests can
-        continue updating memory during disk I/O. Failed rows remain dirty.
+        Serialize backend access separately from the cache lock so requests can
+        continue updating memory during I/O. Failed rows remain dirty.
         """
         with self._flush_lock:
             with self._lock:
-                if self._conn is None or not self._dirty:
+                if not self._dirty:
                     return
                 threads = {tid: self._threads[tid].copy() for tid in self._dirty_threads}
                 resume = {tid: self._resume[tid].copy() for tid in self._dirty_resume}
@@ -232,35 +483,12 @@ class StateStore:
                 self._dirty_resume.clear()
                 self._dirty = False
             try:
-                self._conn.execute("BEGIN")
-                for tid, e in threads.items():
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO threads (thread_id, backend_email, last_active, created_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (tid, e["backend_email"], e["last_active"], e["created_at"]),
-                    )
-                for tid, e in resume.items():
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO resume (thread_id, backend_email, session_id, parent_message_id, total_tokens, exchanges) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            tid,
-                            e.get("backend_email", ""),
-                            e.get("session_id"),
-                            e.get("parent_message_id"),
-                            int(e.get("total_tokens", 0)),
-                            int(e.get("exchanges", 0)),
-                        ),
-                    )
-                self._conn.execute("COMMIT")
+                self._backend.write(threads, resume)
             except Exception:
-                try:
-                    self._conn.rollback()
-                finally:
-                    with self._lock:
-                        self._dirty_threads.update(threads)
-                        self._dirty_resume.update(resume)
-                        self._dirty = True
+                with self._lock:
+                    self._dirty_threads.update(threads)
+                    self._dirty_resume.update(resume)
+                    self._dirty = True
                 raise
             self._last_snapshot = time.time()
 

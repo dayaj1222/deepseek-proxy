@@ -264,6 +264,63 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 4)
         self.assertEqual(self.conn.cooldown_until, now + 30)
 
+    async def test_generation_err_uses_existing_rate_limit_backoff(self):
+        now = 100.0
+        waits = []
+        calls = []
+        real_sleep = asyncio.sleep
+
+        async def sleep(delay):
+            nonlocal now
+            waits.append(delay)
+            now += delay
+            await real_sleep(0)
+
+        async def unavailable(*args, **kwargs):
+            calls.append(now)
+            if len(calls) < 3:
+                raise FakeError(
+                    "SSE hint error: finish_reason='generation_err' "
+                    "content='Server is temporarily unavailable.'"
+                )
+            yield "recovered"
+
+        with (
+            patch.object(scheduler, "time", SimpleNamespace(monotonic=lambda: now)),
+            patch.object(scheduler.asyncio, "sleep", sleep),
+            patch.object(self.pool, "_generate_once", unavailable),
+            patch.object(scheduler, "RATE_LIMIT_BACKOFF_S", 10),
+            patch.object(scheduler, "RATE_LIMIT_MAX_RETRIES", 3),
+        ):
+            self.assertEqual(await collect(self.pool, "one"), ["recovered"])
+
+        self.assertEqual(waits, [10, 20])
+        self.assertEqual(len(calls), 3)
+
+    async def test_generation_err_retry_is_logged_at_info_without_backend_details(self):
+        calls = 0
+
+        async def unavailable_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise FakeError(
+                    "SSE hint error: finish_reason='generation_err' "
+                    "content='Server is temporarily unavailable.'"
+                )
+            yield "recovered"
+
+        with (
+            patch.object(self.pool, "_generate_once", unavailable_once),
+            patch.object(scheduler, "RATE_LIMIT_BACKOFF_S", 0),
+            patch.object(scheduler, "RATE_LIMIT_MAX_RETRIES", 1),
+            self.assertLogs(scheduler.log, level="INFO") as captured,
+        ):
+            self.assertEqual(await collect(self.pool, "one"), ["recovered"])
+
+        self.assertTrue(any("Retrying DeepSeek request" in line for line in captured.output))
+        self.assertFalse(any("temporarily unavailable" in line for line in captured.output))
+
     async def test_midstream_rate_limit_sets_cooldown_without_replay(self):
         async def limited(*args, **kwargs):
             yield "partial"
@@ -299,6 +356,15 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.retry_after, 10)
         self.assertGreater(self.conn.cooldown_until - time.monotonic(), 9)
         self.assertFalse(self.conn.rate_lock.locked())
+
+    async def test_context_limit_replays_history_in_replacement_session(self):
+        replay = "System: original\n\nUser: earlier\n\nUser: latest"
+        FakeClient.failures["latest"] = "input_exceeds_limit"
+        result = await collect(self.pool, "one", "latest", replay_prompt=replay)
+        self.assertEqual(result, [replay])
+        self.assertEqual(len(FakeClient.instances), 1)
+        self.assertEqual(self.conn.client.sessions, 2)
+        self.assertEqual(self.store.get_resume("one")[1], "parent:" + replay)
 
     async def test_refresh_invalidates_all_old_client_conversations(self):
         await collect(self.pool, "one")

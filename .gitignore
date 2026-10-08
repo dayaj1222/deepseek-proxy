@@ -8,7 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Secrets and per-environment config
+# .env and variants are ignored; .env.example is committed as a template.
 .env
+.env.*
+!.env.example
 
 # Vim
 Session.vim
@@ -28,3 +33,9 @@ c/
 
 # Local config (secrets)
 config.toml
+
+# Local runtime (pid/log files) for scripts/deepseek-proxy
+.run/
+
+# Pi agent task output/logs (never ship these)
+.pi/

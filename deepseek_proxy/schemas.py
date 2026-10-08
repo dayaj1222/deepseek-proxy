@@ -79,6 +79,11 @@ class ChatRequest(BaseModel):
     max_completion_tokens: int | None = Field(default=None, ge=1)
     stop: str | list[str] | None = None
     response_format: dict[str, Any] | None = None
+    # Official thinking params clients already send. Accepted (not rejected) and
+    # used to override the THINKING_ENABLED setting per request.
+    reasoning_effort: str | None = None
+    reasoning: dict[str, Any] | None = None
+    thinking: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_tools(self):
@@ -95,3 +100,47 @@ class ChatRequest(BaseModel):
         if self.stream_options is not None and not self.stream:
             raise ValueError("stream_options requires stream=true")
         return self
+
+
+# Values of reasoning_effort that mean "off".
+_DISABLED_EFFORTS = {"", "none", "off", "disabled", "minimal"}
+# Values of a thinking object's "type" that mean "on".
+_ENABLED_THINKING_TYPES = {"enabled", "enabled_thinking", "on", "true", "thinking"}
+
+
+def _explicit_thinking(request: ChatRequest) -> bool | None:
+    """Resolve an explicit per-request thinking intent, or None if absent.
+
+    Precedence: ``reasoning_effort`` (OpenAI-style string) >
+    ``reasoning`` object (``{"effort": ...}``) > ``thinking`` object
+    (``{"type": "enabled"}``).
+    """
+    effort = request.reasoning_effort
+    if isinstance(effort, str) and effort.strip():
+        return effort.strip().lower() not in _DISABLED_EFFORTS
+
+    reasoning = request.reasoning
+    if isinstance(reasoning, dict):
+        inner = reasoning.get("effort", reasoning.get("enabled", reasoning.get("type")))
+        if isinstance(inner, bool):
+            return inner
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip().lower() not in _DISABLED_EFFORTS
+
+    thinking = request.thinking
+    if isinstance(thinking, dict):
+        inner = thinking.get("type", thinking.get("enabled"))
+        if isinstance(inner, bool):
+            return inner
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip().lower() in _ENABLED_THINKING_TYPES
+
+    return None
+
+
+def want_thinking(request: ChatRequest, settings) -> bool:
+    """Per-request thinking intent, falling back to the THINKING_ENABLED setting."""
+    explicit = _explicit_thinking(request)
+    if explicit is not None:
+        return explicit
+    return bool(getattr(settings, "thinking_enabled", False))

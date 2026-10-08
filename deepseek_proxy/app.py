@@ -15,7 +15,7 @@ from .errors import ProxyError
 from .schemas import ChatRequest
 from .service import ChatService
 from .settings import settings as default_settings
-from .storage import StateStore
+from .storage import StateStore, build_backend
 from .transport import collect, error_for, stream
 
 log = logging.getLogger(__name__)
@@ -23,6 +23,16 @@ log = logging.getLogger(__name__)
 
 def create_app(settings=None, pool=None):
     settings = settings or default_settings
+
+    # Thinking/search mode: patches the installed aiodeepseek client.
+    # Idempotent. Applied here because
+    # create_app is the single shared entry point for every launch path
+    # (module-level `app`, `run()`, `__main__`, and tests).
+    from .thinking import apply as apply_thinking
+
+    # Always install: request-level reasoning parameters can enable thinking
+    # even when the global THINKING_ENABLED setting is false.
+    apply_thinking(True)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -33,18 +43,29 @@ def create_app(settings=None, pool=None):
         flush = None
         try:
             if owned:
-                # Account locks are process-local: prevent accidental multi-worker use.
-                import fcntl
+                backend_kind = getattr(settings, "storage_backend", "sqlite")
+                backend = build_backend(
+                    backend_kind,
+                    db_path=str(settings.db_path),
+                    mongo_uri=getattr(settings, "mongodb_uri", ""),
+                    mongo_db=getattr(settings, "mongodb_db", "deepseek_proxy"),
+                )
+                if backend_kind == "sqlite":
+                    # Account locks are process-local: prevent accidental multi-worker
+                    # use. Only meaningful for the on-disk SQLite backend; a remote
+                    # backend relies on running a single instance (e.g. one Render
+                    # service).
+                    import fcntl
 
-                settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_file = open(str(settings.db_path) + ".lock", "a")
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as exc:
-                    raise RuntimeError(
-                        "Database already owned by a proxy process; run one worker"
-                    ) from exc
-                store = StateStore(str(settings.db_path))
+                    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+                    lock_file = open(str(settings.db_path) + ".lock", "a")
+                    try:
+                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as exc:
+                        raise RuntimeError(
+                            "Database already owned by a proxy process; run one worker"
+                        ) from exc
+                store = StateStore(str(settings.db_path), backend=backend)
                 store.open()
                 pool = ConnectionPool(
                     settings.accounts,
@@ -112,7 +133,7 @@ def create_app(settings=None, pool=None):
         request_id = "req_" + uuid4().hex
         if body.stream:
             return StreamingResponse(
-                stream(service, body),
+                stream(service, body, request.headers),
                 media_type="text/event-stream",
                 headers={
                     "x-request-id": request_id,
@@ -121,7 +142,10 @@ def create_app(settings=None, pool=None):
                 },
             )
         try:
-            return JSONResponse(await collect(service, body), headers={"x-request-id": request_id})
+            return JSONResponse(
+                await collect(service, body, request.headers),
+                headers={"x-request-id": request_id},
+            )
         except Exception as exc:
             raise error_for(exc) from exc
 

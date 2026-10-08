@@ -8,9 +8,10 @@ from jsonschema import Draft202012Validator, SchemaError
 
 from .errors import ProxyError
 from .images import load_image
-from .prompts import build_prompt, get_new_messages, get_thread_id
-from .schemas import NamedToolChoice
+from .prompts import build_prompt, get_new_messages, get_thread_id, system_prompt_signature
+from .schemas import NamedToolChoice, want_thinking
 from .settings import estimate_tokens
+from .thinking import Reasoning
 from .tools.parser import Event, ToolParser
 from .tools.recovery import Recovery
 
@@ -21,6 +22,7 @@ class ChatService:
     def __init__(self, pool, settings):
         self.pool = pool
         self.settings = settings
+        self._system_prompt_signatures: dict[str, str] = {}
 
     def validate(self, request):
         # Hermes usually sends the public OpenAI model id (for example
@@ -51,8 +53,8 @@ class ChatService:
                     "Invalid or unsupported tool schema", 400, "invalid_tool_schema", "tools"
                 ) from exc
 
-    async def events(self, request):
-        thread_id = get_thread_id(request)
+    async def events(self, request, headers=None):
+        thread_id = get_thread_id(request, headers)
         tools = request.tools or []
         if request.tool_choice == "none":
             tools = []
@@ -72,18 +74,31 @@ class ChatService:
                     interval = self.settings.system_prompt_interval
                     reinforce = interval > 0 and (prev + count) // interval > prev // interval
                     first = not any(m.role == "assistant" for m in request.messages)
+                    signature = system_prompt_signature(request.messages)
+                    system_changed = self._system_prompt_signatures.get(thread_id) != signature
+                    self._system_prompt_signatures[thread_id] = signature
+                    reanchor = first or reinforce or system_changed
                     prompt, _ = build_prompt(
                         messages,
                         tools,
-                        first or reinforce,
-                        first or reinforce,
+                        reanchor,
+                        reanchor,
+                        prev,
+                        request.messages,
+                    )
+                    # Normal requests send only the delta because the remote
+                    # conversation stores prior turns. If that remote context
+                    # fills up, a replacement session needs a full transcript
+                    # or retrying only `prompt` silently loses the thread.
+                    replay_prompt, _ = build_prompt(
+                        request.messages,
+                        tools,
+                        True,
+                        True,
                         prev,
                         request.messages,
                     )
                     if tools:
-                        prompt += "\nOnly call currently available tools: " + ", ".join(
-                            t.function.name for t in tools
-                        )
                         if recovery.required:
                             prompt += "\nYou must return a tool call."
                         if not request.parallel_tool_calls:
@@ -92,6 +107,17 @@ class ChatService:
                         prompt += "\nDo not call tools in this turn; reply with normal text."
                     image = await load_image(messages, self.settings.image_max_bytes)
                     prompt_tokens = self.pool.get_thread_tokens(thread_id) + estimate_tokens(prompt)
+                    thinking = want_thinking(request, self.settings)
+                    search = bool(getattr(self.settings, "search_enabled", False))
+                    log.debug(
+                        "Prepared request",
+                        extra={
+                            "thread_id": thread_id,
+                            "prompt_tokens": estimate_tokens(prompt),
+                            "reanchor": reanchor,
+                            "new_messages": len(messages),
+                        },
+                    )
                     context_added = estimate_tokens(prompt)
                     raw_response = []
                     parser = ToolParser(
@@ -99,10 +125,20 @@ class ChatService:
                     )
                     async with aclosing(
                         turn.generate(
-                            prompt, model=request.model, stream=request.stream, image=image
+                            prompt,
+                            model=request.model,
+                            stream=request.stream,
+                            image=image,
+                            replay_prompt=replay_prompt,
+                            thinking=thinking,
+                            search=search,
                         )
                     ) as source:
                         async for text in source:
+                            if isinstance(text, Reasoning):
+                                if text.text:
+                                    yield Event("reasoning", text.text)
+                                continue
                             raw_response.append(text)
                             for event in parser.feed(text):
                                 accepted = recovery.accept(event)
@@ -119,7 +155,12 @@ class ChatService:
                             break
                         repair_prompt = recovery.begin_repair()
                         log.warning(
-                            "Tool repair attempt=%d unresolved=%d", attempt, recovery.expected
+                            "Tool repair",
+                            extra={
+                                "thread_id": thread_id,
+                                "attempt": attempt,
+                                "unresolved": recovery.expected,
+                            },
                         )
                         repair_parser = ToolParser(
                             enabled=True, buffer_limit=self.settings.tool_buffer_limit
@@ -144,12 +185,25 @@ class ChatService:
                             "".join(repair_raw)
                         )
                         recovery.end_repair()
-                        log.info(
-                            "Tool repair attempt=%d remaining=%d", attempt, len(recovery.pending)
+                        log.debug(
+                            "Tool repair settled",
+                            extra={
+                                "thread_id": thread_id,
+                                "attempt": attempt,
+                                "remaining": len(recovery.pending),
+                            },
                         )
                     # Persist the context consumed, including internal corrections.
                     self.pool.add_thread_tokens(thread_id, context_added)
                     self.pool.bump_thread_exchanges(thread_id, count)
+                    log.info(
+                        "Turn complete",
+                        extra={
+                            "thread_id": thread_id,
+                            "prompt_tokens": prompt_tokens + context_added,
+                            "new_messages": count,
+                        },
+                    )
                     if recovery.pending:
                         raise ProxyError(
                             "Could not recover a valid tool response", code="tool_repair_failed"

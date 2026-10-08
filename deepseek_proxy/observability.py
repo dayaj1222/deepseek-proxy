@@ -27,6 +27,32 @@ from .settings import settings
 # Context-local request id, so concurrent requests don't interleave.
 _request_id: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
 
+# Structured fields promoted out of the log message into their own JSON keys
+# (or appended as compact `k=v` in pretty mode). A fixed allowlist: the
+# formatters never copy arbitrary `extra` attributes off a record, so a caller
+# cannot leak payloads into the log by accident.
+#
+# NOTE: these must not collide with LogRecord's own attributes (`thread`,
+# `name`, `module`, `process`, ...), which logging rejects in `extra`.
+STRUCTURED_FIELDS = (
+    "thread_id",
+    "model",
+    "stream",
+    "prompt_tokens",
+    "reanchor",
+    "new_messages",
+    "attempt",
+    "unresolved",
+    "remaining",
+)
+
+
+def _structured(record: logging.LogRecord) -> Dict[str, Any]:
+    return {
+        f: getattr(record, f) for f in STRUCTURED_FIELDS if getattr(record, f, None) is not None
+    }
+
+
 # ANSI colors for the pretty formatter.
 _RESET = "\x1b[0m"
 _COLORS = {
@@ -53,6 +79,7 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg": record.getMessage(),
         }
+        payload.update(_structured(record))
         rid = _request_id.get()
         if rid:
             payload["request_id"] = rid
@@ -74,6 +101,9 @@ class PrettyFormatter(logging.Formatter):
             f"{time.strftime('%H:%M:%S', time.localtime(record.created))}.{int(record.msecs):03d} "
             f"{color}{record.levelname:<8}{_RESET} {record.getMessage()}"
         )
+        fields = _structured(record)
+        if fields:
+            base += " " + " ".join(f"{k}={v}" for k, v in fields.items())
         rid = _request_id.get()
         if rid:
             base = f"[{rid}] {base}"
