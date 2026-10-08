@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: deepseek-proxy
+    runtime: python
+    region: singapore
+    plan: free
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: pip install ".[mongo]"
+    startCommand: python main.py
+    healthCheckPath: /readyz
+    envVars:
+      # Persistence: SQLite is local-only; Render uses MongoDB Atlas.
+      - key: STORAGE_BACKEND
+        value: mongo
+      - key: MONGODB_DB
+        value: deepseek_proxy
+      # Secrets — set these in the Render dashboard, NOT in this file.
+      # sync: false keeps them out of the blueprint and prompts for a value.
+      - key: MONGODB_URI
+        sync: false
+      - key: DEEPSEEK_TOKEN
+        sync: false
+      - key: DEEPSEEK_EMAIL_0
+        sync: false
+      - key: DEEPSEEK_PASSWORD_0
+        sync: false
+      - key: DEEPSEEK_EMAIL_1
+        sync: false
+      - key: DEEPSEEK_PASSWORD_1
+        sync: false
+      - key: DEEPSEEK_EMAIL_2
+        sync: false
+      - key: DEEPSEEK_PASSWORD_2
+        sync: false
+      - key: DEEPSEEK_EMAIL_3
+        sync: false
+      - key: DEEPSEEK_PASSWORD_3
+        sync: false

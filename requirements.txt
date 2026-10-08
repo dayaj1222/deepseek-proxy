@@ -1,2 +1,6 @@
 # Compatibility entry point. Canonical dependencies: pyproject.toml + uv.lock.
-.
+#
+# Includes the [mongo] extra unconditionally: Render (and any deploy host that
+# reads requirements.txt) must have pymongo available so STORAGE_BACKEND=mongo
+# works. Local SQLite runs are unaffected — pymongo is simply unused there.
+.[mongo]
