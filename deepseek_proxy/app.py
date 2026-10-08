@@ -2,14 +2,17 @@
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager, suppress
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from .admin_ui import ADMIN_HTML
+from .auth import generate_key, hash_key, require_admin, require_api_key
 from .backend import ConnectionPool
 from .errors import ProxyError
 from .schemas import ChatRequest
@@ -75,6 +78,8 @@ def create_app(settings=None, pool=None):
                     queue_timeout=settings.queue_timeout,
                     request_delay=settings.request_delay,
                 )
+            app.state.settings = settings
+            app.state.store = store
             app.state.service = ChatService(pool, settings)
 
             async def flush_periodically():
@@ -126,7 +131,7 @@ def create_app(settings=None, pool=None):
             headers["Retry-After"] = str(max(1, int(exc.retry_after)))
         return JSONResponse(exc.payload(), status_code=exc.status, headers=headers)
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", dependencies=[Depends(require_api_key)])
     async def completions(body: ChatRequest, request: Request):
         service = request.app.state.service
         service.validate(body)
@@ -149,7 +154,7 @@ def create_app(settings=None, pool=None):
         except Exception as exc:
             raise error_for(exc) from exc
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", dependencies=[Depends(require_api_key)])
     async def models():
         return {"object": "list", "data": settings.models}
 
@@ -160,6 +165,40 @@ def create_app(settings=None, pool=None):
     @app.get("/readyz")
     async def ready():
         return {"status": "ready", "backend": "lazy_login"}
+
+    if getattr(settings, "auth_enabled", False):
+
+        @app.get("/admin", dependencies=[Depends(require_admin)])
+        async def admin_page():
+            return HTMLResponse(ADMIN_HTML)
+
+        @app.get("/admin/keys", dependencies=[Depends(require_admin)])
+        async def list_keys():
+            return {"keys": app.state.store._backend.list_api_keys()}
+
+        @app.post("/admin/keys", dependencies=[Depends(require_admin)])
+        async def create_key(request: Request):
+            body = await request.json()
+            name = (body or {}).get("name", "").strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="name is required")
+            raw = generate_key()
+            rec = {
+                "id": uuid4().hex,
+                "key_hash": hash_key(raw),
+                "key_prefix": raw[:7],
+                "name": name,
+                "created_at": time.time(),
+                "last_used_at": None,
+            }
+            app.state.store._backend.insert_api_key(rec)
+            return {k: rec[k] for k in ("id", "name", "key_prefix", "created_at")} | {"key": raw}
+
+        @app.delete("/admin/keys/{key_id}", dependencies=[Depends(require_admin)])
+        async def delete_key(key_id: str):
+            if not app.state.store._backend.delete_api_key(key_id):
+                raise HTTPException(status_code=404, detail="not found")
+            return {"deleted": key_id}
 
     return app
 

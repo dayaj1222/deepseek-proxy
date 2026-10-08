@@ -61,6 +61,16 @@ class StorageBackend(Protocol):
 
     def close(self) -> None: ...
 
+    def insert_api_key(self, record: Dict) -> None: ...
+
+    def list_api_keys(self) -> list: ...
+
+    def find_api_key_by_hash(self, key_hash: str) -> Optional[Dict]: ...
+
+    def delete_api_key(self, key_id: str) -> bool: ...
+
+    def touch_api_key_used(self, key_id: str, when: float) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # SQLite backend (previous StateStore persistence, unchanged in behavior)
@@ -83,6 +93,15 @@ CREATE TABLE IF NOT EXISTS resume (
     parent_message_id TEXT,
     total_tokens      INTEGER NOT NULL DEFAULT 0,
     exchanges         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id            TEXT PRIMARY KEY,
+    key_hash      TEXT NOT NULL UNIQUE,
+    key_prefix    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    created_at    REAL NOT NULL,
+    last_used_at  REAL
 );
 """
 
@@ -178,6 +197,68 @@ class SqliteBackend:
                 self._conn.close()
                 self._conn = None
 
+    # ---- api keys ----
+    def insert_api_key(self, record: Dict) -> None:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            self._conn.execute(
+                "INSERT INTO api_keys (id, key_hash, key_prefix, name, created_at, last_used_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    record["id"],
+                    record["key_hash"],
+                    record["key_prefix"],
+                    record["name"],
+                    record["created_at"],
+                    record.get("last_used_at"),
+                ),
+            )
+            self._conn.commit()
+
+    def list_api_keys(self) -> list:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            cur = self._conn.execute(
+                "SELECT id, key_prefix, name, created_at, last_used_at FROM api_keys "
+                "ORDER BY created_at DESC"
+            )
+            cols = ("id", "key_prefix", "name", "created_at", "last_used_at")
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def find_api_key_by_hash(self, key_hash: str) -> Optional[Dict]:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            cur = self._conn.execute(
+                "SELECT id, key_hash, key_prefix, name, created_at, last_used_at FROM api_keys "
+                "WHERE key_hash = ?",
+                (key_hash,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = ("id", "key_hash", "key_prefix", "name", "created_at", "last_used_at")
+            return dict(zip(cols, row))
+
+    def delete_api_key(self, key_id: str) -> bool:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            cur = self._conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def touch_api_key_used(self, key_id: str, when: float) -> None:
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("backend is not open")
+            self._conn.execute(
+                "UPDATE api_keys SET last_used_at = ? WHERE id = ?", (when, key_id)
+            )
+            self._conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # MongoDB backend (deployment; e.g. MongoDB Atlas free tier)
@@ -202,6 +283,7 @@ class MongoBackend:
         self._client = None
         self._threads = None
         self._resume = None
+        self._api_keys = None
 
     def open(self) -> None:
         try:
@@ -217,6 +299,8 @@ class MongoBackend:
         db = self._client[self._database]
         self._threads = db["threads"]
         self._resume = db["resume"]
+        self._api_keys = db["api_keys"]
+        self._api_keys.create_index("key_hash", unique=True)
         # Fail fast on bad credentials / unreachable cluster rather than on the
         # first flush, which is fire-and-forget from the app's perspective.
         self._client.admin.command("ping")
@@ -284,12 +368,43 @@ class MongoBackend:
         if resume_ops:
             self._resume.bulk_write(resume_ops, ordered=False)
 
+    # ---- api keys ----
+    def insert_api_key(self, record: Dict) -> None:
+        if self._api_keys is None:
+            raise RuntimeError("backend is not open")
+        self._api_keys.insert_one(dict(record))
+
+    def list_api_keys(self) -> list:
+        if self._api_keys is None:
+            raise RuntimeError("backend is not open")
+        cur = self._api_keys.find({}, {"key_hash": 0}).sort("created_at", -1)
+        return [{k: v for k, v in doc.items() if k != "_id"} for doc in cur]
+
+    def find_api_key_by_hash(self, key_hash: str) -> Optional[Dict]:
+        if self._api_keys is None:
+            raise RuntimeError("backend is not open")
+        doc = self._api_keys.find_one({"key_hash": key_hash})
+        if doc is None:
+            return None
+        return {k: v for k, v in doc.items() if k != "_id"}
+
+    def delete_api_key(self, key_id: str) -> bool:
+        if self._api_keys is None:
+            raise RuntimeError("backend is not open")
+        return self._api_keys.delete_one({"id": key_id}).deleted_count > 0
+
+    def touch_api_key_used(self, key_id: str, when: float) -> None:
+        if self._api_keys is None:
+            raise RuntimeError("backend is not open")
+        self._api_keys.update_one({"id": key_id}, {"$set": {"last_used_at": when}})
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
             self._client = None
             self._threads = None
             self._resume = None
+            self._api_keys = None
 
 
 # ---------------------------------------------------------------------------

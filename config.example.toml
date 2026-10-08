@@ -32,6 +32,11 @@ TOOL_FORMAT = "json_invoke"
 # --- Persistence ---
 STATE_PATH = "session_state.json"
 
+# --- API key auth (secrets ADMIN_USER/ADMIN_PASS live in .env) ---
+# When true, /v1/* requires a Bearer API key and the /admin management UI is
+# mounted. Leave false for local development.
+AUTH_ENABLED = false
+
 # --- Logging ---
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "pretty"

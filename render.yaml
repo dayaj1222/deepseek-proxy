@@ -15,6 +15,13 @@ services:
         value: mongo
       - key: MONGODB_DB
         value: deepseek_proxy
+      # API key auth: on in deployment, off locally (see .env.example).
+      - key: AUTH_ENABLED
+        value: "true"
+      - key: ADMIN_USER
+        sync: false
+      - key: ADMIN_PASS
+        sync: false
       # Secrets — set these in the Render dashboard, NOT in this file.
       # sync: false keeps them out of the blueprint and prompts for a value.
       - key: MONGODB_URI

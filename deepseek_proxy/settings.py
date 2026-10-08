@@ -182,6 +182,9 @@ class Settings:
     storage_backend: str = field(
         default_factory=lambda: str(_env("STORAGE_BACKEND", "sqlite")).strip().lower()
     )
+    auth_enabled: bool = field(default_factory=lambda: _to_bool(_env("AUTH_ENABLED", False)))
+    admin_user: str = field(default_factory=lambda: str(_env("ADMIN_USER", "")))
+    admin_pass: str = field(default_factory=lambda: str(_env("ADMIN_PASS", "")), repr=False)
     mongodb_uri: str = field(default_factory=lambda: str(_env("MONGODB_URI", "")), repr=False)
     mongodb_db: str = field(default_factory=lambda: str(_env("MONGODB_DB", "deepseek_proxy")))
     idle_timeout: float = field(default_factory=lambda: _float("IDLE_TIMEOUT", 300.0))
@@ -250,6 +253,8 @@ class Settings:
             raise ValueError("STORAGE_BACKEND must be sqlite or mongo")
         if self.storage_backend == "mongo" and not self.mongodb_uri:
             raise ValueError("MONGODB_URI must be set when STORAGE_BACKEND=mongo")
+        if self.auth_enabled and (not self.admin_user or not self.admin_pass):
+            raise ValueError("ADMIN_USER and ADMIN_PASS must be set when AUTH_ENABLED=true")
 
     @property
     def tool_call_template(self) -> str:
@@ -315,6 +320,9 @@ DB_PATH = settings.db_path
 STORAGE_BACKEND = settings.storage_backend
 MONGODB_URI = settings.mongodb_uri
 MONGODB_DB = settings.mongodb_db
+AUTH_ENABLED = settings.auth_enabled
+ADMIN_USER = settings.admin_user
+ADMIN_PASS = settings.admin_pass
 IDLE_TIMEOUT = settings.idle_timeout
 
 _enc = None
