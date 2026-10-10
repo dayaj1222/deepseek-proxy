@@ -41,6 +41,8 @@ AUTH_ENABLED = false
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "pretty"
 DEBUG = false
+# In-memory log ring buffer size for the /admin Logs tab (env: ADMIN_LOG_BUFFER).
+# Kept in process only; it starts empty on restart. 0 disables it.
 
 # --- Thinking / search mode (opt-in) ---
 # When THINKING_ENABLED is true, ask DeepSeek to enable its internal "thinking"

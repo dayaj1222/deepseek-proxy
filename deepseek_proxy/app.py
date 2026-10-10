@@ -17,6 +17,7 @@ from .backend import ConnectionPool
 from .errors import ProxyError
 from .schemas import ChatRequest
 from .service import ChatService
+from .observability import _level_value, get_log_buffer
 from .settings import settings as default_settings
 from .storage import StateStore, build_backend
 from .transport import collect, error_for, stream
@@ -205,6 +206,45 @@ def create_app(settings=None, pool=None):
             if not app.state.store._backend.delete_api_key(key_id):
                 raise HTTPException(status_code=404, detail="not found")
             return {"deleted": key_id}
+
+        @app.get("/admin/logs", dependencies=[Depends(require_admin)])
+        async def admin_logs(
+            after: int = 0,
+            level: str | None = None,
+            request_id: str | None = None,
+            limit: int = 500,
+            tail: int = 0,
+        ):
+            """Recent in-memory log records, oldest-first in the response.
+
+            Two modes:
+
+            - incremental: pass `after` (last seen `seq`) to fetch only newer
+              records. This is what the UI polls with.
+            - tail: pass `tail=1` with `after=0` to get the *newest* `limit`
+              records rather than the oldest. Used on first load so the pane
+              opens on the live end of the buffer instead of a stale slice.
+
+            The buffer starts empty on process restart and is bounded by
+            ADMIN_LOG_BUFFER (default 50; 0 disables it). Older records are
+            dropped from memory once the ring is full.
+            """
+            buffer = get_log_buffer()
+            if buffer is None:
+                return {"records": [], "last_seq": 0, "enabled": False}
+            if level and _level_value(level) is None:
+                raise HTTPException(status_code=400, detail="unknown level")
+            capped = max(1, min(limit, 5000))
+            if tail and after <= 0:
+                records = buffer.snapshot(level=level, request_id=request_id or None, limit=capped)
+            else:
+                records = buffer.snapshot(
+                    after=max(0, after),
+                    level=level,
+                    request_id=request_id or None,
+                    limit=capped,
+                )
+            return {"records": records, "last_seq": buffer.last_seq, "enabled": True}
 
     return app
 

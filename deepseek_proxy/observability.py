@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from .settings import settings
 
@@ -51,6 +54,131 @@ def _structured(record: logging.LogRecord) -> Dict[str, Any]:
     return {
         f: getattr(record, f) for f in STRUCTURED_FIELDS if getattr(record, f, None) is not None
     }
+
+
+# ---------------------------------------------------------------------------
+# In-memory log buffer for the admin UI (/admin/logs).
+#
+# The proxy logs to stdout only; in --bg mode the fish wrapper redirects that
+# to .run/deepseek-proxy.log. The admin UI cannot rely on that file existing
+# (and cannot tail it cheaply from async code), so a small ring buffer keeps
+# the most recent records in process instead. It starts empty on restart and
+# is deliberately bounded: ADMIN_LOG_BUFFER records, 0 disables it entirely.
+# ---------------------------------------------------------------------------
+
+
+def _buffer_size() -> int:
+    # Deliberately small: this is a human-facing tail, not a log store. Older
+    # records are discarded from memory once the ring is full.
+    raw = _env_int("ADMIN_LOG_BUFFER", 50)
+    return max(0, raw)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+class LogRingHandler(logging.Handler):
+    """Keep the most recent records in a bounded, thread-safe ring buffer.
+
+    Records are stored as JSON-ready dicts shaped like the JSON formatter's
+    output, so the admin UI can render them without reimplementing formatting.
+    Every record carries a monotonically increasing ``seq`` so clients can
+    poll incrementally with ``?after=<seq>`` instead of refetching.
+    """
+
+    def __init__(self, capacity: int = 1000) -> None:
+        super().__init__()
+        self.capacity = capacity
+        self._records: Deque[Dict[str, Any]] = deque(maxlen=capacity or 1)
+        self._lock = threading.Lock()
+        self._seq = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = self._entry(record)
+        except Exception:  # pragma: no cover - logging must never raise
+            self.handleError(record)
+            return
+        if self.capacity <= 0:
+            return
+        with self._lock:
+            self._seq += 1
+            entry["seq"] = self._seq
+            self._records.append(entry)
+
+    def _entry(self, record: logging.LogRecord) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {
+            "time": record.created,
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        entry.update(_structured(record))
+        # Prefer an explicit record attribute (lets callers label a record
+        # directly); fall back to the request-scoped contextvar.
+        rid = getattr(record, "request_id", None) or _request_id.get()
+        if rid:
+            entry["request_id"] = rid
+        for attr in ("duration_ms", "elapsed_ms"):
+            value = getattr(record, attr, None)
+            if value is not None:
+                entry[attr] = value
+        if record.exc_info and settings.debug:
+            entry["exc_info"] = self.formatException(record.exc_info)
+        return entry
+
+    @property
+    def last_seq(self) -> int:
+        with self._lock:
+            return self._seq
+
+    def snapshot(
+        self,
+        after: int = 0,
+        level: Optional[str] = None,
+        request_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return buffered records newer than ``after``, oldest first.
+
+        ``level`` is a minimum level name (e.g. "WARNING"); ``request_id``
+        filters exactly. Filtering happens after the ``after`` cut so callers
+        can page without missing records that were filtered out.
+        """
+        threshold = _level_value(level)
+        with self._lock:
+            records = [r for r in self._records if r["seq"] > after]
+        if threshold is not None:
+            records = [r for r in records if _level_value(r["level"]) >= threshold]
+        if request_id:
+            records = [r for r in records if r.get("request_id") == request_id]
+        if limit is not None and limit > 0:
+            records = records[-limit:]
+        return records
+
+
+def _level_value(name: Optional[str]) -> Optional[int]:
+    if not name:
+        return None
+    # getLevelName returns an int for known names but a "Level X" *string*
+    # for unknown ones, so it cannot be used as a validity check directly.
+    value = logging.getLevelName(str(name).upper())
+    return value if isinstance(value, int) else None
+
+
+def get_log_buffer() -> Optional[LogRingHandler]:
+    """Return the process-wide ring handler, or None when disabled."""
+    return _log_buffer
+
+
+_log_buffer: Optional[LogRingHandler] = None
 
 
 # ANSI colors for the pretty formatter.
@@ -127,6 +255,17 @@ def _configure() -> logging.Logger:
     else:
         handler.setFormatter(PrettyFormatter())
     root.addHandler(handler)
+
+    # Second sink: the bounded in-memory buffer backing /admin/logs. The ring
+    # handler formats nothing itself (records stay structured), so it needs no
+    # formatter. A zero capacity disables it.
+    global _log_buffer
+    capacity = _buffer_size()
+    if capacity > 0:
+        _log_buffer = LogRingHandler(capacity)
+        root.addHandler(_log_buffer)
+    else:
+        _log_buffer = None
 
     # Quiet the noisy default loggers unless debugging.
     if not settings.debug:
