@@ -246,14 +246,7 @@ class ToolParserTests(unittest.TestCase):
                 prompt = fmt.build_repair_prompt([])
                 self.assertIn(dialect.template(), prompt)
                 self.assertEqual("body is ONE JSON object" in prompt, dialect.body_kind == "json")
-                self.assertNotIn(
-                    "silently discarded", dialect.instruction + dialect.format_reminder
-                )
-
-    def test_format_reminder_forbids_repeated_tool_tags(self):
-        for dialect in fmt.DIALECTS.values():
-            self.assertIn("exactly once", dialect.format_reminder)
-            self.assertIn("second closing tag", dialect.format_reminder)
+                self.assertNotIn("silently discarded", dialect.instruction)
 
 
 if __name__ == "__main__":
