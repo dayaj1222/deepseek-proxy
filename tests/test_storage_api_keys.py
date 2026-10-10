@@ -34,10 +34,24 @@ def test_insert_find_delete_touch():
 def test_list_excludes_hash_and_is_newest_first():
     b = _backend()
     b.insert_api_key(
-        {"id": "a", "key_hash": "ha", "key_prefix": "sk-a", "name": "a", "created_at": 1.0, "last_used_at": None}
+        {
+            "id": "a",
+            "key_hash": "ha",
+            "key_prefix": "sk-a",
+            "name": "a",
+            "created_at": 1.0,
+            "last_used_at": None,
+        }
     )
     b.insert_api_key(
-        {"id": "b", "key_hash": "hb", "key_prefix": "sk-b", "name": "b", "created_at": 2.0, "last_used_at": None}
+        {
+            "id": "b",
+            "key_hash": "hb",
+            "key_prefix": "sk-b",
+            "name": "b",
+            "created_at": 2.0,
+            "last_used_at": None,
+        }
     )
     rows = b.list_api_keys()
     assert [r["id"] for r in rows] == ["b", "a"]

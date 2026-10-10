@@ -195,9 +195,7 @@ class Settings:
     thinking_enabled: bool = field(
         default_factory=lambda: _to_bool(_env("THINKING_ENABLED", False))
     )
-    search_enabled: bool = field(
-        default_factory=lambda: _to_bool(_env("SEARCH_ENABLED", True))
-    )
+    search_enabled: bool = field(default_factory=lambda: _to_bool(_env("SEARCH_ENABLED", True)))
 
     def __post_init__(self) -> None:
         integer_minima = {

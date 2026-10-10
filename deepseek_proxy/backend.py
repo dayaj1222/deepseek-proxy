@@ -623,10 +623,13 @@ class ConnectionPool:
             if stream:
                 from .thinking import stream_reasoning
 
-                async with aclosing(stream_reasoning(
-                    conv.ask_stream(prompt, image=uploaded, model=model_type),
-                    thinking=thinking, search=search,
-                )) as response:
+                async with aclosing(
+                    stream_reasoning(
+                        conv.ask_stream(prompt, image=uploaded, model=model_type),
+                        thinking=thinking,
+                        search=search,
+                    )
+                ) as response:
                     async for chunk in response:
                         yielded = True
                         yield chunk
@@ -663,10 +666,13 @@ class ConnectionPool:
                 if stream:
                     from .thinking import stream_reasoning
 
-                    async with aclosing(stream_reasoning(
-                        conv.ask_stream(prompt, image=uploaded, model=model_type),
-                        thinking=thinking, search=search,
-                    )) as response:
+                    async with aclosing(
+                        stream_reasoning(
+                            conv.ask_stream(prompt, image=uploaded, model=model_type),
+                            thinking=thinking,
+                            search=search,
+                        )
+                    ) as response:
                         async for chunk in response:
                             yielded = True
                             yield chunk

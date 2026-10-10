@@ -11,7 +11,9 @@ PACKAGE = ROOT / "deepseek_proxy"
 
 
 def load_config(path, env=None):
-    spec = importlib.util.spec_from_file_location("deepseek_proxy.settings", PACKAGE / "settings.py")
+    spec = importlib.util.spec_from_file_location(
+        "deepseek_proxy.settings", PACKAGE / "settings.py"
+    )
     module = importlib.util.module_from_spec(spec)
     with patch.dict(
         os.environ,

@@ -101,7 +101,9 @@ class MongoStorageTests(unittest.TestCase):
             fresh.close()
 
     def test_build_backend_selects_mongo(self):
-        backend = build_backend("mongo", db_path="x.db", mongo_uri=MONGO_TEST_URI, mongo_db=MONGO_TEST_DB)
+        backend = build_backend(
+            "mongo", db_path="x.db", mongo_uri=MONGO_TEST_URI, mongo_db=MONGO_TEST_DB
+        )
         self.assertIsInstance(backend, MongoBackend)
 
     def test_build_backend_rejects_unknown(self):

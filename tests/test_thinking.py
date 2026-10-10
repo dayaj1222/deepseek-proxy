@@ -38,9 +38,7 @@ def load_thinking():
 
 def load_schemas():
     # schemas imports nothing from the package, so load it directly.
-    spec = importlib.util.spec_from_file_location(
-        "deepseek_proxy.schemas", PACKAGE / "schemas.py"
-    )
+    spec = importlib.util.spec_from_file_location("deepseek_proxy.schemas", PACKAGE / "schemas.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -222,46 +220,72 @@ class FragmentRouterTests(unittest.TestCase):
         self.assertEqual(reasoning, "")
 
     def test_status_metadata_never_becomes_reply_text(self):
-        text, reasoning = self._route([
-            {"o": "SET", "p": "response/status", "v": "FINISHED"},
-            {"o": "BATCH", "p": "response", "v": [
-                {"p": "quasi_status", "v": "FINISHED"},
-            ]},
-        ])
+        text, reasoning = self._route(
+            [
+                {"o": "SET", "p": "response/status", "v": "FINISHED"},
+                {
+                    "o": "BATCH",
+                    "p": "response",
+                    "v": [
+                        {"p": "quasi_status", "v": "FINISHED"},
+                    ],
+                },
+            ]
+        )
         self.assertEqual(text, "")
         self.assertEqual(reasoning, "")
 
     def test_think_transition_keeps_first_answer_token_and_shorthand_delta(self):
-        text, reasoning = self._route([
-            {"v": {"response": {"fragments": [{"type": "THINK", "content": "Reason"}]}}},
-            {"p": "response/fragments/-1/content", "o": "APPEND", "v": " first"},
-            {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 1.0},
-            {"p": "response/fragments", "o": "APPEND", "v": [
-                {"type": "RESPONSE", "content": "Hello"},
-            ]},
-            {"p": "response/fragments/-1/content", "v": " world"},
-            {"v": "!"},
-            {"p": "response/status", "o": "SET", "v": "FINISHED"},
-        ])
+        text, reasoning = self._route(
+            [
+                {"v": {"response": {"fragments": [{"type": "THINK", "content": "Reason"}]}}},
+                {"p": "response/fragments/-1/content", "o": "APPEND", "v": " first"},
+                {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 1.0},
+                {
+                    "p": "response/fragments",
+                    "o": "APPEND",
+                    "v": [
+                        {"type": "RESPONSE", "content": "Hello"},
+                    ],
+                },
+                {"p": "response/fragments/-1/content", "v": " world"},
+                {"v": "!"},
+                {"p": "response/status", "o": "SET", "v": "FINISHED"},
+            ]
+        )
         self.assertEqual(reasoning, "Reason first")
         self.assertEqual(text, "Hello world!")
 
     def test_search_batch_declares_response_before_answer_deltas(self):
-        text, reasoning = self._route([
-            {"v": {"response": {"fragments": [{"type": "SEARCH", "content": None}]}}},
-            {"p": "response/fragments/-1", "o": "BATCH", "v": [
-                {"p": "status", "v": "FINISHED"},
-                {"p": "content", "v": "Found 12 pages"},
-            ]},
-            {"p": "response", "o": "BATCH", "v": [
-                {"p": "fragments", "o": "APPEND", "v": [
-                    {"type": "RESPONSE", "content": "Answer"},
-                ]},
-                {"p": "has_pending_fragment", "o": "SET", "v": False},
-            ]},
-            {"p": "response/fragments/-1/content", "o": "APPEND", "v": " [citation:1]"},
-            {"p": "response/status", "o": "SET", "v": "FINISHED"},
-        ])
+        text, reasoning = self._route(
+            [
+                {"v": {"response": {"fragments": [{"type": "SEARCH", "content": None}]}}},
+                {
+                    "p": "response/fragments/-1",
+                    "o": "BATCH",
+                    "v": [
+                        {"p": "status", "v": "FINISHED"},
+                        {"p": "content", "v": "Found 12 pages"},
+                    ],
+                },
+                {
+                    "p": "response",
+                    "o": "BATCH",
+                    "v": [
+                        {
+                            "p": "fragments",
+                            "o": "APPEND",
+                            "v": [
+                                {"type": "RESPONSE", "content": "Answer"},
+                            ],
+                        },
+                        {"p": "has_pending_fragment", "o": "SET", "v": False},
+                    ],
+                },
+                {"p": "response/fragments/-1/content", "o": "APPEND", "v": " [citation:1]"},
+                {"p": "response/status", "o": "SET", "v": "FINISHED"},
+            ]
+        )
         self.assertEqual(text, "Answer [citation:1]")
         self.assertEqual(reasoning, "")
 
@@ -269,25 +293,45 @@ class FragmentRouterTests(unittest.TestCase):
         router = self.thinking._FragmentRouter()
         events = [
             {"v": {"response": {"fragments": [{"type": "THINK", "content": "plan"}]}}},
-            {"p": "response", "o": "BATCH", "v": [
-                {"p": "fragments", "o": "APPEND", "v": [{"type": "SEARCH"}]},
-            ]},
-            {"p": "response/fragments/-1", "o": "BATCH", "v": [
-                {"p": "content", "v": "Found 10 web pages"},
-                {"p": "status", "v": "FINISHED"},
-            ]},
-            {"p": "response/fragments", "o": "APPEND", "v": [
-                {"type": "THINK", "content": "evaluate"},
-            ]},
-            {"p": "response/fragments", "o": "APPEND", "v": [
-                {"type": "RESPONSE", "content": "answer"},
-            ]},
+            {
+                "p": "response",
+                "o": "BATCH",
+                "v": [
+                    {"p": "fragments", "o": "APPEND", "v": [{"type": "SEARCH"}]},
+                ],
+            },
+            {
+                "p": "response/fragments/-1",
+                "o": "BATCH",
+                "v": [
+                    {"p": "content", "v": "Found 10 web pages"},
+                    {"p": "status", "v": "FINISHED"},
+                ],
+            },
+            {
+                "p": "response/fragments",
+                "o": "APPEND",
+                "v": [
+                    {"type": "THINK", "content": "evaluate"},
+                ],
+            },
+            {
+                "p": "response/fragments",
+                "o": "APPEND",
+                "v": [
+                    {"type": "RESPONSE", "content": "answer"},
+                ],
+            },
         ]
-        pieces = [piece for event in events
-                  for piece in self.thinking._route_event(event, router)]
-        self.assertEqual(pieces, [
-            ("reasoning", "plan"), ("reasoning", "evaluate"), ("text", "answer"),
-        ])
+        pieces = [piece for event in events for piece in self.thinking._route_event(event, router)]
+        self.assertEqual(
+            pieces,
+            [
+                ("reasoning", "plan"),
+                ("reasoning", "evaluate"),
+                ("text", "answer"),
+            ],
+        )
 
     def test_citation_markers_preserved(self):
         events = [
@@ -472,9 +516,7 @@ class TransportReasoningTests(unittest.TestCase):
     def test_non_stream_omits_reasoning_key_when_absent(self):
         completion = self.transport.Completion("m")
         completion.accept(self._event("text", "answer"))
-        completion.accept(
-            self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"})
-        )
+        completion.accept(self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"}))
         message = completion.response()["choices"][0]["message"]
         self.assertNotIn("reasoning_content", message)
 
@@ -482,9 +524,7 @@ class TransportReasoningTests(unittest.TestCase):
         completion = self.transport.Completion("m")
         completion.accept(self._event("reasoning", "why"))
         completion.accept(self._event("text", "answer"))
-        completion.accept(
-            self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"})
-        )
+        completion.accept(self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"}))
         message = completion.response()["choices"][0]["message"]
         self.assertEqual(message["reasoning_content"], "why")
         self.assertEqual(message["content"], "answer")
@@ -493,9 +533,7 @@ class TransportReasoningTests(unittest.TestCase):
         completion = self.transport.Completion("m")
         completion.accept(self._event("reasoning", "x" * 1000))
         completion.accept(self._event("text", "answer"))
-        completion.accept(
-            self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"})
-        )
+        completion.accept(self._event("done", {"prompt_tokens": 1, "finish_reason": "stop"}))
         usage = completion.usage()
         # Only "answer" contributes; the 1000-char reasoning does not.
         self.assertLess(usage["completion_tokens"], 20)
@@ -518,13 +556,19 @@ class LiveReasoningOrderTests(unittest.IsolatedAsyncioTestCase):
 
         request = SimpleNamespace(model="DEFAULT", stream_options=None)
         chunks = [part async for part in stream(Service(), request)]
-        deltas = [json.loads(part[6:])["choices"][0]["delta"]
-                  for part in chunks if part.startswith("data: {")]
-        self.assertEqual(deltas[:3], [
-            {"role": "assistant"},
-            {"reasoning_content": "thought"},
-            {"content": "answer"},
-        ])
+        deltas = [
+            json.loads(part[6:])["choices"][0]["delta"]
+            for part in chunks
+            if part.startswith("data: {")
+        ]
+        self.assertEqual(
+            deltas[:3],
+            [
+                {"role": "assistant"},
+                {"reasoning_content": "thought"},
+                {"content": "answer"},
+            ],
+        )
 
     async def test_backend_forwards_thinking_before_answer_is_available(self):
         import asyncio

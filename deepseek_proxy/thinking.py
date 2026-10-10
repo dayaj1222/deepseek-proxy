@@ -70,11 +70,14 @@ class Reasoning:
 
     text: str
 
+
 # Per-call sink for reasoning text. Our backend sets this around the
 # ``conv.ask_stream(...)`` iteration; the patched ``stream_chat`` appends THINK
 # fragments here. Kept in a ContextVar so concurrent turns never interleave.
 _reasoning_sink: ContextVar[Optional[List[str]]] = ContextVar("reasoning_sink", default=None)
-_reasoning_callback: ContextVar[Optional[Callable[[str], object]]] = ContextVar("reasoning_callback", default=None)
+_reasoning_callback: ContextVar[Optional[Callable[[str], object]]] = ContextVar(
+    "reasoning_callback", default=None
+)
 
 
 @contextmanager
@@ -228,11 +231,8 @@ def _route_event(event, router: _FragmentRouter):
         return
 
     # Content chunk for the current fragment.
-    is_text_delta = (
-        isinstance(v, str)
-        and ((not o and not p) or (
-            o in ("", "APPEND") and p == "response/fragments/-1/content"
-        ))
+    is_text_delta = isinstance(v, str) and (
+        (not o and not p) or (o in ("", "APPEND") and p == "response/fragments/-1/content")
     )
     if is_text_delta:
         channel = router.route_content(v)
@@ -328,11 +328,7 @@ async def _routed_stream_chat(
                 current_event = "message"
                 continue
 
-            if (
-                current_event == "hint"
-                and isinstance(event, dict)
-                and event.get("type") == "error"
-            ):
+            if current_event == "hint" and isinstance(event, dict) and event.get("type") == "error":
                 raise_for_sse_hint(event)
             current_event = "message"
 
@@ -385,8 +381,9 @@ async def stream_reasoning(source, *, thinking: bool, search: bool):
 
     async def produce():
         try:
-            with request_flags(thinking, search), reasoning_capture(
-                publish_reasoning, collect=False
+            with (
+                request_flags(thinking, search),
+                reasoning_capture(publish_reasoning, collect=False),
             ):
                 async with aclosing(source):
                     async for text in source:
@@ -439,4 +436,11 @@ def is_applied() -> bool:
     return _APPLIED
 
 
-__all__ = ["Reasoning", "apply", "is_applied", "reasoning_capture", "request_flags", "stream_reasoning"]
+__all__ = [
+    "Reasoning",
+    "apply",
+    "is_applied",
+    "reasoning_capture",
+    "request_flags",
+    "stream_reasoning",
+]

@@ -48,7 +48,9 @@ def parse_bearer(header: Optional[str]) -> Optional[str]:
 def require_admin(request: Request) -> None:
     settings = request.app.state.settings
     creds = parse_basic(request.headers.get("authorization"))
-    if creds is None or not check_admin(creds[0], creds[1], settings.admin_user, settings.admin_pass):
+    if creds is None or not check_admin(
+        creds[0], creds[1], settings.admin_user, settings.admin_pass
+    ):
         raise HTTPException(
             status_code=401,
             detail="invalid admin credentials",

@@ -254,9 +254,7 @@ class SqliteBackend:
         with self._lock:
             if self._conn is None:
                 raise RuntimeError("backend is not open")
-            self._conn.execute(
-                "UPDATE api_keys SET last_used_at = ? WHERE id = ?", (when, key_id)
-            )
+            self._conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (when, key_id))
             self._conn.commit()
 
 
@@ -412,7 +410,9 @@ class MongoBackend:
 # ---------------------------------------------------------------------------
 
 
-def build_backend(kind: str, *, db_path: str, mongo_uri: str = "", mongo_db: str = "deepseek_proxy") -> StorageBackend:
+def build_backend(
+    kind: str, *, db_path: str, mongo_uri: str = "", mongo_db: str = "deepseek_proxy"
+) -> StorageBackend:
     """Select a persistence backend by name. Defaults to SQLite for local runs."""
     normalized = (kind or "sqlite").strip().lower()
     if normalized == "sqlite":
@@ -435,7 +435,9 @@ class StateStore:
     backend.
     """
 
-    def __init__(self, db_path: str, snapshot_interval: float = 5.0, backend: Optional[StorageBackend] = None):
+    def __init__(
+        self, db_path: str, snapshot_interval: float = 5.0, backend: Optional[StorageBackend] = None
+    ):
         self._snapshot_interval = snapshot_interval
         self._lock = threading.RLock()
         self._flush_lock = threading.RLock()
@@ -461,9 +463,7 @@ class StateStore:
         backend = self._backend
         conn = getattr(backend, "_conn", None)
         if conn is None:
-            raise AttributeError(
-                "_conn is only available with the SQLite backend"
-            )
+            raise AttributeError("_conn is only available with the SQLite backend")
         return conn
 
     def open(self) -> None:
