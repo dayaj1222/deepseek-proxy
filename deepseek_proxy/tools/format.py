@@ -997,9 +997,18 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
 def format_reminder_text() -> str:
     """Periodic re-anchoring reminder.
 
-    Deliberately minimal: one line showing the exact wire shape. The full
-    rules prose and per-tool schemas live in the system prompt, not here, so
-    periodic re-injection stays cheap instead of re-sending kilobytes per
-    exchange.
+    Re-asserts the wire shape and the two failure modes seen in practice
+    (legacy DSML tags leaking into the reply, and a doubled closing tag).
+    Uses ACTIVE.invoke_close so the tag renders correctly per active dialect.
     """
-    return "Reminder — tool calls use exactly this form: " + ACTIVE.template()
+    return (
+        "⚠ HARD FORMAT REQUIREMENT — READ BEFORE EMITTING ANY TOOL CALL.\n"
+        "Violations are NOT repaired for you: a malformed or repeated block is DROPPED\n"
+        "and never executed, and you will burn this turn on a correction loop instead\n"
+        "of progressing the task.\n"
+        "Reminder — tool calls use exactly this form:\n" + ACTIVE.template() + "\n!!IMPORTANT!!\n"
+        "1. Never emit </｜DSML｜｜ invoke> or related tags those are useless "
+        "and will be shown to the user.\n"
+        "2. Never emit the " + ACTIVE.invoke_close + " ending tag twice.\n"
+        "Get the format wrong and your tool call silently does nothing."
+    )
