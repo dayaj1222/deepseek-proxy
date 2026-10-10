@@ -1,10 +1,10 @@
 # DeepSeek OpenAI Proxy configuration — source of truth.
 # Precedence: process env vars override these values; else these are used.
 
-# --- DeepSeek credentials (prefer token over email+password) ---
-DEEPSEEK_TOKEN = ''
-DEEPSEEK_EMAIL = 'REDACTED_EMAIL'
-DEEPSEEK_PASSWORD = 'REDACTED_PASSWORD'
+# NOTE: credentials (DEEPSEEK_TOKEN / DEEPSEEK_EMAIL_n / DEEPSEEK_PASSWORD_n),
+# the persistence backend (STORAGE_BACKEND, MONGODB_URI, MONGODB_DB), runtime
+# tunables, and ADMIN_USER/ADMIN_PASS live in .env (git-ignored) or the process
+# environment. See .env.example. This file holds non-secret behavior only.
 
 # Model type: DEFAULT, EXPERT, or VISION
 MODEL_TYPE = "DEFAULT"

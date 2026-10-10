@@ -100,10 +100,16 @@ def create_app(settings=None, pool=None):
                     await flush
             try:
                 if owned and pool:
-                    await pool.close()
+                    try:
+                        await pool.close()
+                    except Exception:
+                        log.exception("Pool shutdown failed")
             finally:
                 if store:
-                    await asyncio.to_thread(store.close)
+                    try:
+                        await asyncio.to_thread(store.close)
+                    except Exception:
+                        log.exception("State store close failed")
                 if lock_file:
                     lock_file.close()
 

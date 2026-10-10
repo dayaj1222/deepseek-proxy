@@ -1035,5 +1035,11 @@ def inject_tool_descriptions(system_prompt: str, tools: List[Dict[str, Any]]) ->
 
 
 def format_reminder_text() -> str:
-    """Periodic re-anchoring reminder, rendered from the ACTIVE dialect."""
-    return render_instruction(ACTIVE.format_reminder)
+    """Periodic re-anchoring reminder.
+
+    Deliberately minimal: one line showing the exact wire shape. The full
+    rules prose and per-tool schemas live in the system prompt, not here, so
+    periodic re-injection stays cheap instead of re-sending kilobytes per
+    exchange.
+    """
+    return "Reminder — tool calls use exactly this form: " + ACTIVE.template()

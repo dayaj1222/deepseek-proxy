@@ -8,6 +8,13 @@ from deepseek_proxy.settings import settings as base_settings
 
 
 def _settings(**over):
+    # Auth tests exercise HTTP auth only, but app startup builds a
+    # ConnectionPool that requires at least one account. The test harness
+    # blanks DEEPSEEK_ENV_FILE, so base_settings normally has no accounts;
+    # inject a dummy one so these tests stay self-contained instead of
+    # depending on ambient credentials.
+    if not base_settings.accounts:
+        over.setdefault("accounts", [{"email": "test@example.com", "password": "pw"}])
     return dataclasses.replace(base_settings, **over)
 
 

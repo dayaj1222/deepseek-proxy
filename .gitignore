@@ -31,9 +31,6 @@ session_state.json
 # Scratch / experiments
 c/
 
-# Local config (secrets)
-config.toml
-
 # Local runtime (pid/log files) for scripts/deepseek-proxy
 .run/
 

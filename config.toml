@@ -1,0 +1,91 @@
+# DeepSeek OpenAI Proxy configuration — source of truth.
+# Precedence: process env vars override these values; else these are used.
+
+# --- Secrets and per-environment settings live in .env ---
+# DeepSeek credentials (DEEPSEEK_TOKEN or DEEPSEEK_EMAIL_n/DEEPSEEK_PASSWORD_n)
+# and the persistence backend (STORAGE_BACKEND, MONGODB_URI, MONGODB_DB) are
+# read from .env (git-ignored) or the process environment. See .env.example.
+# Environment variables override this file.
+
+
+# Model type: DEFAULT, EXPERT, or VISION
+MODEL_TYPE = "DEFAULT"
+
+# --- Server ---
+PROXY_HOST = "0.0.0.0"
+PROXY_PORT = 9173
+
+# --- Behaviour ---
+# Runtime tunables (REQUEST_DELAY, TOOL_REMINDER_INTERVAL,
+# SYSTEM_PROMPT_INTERVAL, TOOL_BUFFER_LIMIT, TOOL_REPAIR_MAX_RETRIES,
+# RATE_LIMIT_MAX_RETRIES, RATE_LIMIT_BACKOFF_S) now live in .env.
+# Environment variables override this file.
+
+# --- Tool-call dialect: THE one switch (see tool_format.py DIALECTS) ---
+#   "json_invoke" = <invoke name="t">{...json...}</invoke>   (default)
+#   "xml_params"  = <invoke name="t"><parameter ...>...</invoke>
+#   "dsml"        = legacy <｜DSML｜invoke ...> dialect
+# Parsing accepts every known spelling regardless; this controls what we TEACH.
+
+# --- Persistence ---
+STATE_PATH = "session_state.json"
+
+# --- Logging ---
+LOG_LEVEL = "DEBUG"
+LOG_FORMAT = "pretty"
+DEBUG = false
+
+# --- Thinking / search mode (opt-in) ---
+# Clients may override thinking per request via reasoning_effort / reasoning /
+# thinking body params. Default false keeps behaviour unchanged.
+THINKING_ENABLED = false
+SEARCH_ENABLED = true
+
+# --- Prompt templates injected by the proxy ---
+# NOTE: tool-call instruction/reminder prose lives with each dialect in
+# tool_format.py (it must match the taught tags). Only per-tool section
+# templates and role prefixes live here.
+[PROMPTS]
+PROTOCOL_HEADER = "## TOOL CALL PROTOCOL — MANDATORY, STRICT FORMAT"
+TOOLS_HEADER = "## Available Tools"
+
+TOOL_SECTION = """### {name}
+Description: {description}
+Parameters (JSON Schema):
+```json
+{params}
+```"""
+
+CONTINUE_AFTER_TOOL = "Now continue with the task based on the tool result above."
+
+ROLE_PREFIX_SYSTEM = "System: {content}"
+ROLE_PREFIX_USER = "User: {content}"
+ROLE_PREFIX_ASSISTANT = "Assistant: {content}"
+ROLE_PREFIX_ASSISTANT_TOOL = "Assistant:\n{content}"
+ROLE_PREFIX_TOOL = "Tool result (id={tool_call_id}):\n{content}"
+
+# --- Model catalog served by /v1/models ---
+# The only model ids aiodeepseek supports (ModelType enum).
+[[MODELS]]
+id = "DEFAULT"
+object = "model"
+created = 1677610602
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[MODELS]]
+id = "EXPERT"
+object = "model"
+created = 1677610602
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000
+
+[[MODELS]]
+id = "VISION"
+object = "model"
+created = 1677610602
+owned_by = "deepseek"
+context_length = 1000000
+max_completion_tokens = 384000

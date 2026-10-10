@@ -84,5 +84,10 @@ class Recovery:
         return prompt
 
     def end_repair(self):
-        for _ in range(max(0, self.expected - self.resolved - len(self.pending))):
+        # A repair attempt that resolved nothing must NOT re-accumulate the
+        # same failures: doing so makes `begin_repair` grow `expected` on every
+        # attempt and the failure list is re-listed in the prompt (and re-parsed
+        # as new malformed events) until the retry budget is exhausted. Record
+        # at most one omission marker per unresolved attempt.
+        if self.resolved < self.expected:
             self.pending.append({"name": None, "reason": "repair_omitted_call", "body": ""})
