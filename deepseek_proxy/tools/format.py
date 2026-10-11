@@ -111,7 +111,11 @@ Parameters (JSON Schema) below corresponds to one key of that object.
    Do NOT wrap the block in code fences, never emit bare JSON with no tags.
 3. LITERAL MARKERS: if a value must contain the literal text TOOL_CALL_OPEN
    or TOOL_CALL_CLOSE, write a backslash directly before it.
-4. MULTIPLE CALLS: emit multiple complete blocks back to back.
+4. MULTIPLE CALLS: you may emit several complete blocks back to back IN ONE
+   TURN ONLY for short, independent, read-only calls (e.g. reading files,
+   listing directories, grepping, small quick commands). NEVER batch writes,
+   edits, long-running commands, or complex/stateful operations — emit exactly
+   ONE such call per turn and wait for its result before the next.
 5. You may write normal text before or after tool call blocks.
 6. CALL ONLY WHEN NEEDED: if no tool fits, answer directly with no block.
    After a tool result arrives, continue the task — do not re-emit the
@@ -158,7 +162,12 @@ corresponds to one TOOL_PARAM_OPEN element.
    TOOL_CALL_CLOSE, TOOL_PARAM_OPEN or TOOL_PARAM_CLOSE, write a backslash
    directly before it.
 5. NO EXTRAS: never add an id field, never wrap the block in code fences, never emit bare JSON.
-6. MULTIPLE CALLS: emit multiple complete blocks back to back inside one wrapper.
+6. MULTIPLE CALLS: you may emit several complete blocks back to back INSIDE
+   ONE WRAPPER, IN ONE TURN, ONLY for short, independent, read-only calls
+   (e.g. reading files, listing directories, grepping, small quick commands).
+   NEVER batch writes, edits, long-running commands, or complex/stateful
+   operations — emit exactly ONE such call per turn and wait for its result
+   before the next.
 7. You may write normal text before or after tool call blocks.
 8. CALL ONLY WHEN NEEDED: if no tool fits, answer directly with no block.
    After a tool result arrives, continue the task — do not re-emit the same call.
