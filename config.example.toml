@@ -20,6 +20,10 @@ TOOL_REMINDER_INTERVAL = 0
 # Re-inject the original system prompt and tool definitions every N exchanges.
 # Set to 0 to disable periodic system re-anchoring.
 SYSTEM_PROMPT_INTERVAL = 0
+# Re-anchor the full system prompt + tool block when the system prompt signature
+# changes mid-thread (e.g. pi adds/removes tools). This can fire often and costs
+# tokens; set false to rely on the first-turn injection and SYSTEM_PROMPT_INTERVAL.
+REANCHOR_ON_SYSTEM_CHANGE = true
 TOOL_BUFFER_LIMIT = 100000
 TOOL_REPAIR_MAX_RETRIES = 3
 RATE_LIMIT_MAX_RETRIES = 3
@@ -30,7 +34,8 @@ RATE_LIMIT_BACKOFF_S = 10.0
 TOOL_FORMAT = "json_invoke"
 
 # --- Persistence ---
-STATE_PATH = "session_state.json"
+# DB_PATH = "dispatch.db"          # SQLite file (default)
+# STORAGE_BACKEND = "sqlite"       # or "mongo" with MONGODB_URI / MONGODB_DB
 
 # --- API key auth (secrets ADMIN_USER/ADMIN_PASS live in .env) ---
 # When true, /v1/* requires a Bearer API key and the /admin management UI is

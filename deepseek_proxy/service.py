@@ -75,7 +75,10 @@ class ChatService:
                     reinforce = interval > 0 and (prev + count) // interval > prev // interval
                     first = not any(m.role == "assistant" for m in request.messages)
                     signature = system_prompt_signature(request.messages)
-                    system_changed = self._system_prompt_signatures.get(thread_id) != signature
+                    system_changed = (
+                        self.settings.reanchor_on_system_change
+                        and self._system_prompt_signatures.get(thread_id) != signature
+                    )
                     self._system_prompt_signatures[thread_id] = signature
                     reanchor = first or reinforce or system_changed
                     prompt, _ = build_prompt(

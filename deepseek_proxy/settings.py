@@ -153,6 +153,9 @@ class Settings:
     image_max_bytes: int = field(default_factory=lambda: _int("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
     tool_reminder_interval: int = field(default_factory=lambda: _int("TOOL_REMINDER_INTERVAL", 0))
     system_prompt_interval: int = field(default_factory=lambda: _int("SYSTEM_PROMPT_INTERVAL", 0))
+    reanchor_on_system_change: bool = field(
+        default_factory=lambda: _to_bool(_env("REANCHOR_ON_SYSTEM_CHANGE", True))
+    )
     tool_buffer_limit: int = field(default_factory=lambda: _int("TOOL_BUFFER_LIMIT", 100000))
     tool_repair_max_retries: int = field(default_factory=lambda: _int("TOOL_REPAIR_MAX_RETRIES", 3))
     rate_limit_max_retries: int = field(default_factory=lambda: _int("RATE_LIMIT_MAX_RETRIES", 3))
@@ -174,9 +177,6 @@ class Settings:
                 ],
             )
         )
-    )
-    state_path: Path = field(
-        default_factory=lambda: Path(_env("STATE_PATH", str(ROOT / "session_state.json")))
     )
     db_path: Path = field(default_factory=lambda: Path(_env("DB_PATH", str(ROOT / "dispatch.db"))))
     storage_backend: str = field(
@@ -281,6 +281,7 @@ IMAGE_MAX_BYTES = settings.image_max_bytes
 TOOL_FORMAT = settings.tool_format
 TOOL_REMINDER_INTERVAL = settings.tool_reminder_interval
 SYSTEM_PROMPT_INTERVAL = settings.system_prompt_interval
+REANCHOR_ON_SYSTEM_CHANGE = settings.reanchor_on_system_change
 TOOL_BUFFER_LIMIT = settings.tool_buffer_limit
 TOOL_REPAIR_MAX_RETRIES = settings.tool_repair_max_retries
 RATE_LIMIT_MAX_RETRIES = settings.rate_limit_max_retries
@@ -313,7 +314,6 @@ def __dir__() -> List[str]:
 
 
 MODELS = settings.models
-STATE_PATH = settings.state_path
 DB_PATH = settings.db_path
 STORAGE_BACKEND = settings.storage_backend
 MONGODB_URI = settings.mongodb_uri

@@ -17,9 +17,9 @@ PROXY_PORT = 9173
 
 # --- Behaviour ---
 # Runtime tunables (REQUEST_DELAY, TOOL_REMINDER_INTERVAL,
-# SYSTEM_PROMPT_INTERVAL, TOOL_BUFFER_LIMIT, TOOL_REPAIR_MAX_RETRIES,
-# RATE_LIMIT_MAX_RETRIES, RATE_LIMIT_BACKOFF_S) now live in .env.
-# Environment variables override this file.
+# SYSTEM_PROMPT_INTERVAL, REANCHOR_ON_SYSTEM_CHANGE, TOOL_BUFFER_LIMIT,
+# TOOL_REPAIR_MAX_RETRIES, RATE_LIMIT_MAX_RETRIES, RATE_LIMIT_BACKOFF_S)
+# now live in .env. Environment variables override this file.
 
 # --- Tool-call dialect: THE one switch (see tool_format.py DIALECTS) ---
 #   "json_invoke" = <invoke name="t">{...json...}</invoke>   (default)
@@ -28,7 +28,8 @@ PROXY_PORT = 9173
 # Parsing accepts every known spelling regardless; this controls what we TEACH.
 
 # --- Persistence ---
-STATE_PATH = "session_state.json"
+# DB_PATH = "dispatch.db"          # SQLite file (default)
+# STORAGE_BACKEND = "sqlite"       # or "mongo" with MONGODB_URI / MONGODB_DB
 
 # --- Logging ---
 LOG_LEVEL = "DEBUG"

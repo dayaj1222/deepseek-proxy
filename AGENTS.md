@@ -12,7 +12,7 @@ FastAPI proxy that translates OpenAI-format `/v1/chat/completions` to the DeepSe
   emit/parse/stream helpers. Everything else imports from here.
 - `tool_parser.py` — backwards-compat shim re-exporting `tool_format`
 - `config.py` — env vars, token estimation (tiktoken `cl100k_base`)
-- `session_state.json` — persists `session_id` and per-thread `parent_message_id` so the proxy reconnects to the same DeepSeek web conversation after restart
+- `dispatch.db` (SQLite) or MongoDB — persists `session_id` and per-thread `parent_message_id` so the proxy reconnects to the same DeepSeek web conversation after restart
 
 ## Tool-call wire format
 Selected by ONE value — `TOOL_FORMAT` env var or `config.toml` key — naming a

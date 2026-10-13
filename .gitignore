@@ -32,6 +32,7 @@ session_state.json
 c/
 
 # Local runtime (pid/log files) for scripts/deepseek-proxy
+*.log
 .run/
 
 # Pi agent task output/logs (never ship these)

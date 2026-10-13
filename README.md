@@ -7,7 +7,7 @@ A FastAPI proxy that exposes an OpenAI-compatible `/v1/chat/completions` endpoin
 - **OpenAI wire compatibility** — drop-in `base_url` for tools that speak the OpenAI chat-completions schema.
 - **Streaming** — server-sent events with char-level tool-call detection.
 - **Tool calling** — `<invoke>` blocks translated to OpenAI `tool_calls` objects (dialect swappable via one `TOOL_FORMAT` switch).
-- **Conversation persistence** — one DeepSeek chat session per thread, reconnected after restart via `session_state.json`.
+- **Conversation persistence** — one DeepSeek chat session per thread, reconnected after restart. Uses SQLite by default, or MongoDB for deployments.
 - **No database** — full history is sent by the client each request; only session metadata is persisted.
 
 ## Setup
