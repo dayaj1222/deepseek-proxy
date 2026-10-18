@@ -10,8 +10,9 @@ proven; this repo is the port target.
 | Crate | What | State |
 |---|---|---|
 | `pow` | `DeepSeekHashV1` proof-of-work | done, verified vs live server |
-| `protocol` | DeepSeek SSE fragment router -> OpenAI chunks | in progress |
-| `proxy` | axum HTTP shell (`/v1/chat/completions`) | not started |
+| `protocol` | DeepSeek SSE fragment router -> OpenAI chunks | done, byte-identical to Python |
+| `client` | login, session, PoW header, streaming | done, live-verified |
+| `proxy` | axum HTTP shell, tools, SQLite, auth, retry | done, live-verified |
 
 ## `DeepSeekHashV1`
 
@@ -26,7 +27,7 @@ See `crates/pow/src/lib.rs` and `crates/protocol/tests/corpus.rs`.
 ```
 crates/pow       DeepSeekHashV1 + multithreaded nonce search
 crates/protocol  SSE parsing + fragment routing + OpenAI chunk shaping
-crates/proxy     axum server, config, storage
+crates/proxy     axum server, tool dialect, SQLite storage, auth
 corpus/          real captured SSE streams used as test fixtures
 ```
 
