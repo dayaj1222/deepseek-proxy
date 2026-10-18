@@ -21,3 +21,7 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+thiserror.workspace = true

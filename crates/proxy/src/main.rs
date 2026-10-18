@@ -21,6 +21,9 @@
 //! - `tools/format.py` prompt + tool-call dialect injection
 //! - multi-account failover
 
+mod dialect;
+mod store;
+
 use axum::{
     extract::State,
     http::HeaderMap,
@@ -60,6 +63,7 @@ struct AppState {
     client: Client,
     settings: Settings,
     threads: Arc<Mutex<HashMap<String, ThreadState>>>,
+    store: store::Store,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +80,8 @@ struct ChatRequest {
     thinking: Option<Value>,
     #[serde(default)]
     reasoning: Option<Value>,
+    #[serde(default)]
+    tools: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,20 +195,100 @@ async fn models(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// Reject the request unless the bearer key is known (or none are registered).
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_start_matches("Bearer ").trim().to_string())
+        .unwrap_or_default();
+
+    match state.store.verify_api_key(&presented) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "invalid api key", "type": "auth_error"}})),
+        )
+            .into_response()),
+        Err(e) => Err(backend_error(&format!("store: {e}"))),
+    }
+}
+
+/// Send the completion, retrying transient rate limits before the first byte.
+///
+/// DeepSeek returns `rate_limit_reached` when thinking is used too often. Only
+/// pre-first-byte failures are retried, which is safe for both stream and
+/// non-stream callers; a mid-stream failure is surfaced as-is.
+async fn completion_with_retry(
+    state: &AppState,
+    body: &CompletionBody,
+) -> Result<reqwest::Response, String> {
+    const ATTEMPTS: u32 = 3;
+    let mut last = String::new();
+
+    for attempt in 0..ATTEMPTS {
+        match state.client.stream_completion(body).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last = e.to_string();
+                let retryable = last.contains("rate_limit")
+                    || last.contains("too frequent")
+                    || last.contains("generation_err")
+                    || last.contains("temporarily unavailable");
+                if !retryable || attempt + 1 == ATTEMPTS {
+                    break;
+                }
+                let wait_ms = 500u64 * (1 << attempt);
+                tracing::warn!("completion failed ({last}); retrying in {wait_ms}ms");
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+        }
+    }
+    Err(last)
+}
+
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Response {
+    if let Err(resp) = authorize(&state, &headers) {
+        return resp;
+    }
+
     let key = thread_key(&headers, &req);
-    let existing = state.threads.lock().unwrap().get(&key).cloned();
+
+    // In-memory cache first, then SQLite (survives restarts).
+    let existing = state
+        .threads
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .or_else(|| {
+            state.store.get_thread(&key).ok().flatten().map(|r| ThreadState {
+                session_id: r.session_id,
+                parent_message_id: r.parent_message_id.and_then(|p| p.parse().ok()),
+            })
+        });
+
+    // Tool definitions are taught once, on the first turn of a thread. Later
+    // turns ride on the server-side conversation, like the Python proxy.
+    let system_extra = dialect::inject_tool_descriptions("", &req.tools);
 
     let prompt = match &existing {
         Some(_) => match newest_user_message(&req.messages) {
             Some(p) => p,
             None => return bad_request("no user message in continuation turn"),
         },
-        None => flatten_transcript(&req.messages),
+        None => {
+            let transcript = flatten_transcript(&req.messages);
+            if system_extra.is_empty() {
+                transcript
+            } else {
+                format!("{transcript}\n\n{system_extra}")
+            }
+        }
     };
     if prompt.is_empty() {
         return bad_request("empty prompt");
@@ -239,7 +325,7 @@ async fn chat_completions(
     let id = format!("chatcmpl-{}", uuid_like());
     let created = unix_secs();
 
-    let resp = match state.client.stream_completion(&body).await {
+    let resp = match completion_with_retry(&state, &body).await {
         Ok(r) => r,
         Err(e) => return backend_error(&format!("completion: {e}")),
     };
@@ -254,18 +340,49 @@ async fn chat_completions(
         Err(e) => return backend_error(&format!("read body: {e}")),
     };
     let (reasoning, answer, message_id) = route_all(&raw);
+
+    // Persist the resume point so a restart resumes the same remote session.
     if let Some(mid) = message_id {
         if let Some(t) = state.threads.lock().unwrap().get_mut(&key) {
             t.parent_message_id = Some(mid);
         }
+        let _ = state.store.save_thread(
+            &key,
+            &store::ThreadResume {
+                session_id: thread.session_id.clone(),
+                parent_message_id: Some(mid.to_string()),
+            },
+        );
     }
+
+    // Tool calls live inside the answer text as <invoke ...> blocks.
+    let tool_calls = dialect::extract_tool_calls(&answer);
+    let visible = if tool_calls.is_empty() {
+        answer.clone()
+    } else {
+        dialect::strip_tool_calls(&answer).trim().to_string()
+    };
 
     let mut message = json!({
         "role": "assistant",
-        "content": answer,
+        "content": visible,
     });
     if !reasoning.is_empty() {
         message["reasoning_content"] = json!(reasoning);
+    }
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = json!(tool_calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| json!({
+                "id": format!("call_{i}"),
+                "type": "function",
+                "function": {
+                    "name": c.name,
+                    "arguments": c.arguments.to_string(),
+                }
+            }))
+            .collect::<Vec<_>>());
     }
 
     Json(json!({
@@ -435,6 +552,22 @@ fn env_from_dotenv(key: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `deepseek-rs key <name>` registers an API key in the store and exits.
+    // Reading the key from argv keeps this scriptable; it is never logged.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("key") {
+        let name = args.get(2).map(String::as_str).unwrap_or("default");
+        let key = args
+            .get(3)
+            .cloned()
+            .ok_or("usage: deepseek-rs key <name> <api-key>")?;
+        let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "deepseek-rs.db".into());
+        let store = store::Store::open_path(&db_path)?;
+        store.insert_api_key(name, &key)?;
+        println!("registered key '{name}' in {db_path}");
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -470,10 +603,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.search_enabled
     );
 
+    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "deepseek-rs.db".into());
+    let store = store::Store::open_path(&db_path)?;
+    tracing::info!("store: {db_path}");
+
     let state = AppState {
         client,
         settings,
         threads: Arc::new(Mutex::new(HashMap::new())),
+        store,
     };
 
     let app = Router::new()
