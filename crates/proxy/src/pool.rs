@@ -28,12 +28,14 @@ struct GateState {
 pub struct Connection {
     pub email: String,
     password: String,
+    /// Explicitly configured token (`DEEPSEEK_TOKEN_<i>`); never overwritten.
     token: Option<String>,
     client: RwLock<Client>,
     gate: Arc<Mutex<GateState>>,
     request_delay: Duration,
     waiting: AtomicUsize,
     queue_limit: usize,
+    store: crate::store::Store,
 }
 
 impl Connection {
@@ -44,6 +46,7 @@ impl Connection {
         client: Client,
         request_delay: Duration,
         queue_limit: usize,
+        store: crate::store::Store,
     ) -> Self {
         Self {
             email,
@@ -57,6 +60,7 @@ impl Connection {
             request_delay,
             waiting: AtomicUsize::new(0),
             queue_limit,
+            store,
         }
     }
 
@@ -72,7 +76,7 @@ impl Connection {
         }
         self.waiting.fetch_add(1, Ordering::Relaxed);
 
-        let mut guard = self.gate.clone().lock_owned().await;
+        let guard = self.gate.clone().lock_owned().await;
         self.waiting.fetch_sub(1, Ordering::Relaxed);
 
         let now = Instant::now();
@@ -112,16 +116,51 @@ impl Connection {
     }
 
     /// Re-login, replacing the client. Resume ids stay valid.
+    ///
+    /// Any cached token is dropped first: this path is only reached after the
+    /// server rejected a token, so reusing it would loop. A configured token
+    /// is honoured when no password is available, but a password login wins
+    /// because it yields a fresh token.
     async fn reconnect(&self) -> Result<(), String> {
-        let fresh = if let Some(token) = &self.token {
-            Client::from_token(token.clone())
-        } else {
-            Client::login(&self.email, &self.password, client::get_device_id())
-                .await
-                .map_err(|e| e.to_string())?
-        };
+        let _ = self.store.forget_token(&self.email);
+        let fresh = self.login(None).await.map_err(|e| e.to_string())?;
         *self.client.write().await = fresh;
         Ok(())
+    }
+
+    /// Build a client from `cached`, or log in and persist the new token.
+    async fn login(&self, cached: Option<String>) -> Result<Client, String> {
+        if let Some(cached) = cached {
+            tracing::debug!("account {}: reusing cached token", self.email);
+            return Ok(Client::from_token(cached));
+        }
+        if !self.password.is_empty() {
+            let client = Client::login(&self.email, &self.password, client::get_device_id())
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Err(e) = self.store.save_token(&self.email, client.token()) {
+                tracing::warn!("account {}: could not cache token: {e}", self.email);
+            }
+            return Ok(client);
+        }
+        match &self.token {
+            Some(token) => Ok(Client::from_token(token.clone())),
+            None => Err(format!("account {}: no password or token", self.email)),
+        }
+    }
+
+    /// Initial login: configured token > cached token > password login.
+    async fn initial_login(&self) -> Result<Client, String> {
+        if let Some(token) = &self.token {
+            return Ok(Client::from_token(token.clone()));
+        }
+        let cached = self
+            .store
+            .get_token(&self.email)
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty());
+        self.login(cached).await
     }
 }
 
@@ -179,21 +218,23 @@ impl Pool {
         }
         let mut conns = Vec::new();
         for a in accounts {
-            let client = if let Some(token) = &a.token {
-                Client::from_token(token.clone())
-            } else {
-                Client::login(&a.email, &a.password, client::get_device_id())
-                    .await
-                    .map_err(|e| format!("login {}: {e}", a.email))?
-            };
-            conns.push(Arc::new(Connection::new(
+            let conn = Connection::new(
                 a.email,
                 a.password,
                 a.token,
-                client,
+                // Placeholder; replaced by `initial_login` below, which needs
+                // the connection's own store handle for the token cache.
+                Client::from_token(String::new()),
                 config.request_delay,
                 config.queue_limit,
-            )));
+                store.clone(),
+            );
+            let client = conn
+                .initial_login()
+                .await
+                .map_err(|e| format!("login {}: {e}", conn.email))?;
+            *conn.client.write().await = client;
+            conns.push(Arc::new(conn));
         }
         Ok(Self {
             conns,
@@ -207,6 +248,7 @@ impl Pool {
         self.conns.len()
     }
 
+    #[allow(dead_code)] // used by tests and future admin UI
     pub fn is_empty(&self) -> bool {
         self.conns.is_empty()
     }

@@ -6,4 +6,7 @@
 
 pub mod fragment;
 
-pub use fragment::{route_event, route_stream, Channel, FragmentRouter, RerouteEvent};
+pub use fragment::{
+    classify_line, is_context_limit, route_event, route_stream, Channel, FragmentRouter, LineKind,
+    RerouteEvent,
+};

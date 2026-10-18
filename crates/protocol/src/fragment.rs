@@ -221,6 +221,74 @@ pub fn route_stream(raw: &str) -> Vec<RerouteEvent> {
     out
 }
 
+/// What one SSE line means to the caller that drives the stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineKind {
+    /// Not a payload line, or a payload the caller should skip.
+    Ignored,
+    /// A normal event, already parsed so the caller need not parse it again.
+    Event(Value),
+    /// A fatal `event: hint` error sent by the upstream.
+    HintError { content: String },
+}
+
+/// Classify one SSE line.
+///
+/// `current_event` carries the last `event:` value across calls and is updated
+/// in place, exactly like the Python reader's `current_event` variable.
+///
+/// Python only treats a hint as fatal when it is `event: hint` and the payload
+/// has `type == "error"`; everything else is a normal message.
+pub fn classify_line(line: &str, current_event: &mut String) -> LineKind {
+    let line = line.trim();
+
+    if let Some(ev) = line.strip_prefix("event:") {
+        *current_event = ev.trim().to_string();
+        return LineKind::Ignored;
+    }
+
+    let Some(payload) = line.strip_prefix("data:") else {
+        current_event.clear();
+        return LineKind::Ignored;
+    };
+
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        current_event.clear();
+        return LineKind::Ignored;
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(payload) else {
+        current_event.clear();
+        return LineKind::Ignored;
+    };
+
+    let is_hint = *current_event == "hint"
+        && value.get("type").and_then(|t| t.as_str()) == Some("error");
+    current_event.clear();
+
+    if is_hint {
+        LineKind::HintError {
+            content: value
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        }
+    } else {
+        LineKind::Event(value)
+    }
+}
+
+/// True when an upstream hint says the prompt no longer fits the session.
+///
+/// The Python proxy keys on `input_exceeds_limit`; `context_length_exceeded`
+/// is accepted too because that is what OpenAI-style clients expect.
+pub fn is_context_limit(content: &str) -> bool {
+    let c = content.to_lowercase();
+    c.contains("input_exceeds_limit") || c.contains("context_length_exceeded")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +366,52 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel, Channel::Text);
         assert_eq!(out[0].text, "hi");
+    }
+
+    #[test]
+    fn classify_plain_event_is_normal() {
+        let mut ev = String::new();
+        assert!(matches!(
+            classify_line("data: {\"v\":\"hi\"}", &mut ev),
+            LineKind::Event(_)
+        ));
+    }
+
+    #[test]
+    fn classify_hint_error_is_fatal() {
+        let mut ev = String::new();
+        assert_eq!(classify_line("event: hint", &mut ev), LineKind::Ignored);
+        assert_eq!(
+            classify_line(
+                "data: {\"type\":\"error\",\"content\":\"input_exceeds_limit\"}",
+                &mut ev
+            ),
+            LineKind::HintError {
+                content: "input_exceeds_limit".into()
+            }
+        );
+        // The event name is consumed by the hint, so the next line is normal.
+        assert!(matches!(
+            classify_line("data: {\"v\":\"hi\"}", &mut ev),
+            LineKind::Event(_)
+        ));
+    }
+
+    #[test]
+    fn classify_hint_without_error_type_is_normal() {
+        let mut ev = String::new();
+        assert_eq!(classify_line("event: hint", &mut ev), LineKind::Ignored);
+        assert!(matches!(
+            classify_line("data: {\"type\":\"info\"}", &mut ev),
+            LineKind::Event(_)
+        ));
+    }
+
+    #[test]
+    fn context_limit_is_recognised() {
+        assert!(is_context_limit("Input_Exceeds_Limit: 128k"));
+        assert!(is_context_limit("context_length_exceeded"));
+        assert!(!is_context_limit("rate_limit_reached"));
     }
 
     #[test]

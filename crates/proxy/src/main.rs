@@ -36,7 +36,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use client::{Client, CompletionBody, COMPLETION_PATH};
+use client::{CompletionBody, COMPLETION_PATH};
 use futures_util::StreamExt;
 use protocol::{route_event, Channel, FragmentRouter};
 use serde::Deserialize;
@@ -91,12 +91,104 @@ struct Msg {
     role: String,
     #[serde(default)]
     content: Option<Value>,
+    // Deserialized for completeness; the prompt builders only need role/content.
     #[serde(default)]
+    #[allow(dead_code)]
     tool_calls: Vec<Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     tool_call_id: Option<String>,
     #[serde(default)]
     name: Option<String>,
+}
+
+/// Prompts for one turn: the delta the session needs now, and the full
+/// flattened transcript used to rebuild the session when it overflows.
+///
+/// Mirrors the Python proxy's `prompt` / `replay_prompt` pair.
+fn build_prompts(
+    req: &ChatRequest,
+    existing: Option<&ThreadState>,
+    system_extra: &str,
+) -> (String, String) {
+    let transcript = flatten_transcript(&req.messages);
+    let replay = if system_extra.is_empty() {
+        transcript
+    } else {
+        format!("{transcript}\n\n{system_extra}")
+    };
+    let delta = match existing {
+        Some(_) => continuation_prompt(&req.messages).unwrap_or_default(),
+        None => replay.clone(),
+    };
+    (delta, replay)
+}
+
+fn completion_body(
+    thread: &ThreadState,
+    prompt: &str,
+    thinking: bool,
+    search: bool,
+) -> CompletionBody {
+    let mut body = CompletionBody::new(&thread.session_id, prompt);
+    body.thinking_enabled = thinking;
+    body.search_enabled = search;
+    body.parent_message_id = thread.parent_message_id;
+    body
+}
+
+/// First fatal `hint` error in a fully-buffered SSE body, if any.
+fn first_hint(raw: &str) -> Option<String> {
+    let mut current = String::new();
+    for line in raw.lines() {
+        if let protocol::LineKind::HintError { content } = protocol::classify_line(line, &mut current) {
+            return Some(content);
+        }
+    }
+    None
+}
+
+/// Replace the remote session after a context-limit rejection.
+///
+/// DeepSeek keeps the conversation server-side, so an overflowing session
+/// cannot be trimmed from here: create a fresh one and let the caller replay
+/// the whole transcript into it. Persisted resume state is reset to match.
+async fn rebuild_session(
+    state: &AppState,
+    key: &str,
+    reason: &str,
+) -> Result<ThreadState, Response> {
+    let conn = state.pool.route(key).await;
+    let session_id = {
+        let _slot = conn
+            .acquire()
+            .await
+            .map_err(|e| backend_error(&format!("rate slot: {e}")))?;
+        conn.client()
+            .await
+            .create_chat_session()
+            .await
+            .map_err(|e| backend_error(&format!("create_session: {e}")))?
+    };
+    tracing::warn!("thread {key}: {reason}; rebuilding in a new remote session");
+
+    let fresh = ThreadState {
+        session_id,
+        parent_message_id: None,
+    };
+    state
+        .threads
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), fresh.clone());
+    let _ = state.store.save_thread(
+        key,
+        &store::ThreadResume {
+            session_id: fresh.session_id.clone(),
+            parent_message_id: None,
+        },
+    );
+    Ok(fresh)
 }
 
 fn content_text(content: &Option<Value>) -> String {
@@ -340,26 +432,15 @@ async fn chat_completions(
     // turns ride on the server-side conversation, like the Python proxy.
     let system_extra = dialect::inject_tool_descriptions("", &req.tools);
 
-    let prompt = match &existing {
-        Some(_) => match continuation_prompt(&req.messages) {
-            Some(p) => p,
-            None => return bad_request("no user message or tool result in continuation turn"),
-        },
-        None => {
-            let transcript = flatten_transcript(&req.messages);
-            if system_extra.is_empty() {
-                transcript
-            } else {
-                format!("{transcript}\n\n{system_extra}")
-            }
-        }
-    };
+    let (prompt, replay) = build_prompts(&req, existing.as_ref(), &system_extra);
     if prompt.is_empty() {
-        return bad_request("empty prompt");
+        return bad_request("no user message or tool result in continuation turn");
     }
+    // A brand-new thread has nothing to replay into, so a limit hit is final.
+    let can_recover = existing.is_some() && !replay.is_empty();
 
     // Create the remote session lazily, on the first turn for this thread.
-    let thread = match existing {
+    let mut thread = match existing {
         Some(t) => t,
         None => {
             let conn = state.pool.route(&key).await;
@@ -388,10 +469,7 @@ async fn chat_completions(
     };
 
     let thinking = want_thinking(&req, state.settings.thinking_default);
-    let mut body = CompletionBody::new(&thread.session_id, &prompt);
-    body.thinking_enabled = thinking;
-    body.search_enabled = state.settings.search_enabled;
-    body.parent_message_id = thread.parent_message_id;
+    let mut body = completion_body(&thread, &prompt, thinking, state.settings.search_enabled);
 
     let model = req.model.clone().unwrap_or_else(|| state.settings.model_name.clone());
     let id = format!("chatcmpl-{}", uuid_like());
@@ -403,13 +481,32 @@ async fn chat_completions(
     };
 
     if req.stream {
-        return stream_response(state, key, resp, id, model, created).await;
+        return stream_response(state, key, resp, body, id, model, created, replay, can_recover)
+            .await;
     }
 
     // Non-stream: buffer everything, then answer in one shot.
     let raw = match resp.text().await {
         Ok(t) => t,
         Err(e) => return backend_error(&format!("read body: {e}")),
+    };
+    let raw = match first_hint(&raw) {
+        Some(hint) if can_recover && protocol::is_context_limit(&hint) => {
+            thread = match rebuild_session(&state, &key, &hint).await {
+                Ok(t) => t,
+                Err(resp) => return resp,
+            };
+            body = completion_body(&thread, &replay, thinking, state.settings.search_enabled);
+            let resp = match completion_with_retry(&state, &key, &body).await {
+                Ok(r) => r,
+                Err(e) => return backend_error(&format!("completion retry: {e}")),
+            };
+            match resp.text().await {
+                Ok(t) => t,
+                Err(e) => return backend_error(&format!("read body: {e}")),
+            }
+        }
+        _ => raw,
     };
     let (reasoning, answer, message_id) = route_all(&raw);
 
@@ -476,72 +573,141 @@ async fn chat_completions(
     .into_response()
 }
 
+/// Result of draining one upstream SSE response into OpenAI chunks.
+struct Pumped {
+    parent: Option<i64>,
+    filter: dialect::StreamToolFilter,
+    /// True once any chunk reached the client; a hint after that is fatal.
+    emitted: bool,
+    /// Fatal `event: hint` payload, if the upstream aborted the stream.
+    hint: Option<String>,
+}
+
+/// Read one upstream stream to completion, forwarding chunks to `tx`.
+async fn pump(
+    resp: reqwest::Response,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    id: &str,
+    model: &str,
+    created: u64,
+) -> Pumped {
+    let mut router = FragmentRouter::new();
+    let mut events = Vec::new();
+    let mut buf = String::new();
+    let mut current_event = String::new();
+    let mut parent: Option<i64> = None;
+    let mut filter = dialect::StreamToolFilter::new();
+    let mut emitted = false;
+
+    let mut byte_stream = resp.bytes_stream();
+    while let Some(chunk) = byte_stream.next().await {
+        let Ok(bytes) = chunk else { break };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].to_string();
+            buf.drain(..=pos);
+            let value = match protocol::classify_line(&line, &mut current_event) {
+                protocol::LineKind::Ignored => continue,
+                protocol::LineKind::HintError { content } => {
+                    return Pumped {
+                        parent,
+                        filter,
+                        emitted,
+                        hint: Some(content),
+                    };
+                }
+                protocol::LineKind::Event(value) => value,
+            };
+            if parent.is_none() {
+                if let Some(mid) = value.get("response_message_id").and_then(|v| v.as_i64()) {
+                    parent = Some(mid);
+                }
+            }
+            events.clear();
+            route_event(&value, &mut router, &mut events);
+            for ev in &events {
+                let delta = match ev.channel {
+                    Channel::Text => {
+                        // Tool blocks are held back and surfaced as tool_calls.
+                        let safe = filter.feed(&ev.text);
+                        if safe.is_empty() {
+                            continue;
+                        }
+                        json!({ "content": safe })
+                    }
+                    Channel::Reasoning => json!({ "reasoning_content": ev.text }),
+                };
+                let chunk = json!({
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
+                });
+                emitted = true;
+                if tx.send(Ok(Event::default().data(chunk.to_string()))).await.is_err() {
+                    return Pumped {
+                        parent,
+                        filter,
+                        emitted,
+                        hint: None,
+                    };
+                }
+            }
+        }
+    }
+
+    Pumped {
+        parent,
+        filter,
+        emitted,
+        hint: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn stream_response(
     state: AppState,
     key: String,
     resp: reqwest::Response,
+    body: CompletionBody,
     id: String,
     model: String,
     created: u64,
+    replay: String,
+    can_recover: bool,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
-        let mut router = FragmentRouter::new();
-        let mut events = Vec::new();
-        let mut buf = String::new();
-        let mut parent: Option<i64> = None;
-        let mut filter = dialect::StreamToolFilter::new();
+        let mut pumped = pump(resp, &tx, &id, &model, created).await;
 
-        let mut byte_stream = resp.bytes_stream();
-        while let Some(chunk) = byte_stream.next().await {
-            let Ok(bytes) = chunk else { break };
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].trim().to_string();
-                buf.drain(..=pos);
-                let Some(payload) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let payload = payload.trim();
-                if payload.is_empty() || payload == "[DONE]" {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_str::<Value>(payload) else {
-                    continue;
-                };
-                if parent.is_none() {
-                    if let Some(mid) = value.get("response_message_id").and_then(|v| v.as_i64()) {
-                        parent = Some(mid);
+        // Context overflow arrives as a hint before any content. Rebuild the
+        // remote session and replay the transcript once, like the Python proxy.
+        if let Some(hint) = pumped.hint.clone() {
+            if can_recover && !pumped.emitted && protocol::is_context_limit(&hint) {
+                if let Ok(fresh) = rebuild_session(&state, &key, &hint).await {
+                    let retry_body = completion_body(
+                        &fresh,
+                        &replay,
+                        body.thinking_enabled,
+                        body.search_enabled,
+                    );
+                    match completion_with_retry(&state, &key, &retry_body).await {
+                        Ok(resp) => pumped = pump(resp, &tx, &id, &model, created).await,
+                        Err(e) => tracing::error!("thread {key}: replay failed: {e}"),
                     }
                 }
-                events.clear();
-                route_event(&value, &mut router, &mut events);
-                for ev in &events {
-                    let delta = match ev.channel {
-                        Channel::Text => {
-                            // Tool blocks are held back and surfaced as tool_calls.
-                            let safe = filter.feed(&ev.text);
-                            if safe.is_empty() {
-                                continue;
-                            }
-                            json!({ "content": safe })
-                        }
-                        Channel::Reasoning => json!({ "reasoning_content": ev.text }),
-                    };
-                    let chunk = json!({
-                        "id": id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
-                    });
-                    if tx.send(Ok(Event::default().data(chunk.to_string()))).await.is_err() {
-                        return;
-                    }
-                }
+            } else {
+                tracing::error!("thread {key}: upstream hint error: {hint}");
             }
         }
+
+        let Pumped {
+            parent,
+            mut filter,
+            ..
+        } = pumped;
 
         // Flush any held-back prose, then emit tool calls (if any).
         let tail = filter.finish();

@@ -14,6 +14,18 @@ proven; this repo is the port target.
 | `client` | login, session, PoW header, streaming | done, live-verified |
 | `proxy` | axum HTTP shell, tools, SQLite, auth, retry | done, live-verified |
 
+## Behaviour worth knowing
+
+- **Login tokens are cached** in SQLite (`account_tokens`). A restart reuses
+the cached bearer token instead of logging in again; a token the server
+rejects is dropped and re-fetched on the next recover, so a stale cache
+self-heals. `DEEPSEEK_TOKEN_<i>` still wins when set, since it is explicit.
+- **Context-limit recovery.** When DeepSeek answers a continuation turn with an
+`input_exceeds_limit` hint, the proxy creates a new remote session and replays
+the full flattened transcript once, mirroring the Python proxy. It only fires
+before any content has been sent, and only for existing threads (a first
+turn has nothing to replay).
+
 ## `DeepSeekHashV1`
 
 SHA3-256 with one mutation: Keccak-f[1600] **skips round 0** (runs rounds

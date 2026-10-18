@@ -73,6 +73,12 @@ impl Store {
                  thread_id  TEXT PRIMARY KEY,
                  email      TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
+             );
+             -- Cached login tokens so a restart skips the login round trip.
+             CREATE TABLE IF NOT EXISTS account_tokens (
+                 email      TEXT PRIMARY KEY,
+                 token      TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
              );",
         )?;
         Ok(())
@@ -100,6 +106,37 @@ impl Store {
                  email = excluded.email, updated_at = excluded.updated_at",
             params![thread_id, email],
         )?;
+        Ok(())
+    }
+
+    /// Cached bearer token for an account, if one was stored by a login.
+    pub fn get_token(&self, email: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT token FROM account_tokens WHERE email = ?1",
+                params![email],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn save_token(&self, email: &str, token: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "INSERT INTO account_tokens (email, token, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(email) DO UPDATE SET
+                 token = excluded.token, updated_at = excluded.updated_at",
+            params![email, token],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a cached token (it was rejected upstream).
+    pub fn forget_token(&self, email: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute("DELETE FROM account_tokens WHERE email = ?1", params![email])?;
         Ok(())
     }
 
@@ -189,6 +226,23 @@ pub fn hash_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_cache_roundtrip() {
+        let s = Store::open_memory().unwrap();
+        assert_eq!(s.get_token("a@b").unwrap(), None);
+
+        s.save_token("a@b", "tok-1").unwrap();
+        assert_eq!(s.get_token("a@b").unwrap().as_deref(), Some("tok-1"));
+
+        // Re-login overwrites rather than duplicating.
+        s.save_token("a@b", "tok-2").unwrap();
+        assert_eq!(s.get_token("a@b").unwrap().as_deref(), Some("tok-2"));
+
+        // A rejected token is dropped so the next start logs in again.
+        s.forget_token("a@b").unwrap();
+        assert_eq!(s.get_token("a@b").unwrap(), None);
+    }
 
     #[test]
     fn thread_roundtrip() {

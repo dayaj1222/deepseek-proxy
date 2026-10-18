@@ -104,7 +104,7 @@ fn de_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
 }
 
 /// Body sent to `/api/v0/chat/completion`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CompletionBody {
     pub chat_session_id: String,
     pub parent_message_id: Option<i64>,
