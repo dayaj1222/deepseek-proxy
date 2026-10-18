@@ -85,10 +85,10 @@ pub fn periodic_reminder() -> String {
     s.push_str("Reminder — tool calls use exactly this form:\n\n");
     s.push_str(TEMPLATE);
     s.push_str("\n\n!!IMPORTANT!!\n");
-    s.push_str("1. Never wrap or decorate a block with legacy DSML marker tags. They are\n");
-    s.push_str("   not part of the format, are dropped, and are shown to the user as junk.\n");
-    s.push_str("2. Never emit the closing tag twice, and never repeat a whole block after\n");
-    s.push_str("   it has already been emitted.\n");
+    s.push_str("1. Never wrap or decorate a block with legacy marker tags. They are not part\n");
+    s.push_str("   of the format, are dropped, and are shown to the user as junk.\n");
+    s.push_str("2. Never close a block twice and never repeat a whole block after it has\n");
+    s.push_str("   already been emitted.\n");
     s.push_str("3. The body must be one JSON object: no code fence, no trailing prose,\n");
     s.push_str("   no bare JSON without tags, and a missing closing tag discards the call.\n");
     s.push_str("Get the format wrong and your tool call silently does nothing.");
