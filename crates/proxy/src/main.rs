@@ -21,7 +21,9 @@
 //! - `tools/format.py` prompt + tool-call dialect injection
 //! - multi-account failover
 
+mod config;
 mod dialect;
+mod pool;
 mod store;
 
 use axum::{
@@ -60,7 +62,7 @@ struct ThreadState {
 
 #[derive(Clone)]
 struct AppState {
-    client: Client,
+    pool: Arc<pool::Pool>,
     settings: Settings,
     threads: Arc<Mutex<HashMap<String, ThreadState>>>,
     store: store::Store,
@@ -255,24 +257,52 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
 /// non-stream callers; a mid-stream failure is surfaced as-is.
 async fn completion_with_retry(
     state: &AppState,
+    thread_id: &str,
     body: &CompletionBody,
 ) -> Result<reqwest::Response, String> {
     const ATTEMPTS: u32 = 3;
     let mut last = String::new();
+    let mut conn = state.pool.route(thread_id).await;
 
     for attempt in 0..ATTEMPTS {
-        match state.client.stream_completion(body).await {
+        // Hold this account's rate slot for the whole request; dropping it
+        // records completion time so the next request waits the full delay.
+        let slot = conn.acquire().await?;
+        let client = conn.client().await;
+
+        match client.stream_completion(body).await {
             Ok(resp) => return Ok(resp),
             Err(e) => {
                 last = e.to_string();
+
+                if pool::is_login_dead(&last) {
+                    tracing::warn!("account {} login-dead: {last}", conn.email);
+                    drop(slot);
+                    match state.pool.failover(thread_id).await {
+                        Some(next) => {
+                            tracing::warn!("thread failed over to {}", next.email);
+                            conn = next;
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+
+                if pool::is_invalid_token(&last) && state.pool.recover(&conn).await {
+                    tracing::info!("recovered account {}", conn.email);
+                    drop(slot);
+                    continue;
+                }
+
                 let retryable = last.contains("rate_limit")
                     || last.contains("too frequent")
                     || last.contains("generation_err")
                     || last.contains("temporarily unavailable");
+                drop(slot);
                 if !retryable || attempt + 1 == ATTEMPTS {
                     break;
                 }
-                let wait_ms = 500u64 * (1 << attempt);
+                let wait_ms = 1000u64 * (1 << attempt);
                 tracing::warn!("completion failed ({last}); retrying in {wait_ms}ms");
                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             }
@@ -332,9 +362,17 @@ async fn chat_completions(
     let thread = match existing {
         Some(t) => t,
         None => {
-            let session_id = match state.client.create_chat_session().await {
-                Ok(s) => s,
-                Err(e) => return backend_error(&format!("create_session: {e}")),
+            let conn = state.pool.route(&key).await;
+            let session_id = {
+                let _slot = match conn.acquire().await {
+                    Ok(s) => s,
+                    Err(e) => return backend_error(&format!("rate slot: {e}")),
+                };
+                let client = conn.client().await;
+                match client.create_chat_session().await {
+                    Ok(s) => s,
+                    Err(e) => return backend_error(&format!("create_session: {e}")),
+                }
             };
             let t = ThreadState {
                 session_id,
@@ -359,7 +397,7 @@ async fn chat_completions(
     let id = format!("chatcmpl-{}", uuid_like());
     let created = unix_secs();
 
-    let resp = match completion_with_retry(&state, &body).await {
+    let resp = match completion_with_retry(&state, &key, &body).await {
         Ok(r) => r,
         Err(e) => return backend_error(&format!("completion: {e}")),
     };
@@ -627,13 +665,6 @@ fn backend_error(msg: &str) -> Response {
         .into_response()
 }
 
-fn env_flag(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => default,
-    }
-}
-
 fn env_from_dotenv(key: &str) -> Option<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
     let text = std::fs::read_to_string(path).ok()?;
@@ -643,52 +674,163 @@ fn env_from_dotenv(key: &str) -> Option<String> {
         .map(|(_, v)| v.trim().trim_matches('"').to_string())
 }
 
+/// Load accounts from DEEPSEEK_EMAIL_<i>/PASSWORD_<i>/TOKEN_<i>, falling back to
+/// an unindexed EMAIL/PASSWORD/TOKEN, then to ../deepseek/.env.
+fn load_accounts() -> Vec<pool::AccountSpec> {
+    fn val(key: &str) -> Option<String> {
+        std::env::var(key)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| env_from_dotenv(key).filter(|v| !v.trim().is_empty()))
+    }
+
+    let mut out = Vec::new();
+    for i in 0.. {
+        let email = val(&format!("DEEPSEEK_EMAIL_{i}"));
+        let password = val(&format!("DEEPSEEK_PASSWORD_{i}"));
+        let token = val(&format!("DEEPSEEK_TOKEN_{i}"));
+        if token.is_none() && !(email.is_some() && password.is_some()) {
+            break;
+        }
+        out.push(pool::AccountSpec {
+            email: email.unwrap_or_else(|| format!("token-account-{i}")),
+            password: password.unwrap_or_default(),
+            token,
+        });
+    }
+
+    if out.is_empty() {
+        let email = val("DEEPSEEK_EMAIL");
+        let password = val("DEEPSEEK_PASSWORD");
+        let token = val("DEEPSEEK_TOKEN");
+        if token.is_some() || (email.is_some() && password.is_some()) {
+            out.push(pool::AccountSpec {
+                email: email.unwrap_or_else(|| "token-account".into()),
+                password: password.unwrap_or_default(),
+                token,
+            });
+        }
+    }
+    out
+}
+
+fn db_path() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(config::Config::load()?.db_path)
+}
+
+/// `deepseek-rs key <name> <key>` — register an API key and exit.
+fn cmd_key(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let name = args.get(2).map(String::as_str).unwrap_or("default");
+    let key = args
+        .get(3)
+        .cloned()
+        .ok_or("usage: deepseek-rs key <name> <api-key>")?;
+    let path = db_path()?;
+    let store = store::Store::open_path(&path)?;
+    store.insert_api_key(name, &key)?;
+    println!("registered key '{name}' in {path}");
+    Ok(())
+}
+
+fn usage() {
+    println!(
+        "deepseek-rs — OpenAI-compatible proxy for the DeepSeek private API
+
+Usage:
+  deepseek-rs serve                      run the proxy (foreground)
+  deepseek-rs key <name> <api-key>       register an API key
+  deepseek-rs accounts                   list configured accounts
+  deepseek-rs check                      verify login + PoW, then exit
+  deepseek-rs url                        print the base URL
+  deepseek-rs help                       this message
+
+Environment:
+  PROXY_HOST / PROXY_PORT   bind address (default 0.0.0.0:9174)
+  DB_PATH                   sqlite file (default deepseek-rs.db)
+  REQUEST_DELAY             seconds between requests per account (default 2)
+  THINKING_ENABLED          default thinking flag (default false)
+  SEARCH_ENABLED            send search flag (default false)
+  DEEPSEEK_EMAIL_<i> / DEEPSEEK_PASSWORD_<i> / DEEPSEEK_TOKEN_<i>
+                            accounts, checked in order"
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `deepseek-rs key <name>` registers an API key in the store and exits.
-    // Reading the key from argv keeps this scriptable; it is never logged.
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("key") {
-        let name = args.get(2).map(String::as_str).unwrap_or("default");
-        let key = args
-            .get(3)
-            .cloned()
-            .ok_or("usage: deepseek-rs key <name> <api-key>")?;
-        let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "deepseek-rs.db".into());
-        let store = store::Store::open_path(&db_path)?;
-        store.insert_api_key(name, &key)?;
-        println!("registered key '{name}' in {db_path}");
-        return Ok(());
+    let cmd = args.get(1).map(String::as_str).unwrap_or("serve");
+
+    match cmd {
+        "key" => return cmd_key(&args),
+        "help" | "-h" | "--help" => {
+            usage();
+            return Ok(());
+        }
+        "url" => {
+            let cfg = config::Config::load()?;
+            println!("http://127.0.0.1:{}/v1", cfg.port);
+            return Ok(());
+        }
+        _ => {}
     }
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "proxy=info,tower_http=warn".into()),
+                .unwrap_or_else(|_| "proxy=info".into()),
         )
         .init();
 
-    let email = std::env::var("DEEPSEEK_EMAIL_0")
-        .ok()
-        .or_else(|| env_from_dotenv("DEEPSEEK_EMAIL_0"))
-        .ok_or("DEEPSEEK_EMAIL_0 not set (env or ../deepseek/.env)")?;
-    let password = std::env::var("DEEPSEEK_PASSWORD_0")
-        .ok()
-        .or_else(|| env_from_dotenv("DEEPSEEK_PASSWORD_0"))
-        .ok_or("DEEPSEEK_PASSWORD_0 not set (env or ../deepseek/.env)")?;
+    let accounts = load_accounts();
+    if accounts.is_empty() {
+        return Err("no DeepSeek accounts configured (DEEPSEEK_EMAIL_0/PASSWORD_0)".into());
+    }
 
-    tracing::info!("logging in to DeepSeek");
-    let client = Client::login(&email, &password, client::get_device_id()).await?;
-    tracing::info!("login ok (token {}...)", &client.token()[..12.min(client.token().len())]);
+    if cmd == "accounts" {
+        for (i, a) in accounts.iter().enumerate() {
+            let kind = if a.token.is_some() { "token" } else { "password" };
+            println!("{i}: {} ({kind})", a.email);
+        }
+        return Ok(());
+    }
 
-    // Fail fast if the PoW path is broken, rather than on the first user request.
-    let _ = client.pow_challenge(COMPLETION_PATH).await?;
-    tracing::info!("pow challenge ok");
+    let store = store::Store::open_path(db_path()?)?;
+
+    let cfg = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => return Err(e.into()),
+    };
+    let delay = cfg.request_delay_secs;
+    let pool_config = pool::PoolConfig {
+        request_delay: std::time::Duration::from_secs_f64(delay),
+        queue_limit: cfg.queue_limit,
+        login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
+    };
+
+    tracing::info!("connecting {} account(s), {delay}s between requests", accounts.len());
+    let pool = match pool::Pool::connect(accounts, pool_config, store.clone()).await {
+        Ok(p) => Arc::new(p),
+        Err(e) => return Err(e.into()),
+    };
+    tracing::info!("login ok for {} account(s)", pool.len());
+
+    // Fail fast on a broken PoW path rather than on the first user request.
+    {
+        let conn = pool.route("startup-check").await;
+        let client = conn.client().await;
+        client.pow_challenge(COMPLETION_PATH).await?;
+        tracing::info!("pow challenge ok (account {})", conn.email);
+    }
+
+    if cmd == "check" {
+        println!("ok: {} account(s), login + pow verified", pool.len());
+        return Ok(());
+    }
 
     let settings = Settings {
-        thinking_default: env_flag("THINKING_ENABLED", false),
-        search_enabled: env_flag("SEARCH_ENABLED", false),
-        model_name: std::env::var("MODEL_NAME").unwrap_or_else(|_| "deepseek-chat".into()),
+        thinking_default: cfg.thinking,
+        search_enabled: cfg.search,
+        model_name: cfg.model.clone(),
     };
     tracing::info!(
         "thinking={} search={}",
@@ -696,12 +838,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings.search_enabled
     );
 
-    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "deepseek-rs.db".into());
-    let store = store::Store::open_path(&db_path)?;
-    tracing::info!("store: {db_path}");
-
     let state = AppState {
-        client,
+        pool,
         settings,
         threads: Arc::new(Mutex::new(HashMap::new())),
         store,
@@ -713,9 +851,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(state);
 
-    let host = std::env::var("PROXY_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    let port = std::env::var("PROXY_PORT").unwrap_or_else(|_| "9174".into());
-    let addr = format!("{host}:{port}");
+    let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
     axum::serve(listener, app).await?;

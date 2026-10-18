@@ -68,7 +68,37 @@ impl Store {
                  key_prefix TEXT NOT NULL,
                  name       TEXT NOT NULL,
                  created_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS thread_bindings (
+                 thread_id  TEXT PRIMARY KEY,
+                 email      TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
              );",
+        )?;
+        Ok(())
+    }
+
+    /// Account email a thread is bound to (survives restarts).
+    pub fn get_binding(&self, thread_id: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let row = conn
+            .query_row(
+                "SELECT email FROM thread_bindings WHERE thread_id = ?1",
+                params![thread_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn bind(&self, thread_id: &str, email: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "INSERT INTO thread_bindings (thread_id, email, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(thread_id) DO UPDATE SET
+                 email = excluded.email, updated_at = excluded.updated_at",
+            params![thread_id, email],
         )?;
         Ok(())
     }

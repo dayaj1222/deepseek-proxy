@@ -1,0 +1,40 @@
+# deepseek-rs configuration.
+#
+# Precedence: environment variables > this file > built-in defaults.
+# Every key is optional; delete a line to fall back to the default.
+#
+# Credentials are NOT here — they live in ../deepseek/.env or the environment
+# (DEEPSEEK_EMAIL_<n> / DEEPSEEK_PASSWORD_<n> / DEEPSEEK_TOKEN_<n>), one per
+# account, numbered from 0.
+
+[proxy]
+host = "0.0.0.0"
+port = 9174
+
+[storage]
+# SQLite file holding thread resume state and API-key hashes.
+db_path = "deepseek-rs.db"
+
+[deepseek]
+# Model id returned when a client does not request one.
+model = "deepseek-chat"
+
+# Default thinking flag for requests that do not specify one.
+thinking = false
+
+# Send the web-search flag. Leave this false unless you have a reason:
+# thinking+search is throttled hard by the backend, and a mid-stream limit
+# turns into a failed turn rather than a retry.
+search = false
+
+[limits]
+# Seconds to wait after a request finishes before starting the next one on
+# the same account. Completion-to-start, not start-to-start.
+# Dropping below ~2s is what triggers "Messages too frequent".
+request_delay_secs = 2.0
+
+# How many requests may queue behind a busy account before being rejected.
+queue_limit = 64
+
+# How long an account is skipped after a failed login, in seconds.
+login_cooldown_secs = 300

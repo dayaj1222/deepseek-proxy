@@ -141,6 +141,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// Build a client around an existing bearer token (skips the login round trip).
+    pub fn from_token(token: String) -> Self {
+        Self::new(token)
+    }
+
     fn new(token: String) -> Self {
         Self {
             http: reqwest::Client::builder()
