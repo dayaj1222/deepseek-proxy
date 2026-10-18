@@ -164,7 +164,13 @@ fn build_prompts(
     // Re-anchor the wire format every N user/tool messages. The system block
     // is only sent on the first turn, so without this a long thread drifts off
     // the format and starts emitting malformed blocks.
-    if !req.tools.is_empty() && reminder_due(existing, &req.messages, reminder_interval) {
+    let reminder_needed = if reminder_interval == 1 {
+        // Per-turn: every continuation turn carries tools re-anchors the format.
+        existing.is_some()
+    } else {
+        reminder_due(existing, &req.messages, reminder_interval)
+    };
+    if !req.tools.is_empty() && reminder_needed {
         delta.push_str("\n\n");
         delta.push_str(&dialect::periodic_reminder());
     }
@@ -173,7 +179,18 @@ fn build_prompts(
 
 /// Count user and tool messages, matching Python's `sum(role in (user, tool))`.
 fn counted_messages(messages: &[Msg]) -> usize {
-    messages.iter().filter(|m| m.role == "user" || m.role == "tool").count()
+    // pi resends the whole transcript every turn, so counting every message
+    // would grow the counter quadratically. Count only this turn's delta, the
+    // same slice `continuation_prompt` forwards and Python counts.
+    let last_assistant = messages.iter().rposition(|m| m.role == "assistant");
+    let delta = match last_assistant {
+        Some(i) => &messages[i + 1..],
+        None => messages,
+    };
+    delta
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "tool")
+        .count()
 }
 
 /// True when this turn crosses a reminder interval boundary.
@@ -1245,8 +1262,22 @@ mod tests {
 
     #[test]
     fn counts_only_user_and_tool() {
-        let msgs = [msg("system"), msg("user"), msg("assistant"), msg("tool")];
+        // Fresh thread: no assistant yet, so the whole request is the delta.
+        let msgs = [msg("system"), msg("user"), msg("tool")];
         assert_eq!(counted_messages(&msgs), 2);
+    }
+
+    #[test]
+    fn counts_only_the_delta_after_the_last_assistant() {
+        // pi resends everything; only the tail counts toward the interval.
+        let msgs = [
+            msg("user"),
+            msg("assistant"),
+            msg("tool"),
+            msg("assistant"),
+            msg("user"),
+        ];
+        assert_eq!(counted_messages(&msgs), 1);
     }
 
     #[test]
@@ -1279,6 +1310,7 @@ mod tests {
     #[test]
     fn reminder_text_names_the_failure_modes() {
         let text = dialect::periodic_reminder();
+        println!("-----BEGIN-----\n{text}\n-----END-----");
         assert!(text.contains("DROPPED"));
         assert!(text.contains("closing tag twice"));
         assert!(text.contains("one JSON object"));

@@ -45,6 +45,6 @@ login_cooldown_secs = 300
 
 # Re-assert the tool-call wire format every N user/tool messages on a thread.
 # The system prompt (which teaches the format) is only sent on the first turn,
-# so long threads drift and start emitting malformed blocks. 0 disables it,
-# matching the Python proxy's TOOL_REMINDER_INTERVAL default.
-tool_reminder_interval = 8
+# so long threads drift and start emitting malformed blocks. 1 = every turn.
+# 0 disables it (the Python proxy's default).
+tool_reminder_interval = 1
