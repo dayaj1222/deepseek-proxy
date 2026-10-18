@@ -419,6 +419,7 @@ async fn stream_response(
         let mut events = Vec::new();
         let mut buf = String::new();
         let mut parent: Option<i64> = None;
+        let mut filter = dialect::StreamToolFilter::new();
 
         let mut byte_stream = resp.bytes_stream();
         while let Some(chunk) = byte_stream.next().await {
@@ -446,7 +447,14 @@ async fn stream_response(
                 route_event(&value, &mut router, &mut events);
                 for ev in &events {
                     let delta = match ev.channel {
-                        Channel::Text => json!({ "content": ev.text }),
+                        Channel::Text => {
+                            // Tool blocks are held back and surfaced as tool_calls.
+                            let safe = filter.feed(&ev.text);
+                            if safe.is_empty() {
+                                continue;
+                            }
+                            json!({ "content": safe })
+                        }
                         Channel::Reasoning => json!({ "reasoning_content": ev.text }),
                     };
                     let chunk = json!({
@@ -463,12 +471,48 @@ async fn stream_response(
             }
         }
 
+        // Flush any held-back prose, then emit tool calls (if any).
+        let tail = filter.finish();
+        if !tail.is_empty() {
+            let chunk = json!({
+                "id": id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": null}]
+            });
+            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+        }
+
+        let finish_reason = if filter.calls.is_empty() {
+            "stop"
+        } else {
+            let calls: Vec<Value> = filter
+                .calls
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    json!({
+                        "index": i,
+                        "id": format!("call_{i}"),
+                        "type": "function",
+                        "function": { "name": c.name, "arguments": c.arguments.to_string() }
+                    })
+                })
+                .collect();
+            let chunk = json!({
+                "id": id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {"tool_calls": calls}, "finish_reason": null}]
+            });
+            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            "tool_calls"
+        };
+
         let done = json!({
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
         });
         let _ = tx.send(Ok(Event::default().data(done.to_string()))).await;
         let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
@@ -476,6 +520,21 @@ async fn stream_response(
         if let Some(mid) = parent {
             if let Some(t) = state.threads.lock().unwrap().get_mut(&key) {
                 t.parent_message_id = Some(mid);
+            }
+            let session_id = state
+                .threads
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|t| t.session_id.clone());
+            if let Some(session_id) = session_id {
+                let _ = state.store.save_thread(
+                    &key,
+                    &store::ThreadResume {
+                        session_id,
+                        parent_message_id: Some(mid.to_string()),
+                    },
+                );
             }
         }
     });

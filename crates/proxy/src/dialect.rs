@@ -258,3 +258,140 @@ mod tests {
         assert!(out.contains("FINAL REMINDER"));
     }
 }
+/// Incremental filter that separates tool-call blocks from prose in a
+/// streamed text channel.
+///
+/// `<invoke ...>{json}</invoke>` blocks can arrive split across chunks, so
+/// text is buffered until a block is complete (or provably absent). Text that
+/// precedes an opening tag is released immediately; a trailing partial tag
+/// (e.g. `...<inv`) is held back so it is never emitted half-formed.
+pub struct StreamToolFilter {
+    pending: String,
+    /// Completed calls, in discovery order.
+    pub calls: Vec<ToolCall>,
+}
+
+impl Default for StreamToolFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamToolFilter {
+    pub fn new() -> Self {
+        Self {
+            pending: String::new(),
+            calls: Vec::new(),
+        }
+    }
+
+    /// Feed a text chunk; returns prose that is safe to emit as content now.
+    pub fn feed(&mut self, text: &str) -> String {
+        self.pending.push_str(text);
+        let mut out = String::new();
+
+        loop {
+            match self.pending.find(INVOKE_OPEN) {
+                None => {
+                    // Hold back a trailing partial marker like "<inv".
+                    let keep = partial_marker_suffix(&self.pending);
+                    let split = self.pending.len() - keep;
+                    out.push_str(&self.pending[..split]);
+                    self.pending.drain(..split);
+                    break;
+                }
+                Some(start) => {
+                    let after = &self.pending[start..];
+                    match after.find(INVOKE_CLOSE) {
+                        Some(close) => {
+                            // Complete block: parse and consume it.
+                            out.push_str(&self.pending[..start]);
+                            let block = after[..close + INVOKE_CLOSE.len()].to_string();
+                            self.calls.extend(extract_tool_calls(&block));
+                            self.pending.drain(..start + close + INVOKE_CLOSE.len());
+                        }
+                        None => {
+                            // Incomplete block: emit everything before it.
+                            out.push_str(&self.pending[..start]);
+                            self.pending.drain(..start);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Flush at end of stream. An unterminated block degrades to text.
+    pub fn finish(&mut self) -> String {
+        let rest = std::mem::take(&mut self.pending);
+        // Only a *complete* block would have been parsed; anything left is prose.
+        rest
+    }
+}
+
+/// Length of the suffix of `s` that is a proper prefix of `<invoke`.
+fn partial_marker_suffix(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let marker = INVOKE_OPEN.as_bytes();
+    let max = marker.len().saturating_sub(1).min(bytes.len());
+    for len in (1..=max).rev() {
+        if bytes[bytes.len() - len..] == marker[..len] {
+            return len;
+        }
+    }
+    0
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn passes_plain_text_through() {
+        let mut f = StreamToolFilter::new();
+        assert_eq!(f.feed("hello "), "hello ");
+        assert_eq!(f.feed("world"), "world");
+        assert_eq!(f.finish(), "");
+        assert!(f.calls.is_empty());
+    }
+
+    #[test]
+    fn extracts_block_split_across_chunks() {
+        let mut f = StreamToolFilter::new();
+        assert_eq!(f.feed("Sure. <inv"), "Sure. ");
+        assert_eq!(f.feed("oke name=\"bash\">{\"command\":"), "");
+        assert_eq!(f.feed("\"ls\"}</invoke>"), "");
+        assert_eq!(f.calls.len(), 1);
+        assert_eq!(f.calls[0].name, "bash");
+        assert_eq!(f.calls[0].arguments, serde_json::json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn holds_back_partial_tag_until_finish() {
+        let mut f = StreamToolFilter::new();
+        assert_eq!(f.feed("text <inv"), "text ");
+        // "<invoke" is still an incomplete opening tag: hold it, do not emit.
+        assert_eq!(f.feed("oke"), "");
+        // Only at end of stream does it degrade to text.
+        assert_eq!(f.finish(), "<invoke");
+    }
+
+    #[test]
+    fn unterminated_block_becomes_text_at_finish() {
+        let mut f = StreamToolFilter::new();
+        assert_eq!(f.feed("a <invoke name=\"x\">{"), "a ");
+        assert_eq!(f.finish(), "<invoke name=\"x\">{");
+        assert!(f.calls.is_empty());
+    }
+
+    #[test]
+    fn prose_after_block_is_emitted() {
+        let mut f = StreamToolFilter::new();
+        let out = f.feed("<invoke name=\"t\">{\"a\":1}</invoke> done");
+        assert_eq!(out, " done");
+        assert_eq!(f.calls.len(), 1);
+    }
+}
