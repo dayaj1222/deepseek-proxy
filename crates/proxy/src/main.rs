@@ -57,12 +57,16 @@ struct Settings {
     thinking_default: bool,
     search_enabled: bool,
     model_name: String,
+    tool_reminder_interval: usize,
 }
 
 #[derive(Debug, Clone)]
 struct ThreadState {
     session_id: String,
     parent_message_id: Option<i64>,
+    /// User/tool messages exchanged so far on this thread. Drives the periodic
+    /// tool-format reminder; mirrors Python's `thread_exchanges` counter.
+    exchanges: usize,
 }
 
 #[derive(Clone)]
@@ -145,6 +149,7 @@ fn build_prompts(
     req: &ChatRequest,
     existing: Option<&ThreadState>,
     system_extra: &str,
+    reminder_interval: usize,
 ) -> (String, String) {
     let transcript = flatten_transcript(&req.messages);
     let replay = if system_extra.is_empty() {
@@ -152,11 +157,35 @@ fn build_prompts(
     } else {
         format!("{transcript}\n\n{system_extra}")
     };
-    let delta = match existing {
+    let mut delta = match existing {
         Some(_) => continuation_prompt(&req.messages).unwrap_or_default(),
         None => replay.clone(),
     };
+    // Re-anchor the wire format every N user/tool messages. The system block
+    // is only sent on the first turn, so without this a long thread drifts off
+    // the format and starts emitting malformed blocks.
+    if !req.tools.is_empty() && reminder_due(existing, &req.messages, reminder_interval) {
+        delta.push_str("\n\n");
+        delta.push_str(&dialect::periodic_reminder());
+    }
     (delta, replay)
+}
+
+/// Count user and tool messages, matching Python's `sum(role in (user, tool))`.
+fn counted_messages(messages: &[Msg]) -> usize {
+    messages.iter().filter(|m| m.role == "user" || m.role == "tool").count()
+}
+
+/// True when this turn crosses a reminder interval boundary.
+///
+/// Mirrors Python: `(prev + count) / interval > prev / interval`. A fresh
+/// thread starts at zero, and `interval == 0` disables the reminder.
+fn reminder_due(existing: Option<&ThreadState>, messages: &[Msg], interval: usize) -> bool {
+    if interval == 0 {
+        return false;
+    }
+    let prev = existing.map(|t| t.exchanges).unwrap_or(0);
+    (prev + counted_messages(messages)) / interval > prev / interval
 }
 
 fn completion_body(
@@ -210,6 +239,9 @@ async fn rebuild_session(
     let fresh = ThreadState {
         session_id,
         parent_message_id: None,
+        // A rebuilt session replays the whole transcript, so the counters
+        // restart with it.
+        exchanges: 0,
     };
     state
         .threads
@@ -589,6 +621,7 @@ async fn chat_completions(
             state.store.get_thread(&key).ok().flatten().map(|r| ThreadState {
                 session_id: r.session_id,
                 parent_message_id: r.parent_message_id.and_then(|p| p.parse().ok()),
+                exchanges: 0,
             })
         });
 
@@ -596,7 +629,12 @@ async fn chat_completions(
     // turns ride on the server-side conversation, like the Python proxy.
     let system_extra = dialect::inject_tool_descriptions("", &req.tools);
 
-    let (prompt, replay) = build_prompts(&req, existing.as_ref(), &system_extra);
+    let (prompt, replay) = build_prompts(
+        &req,
+        existing.as_ref(),
+        &system_extra,
+        state.settings.tool_reminder_interval,
+    );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
         return bad_request("no user message or tool result in continuation turn");
@@ -630,6 +668,7 @@ async fn chat_completions(
             let t = ThreadState {
                 session_id,
                 parent_message_id: None,
+                exchanges: 0,
             };
             tracing::info!(thread = %key, session = %t.session_id, "new remote session");
             state
@@ -651,6 +690,12 @@ async fn chat_completions(
         Ok(r) => r,
         Err(e) => return backend_error(&format!("completion: {e}")),
     };
+
+    // Count this turn's user/tool messages so the next prompt can decide
+    // whether a format reminder is due.
+    if let Some(t) = state.threads.lock().unwrap().get_mut(&key) {
+        t.exchanges = t.exchanges.saturating_add(counted_messages(&req.messages));
+    }
 
     tracing::debug!(thread = %key, thinking, parent = ?thread.parent_message_id, "upstream completion accepted");
 
@@ -1123,6 +1168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         thinking_default: cfg.thinking,
         search_enabled: cfg.search,
         model_name: cfg.model.clone(),
+        tool_reminder_interval: cfg.tool_reminder_interval,
     };
     tracing::info!(
         db_path = %cfg.db_path,
@@ -1172,5 +1218,70 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("SIGINT received, shutting down"),
         _ = term => tracing::info!("SIGTERM received, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str) -> Msg {
+        Msg {
+            role: role.into(),
+            content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn thread(exchanges: usize) -> ThreadState {
+        ThreadState {
+            session_id: "s".into(),
+            parent_message_id: None,
+            exchanges,
+        }
+    }
+
+    #[test]
+    fn counts_only_user_and_tool() {
+        let msgs = [msg("system"), msg("user"), msg("assistant"), msg("tool")];
+        assert_eq!(counted_messages(&msgs), 2);
+    }
+
+    #[test]
+    fn interval_zero_never_fires() {
+        let msgs = [msg("user")];
+        assert!(!reminder_due(Some(&thread(100)), &msgs, 0));
+        assert!(!reminder_due(None, &msgs, 0));
+    }
+
+    #[test]
+    fn fires_on_boundary_crossing_only() {
+        let msgs = [msg("user")];
+        // 7 -> 8 crosses the interval of 8.
+        assert!(reminder_due(Some(&thread(7)), &msgs, 8));
+        // 8 -> 9 stays inside the same interval.
+        assert!(!reminder_due(Some(&thread(8)), &msgs, 8));
+        // 15 -> 16 crosses again.
+        assert!(reminder_due(Some(&thread(15)), &msgs, 8));
+    }
+
+    #[test]
+    fn fresh_thread_fires_on_first_turn() {
+        // A new thread starts at zero, so 0 -> 1 is inside interval 8.
+        assert!(!reminder_due(None, &[msg("user")], 8));
+        // But a turn carrying enough messages can cross the first boundary.
+        let many: Vec<Msg> = (0..8).map(|_| msg("tool")).collect();
+        assert!(reminder_due(None, &many, 8));
+    }
+
+    #[test]
+    fn reminder_text_names_the_failure_modes() {
+        let text = dialect::periodic_reminder();
+        assert!(text.contains("DROPPED"));
+        assert!(text.contains("closing tag twice"));
+        assert!(text.contains("one JSON object"));
+        assert!(text.contains(dialect::TEMPLATE));
     }
 }

@@ -80,14 +80,22 @@ pub struct LimitsSection {
     pub queue_limit: usize,
     /// Cooldown for an account that fails to log in, in seconds.
     pub login_cooldown_secs: u64,
+    /// Re-assert the tool-call wire format every N user/tool messages on a
+    /// thread. 0 disables it, matching the Python proxy's
+    /// `TOOL_REMINDER_INTERVAL` default.
+    pub tool_reminder_interval: usize,
 }
 
 impl Default for LimitsSection {
     fn default() -> Self {
         Self {
-            request_delay_secs: 2.0,
+            // Measured: sequential requests with no gap do not trip the upstream
+            // rate limiter, so the safe default is no delay. Raise it if you see
+            // `rate_limit_reached` / `Messages too frequent`.
+            request_delay_secs: 0.0,
             queue_limit: 64,
             login_cooldown_secs: 300,
+            tool_reminder_interval: 0,
         }
     }
 }
@@ -104,6 +112,7 @@ pub struct Config {
     pub request_delay_secs: f64,
     pub queue_limit: usize,
     pub login_cooldown_secs: u64,
+    pub tool_reminder_interval: usize,
 }
 
 impl Config {
@@ -127,6 +136,8 @@ impl Config {
             queue_limit: env_num("QUEUE_LIMIT").unwrap_or(file.limits.queue_limit),
             login_cooldown_secs: env_num("LOGIN_COOLDOWN")
                 .unwrap_or(file.limits.login_cooldown_secs),
+            tool_reminder_interval: env_num("TOOL_REMINDER_INTERVAL")
+                .unwrap_or(file.limits.tool_reminder_interval),
         })
     }
 
@@ -166,7 +177,7 @@ mod tests {
         let f: FileConfig = toml::from_str("[proxy]\nport = 9999\n").unwrap();
         assert_eq!(f.proxy.port, 9999);
         assert_eq!(f.proxy.host, "0.0.0.0");
-        assert_eq!(f.limits.request_delay_secs, 2.0);
+        assert_eq!(f.limits.request_delay_secs, 0.0);
         assert!(!f.deepseek.search);
     }
 
@@ -176,6 +187,7 @@ mod tests {
         assert_eq!(f.proxy.port, 9174);
         assert_eq!(f.storage.db_path, "deepseek-rs.db");
         assert_eq!(f.limits.queue_limit, 64);
+        assert_eq!(f.limits.tool_reminder_interval, 0);
     }
 
     #[test]

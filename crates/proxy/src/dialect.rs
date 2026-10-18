@@ -69,6 +69,32 @@ fn final_reminder() -> String {
     s
 }
 
+/// Periodic re-anchoring reminder, emitted every N user/tool messages.
+///
+/// Port of `format_reminder_text()` in `deepseek_proxy/tools/format.py`, with
+/// the warning sharpened: it names the concrete failure modes seen in
+/// practice (legacy DSML markers leaking into the reply, a doubled closing
+/// tag, prose or a code fence inside the block) instead of only describing
+/// the happy path.
+pub fn periodic_reminder() -> String {
+    let mut s = String::new();
+    s.push_str("⚠ HARD FORMAT REQUIREMENT — READ BEFORE EMITTING ANY TOOL CALL.\n");
+    s.push_str("Violations are NOT repaired for you: a malformed or repeated block is DROPPED\n");
+    s.push_str("and never executed, and you will burn this turn on a correction loop instead\n");
+    s.push_str("of progressing the task.\n");
+    s.push_str("Reminder — tool calls use exactly this form:\n\n");
+    s.push_str(TEMPLATE);
+    s.push_str("\n\n!!IMPORTANT!!\n");
+    s.push_str("1. Never wrap or decorate a block with legacy DSML marker tags. They are\n");
+    s.push_str("   not part of the format, are dropped, and are shown to the user as junk.\n");
+    s.push_str("2. Never emit the closing tag twice, and never repeat a whole block after\n");
+    s.push_str("   it has already been emitted.\n");
+    s.push_str("3. The body must be one JSON object: no code fence, no trailing prose,\n");
+    s.push_str("   no bare JSON without tags, and a missing closing tag discards the call.\n");
+    s.push_str("Get the format wrong and your tool call silently does nothing.");
+    s
+}
+
 /// Append the tool protocol + tool definitions to a system prompt.
 ///
 /// Returns `system_prompt` unchanged when `tools` is empty, matching Python.
