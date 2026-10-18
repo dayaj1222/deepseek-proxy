@@ -9,11 +9,12 @@
 //! ## Session model
 //!
 //! DeepSeek keeps conversation state server-side, so a thread is just
-//! `(chat_session_id, parent_message_id)`. Threads are keyed by the
-//! `x-thread-id` header when present, otherwise by a hash of the first system
-//! and user message. Continuation turns send only the newest user message,
-//! matching the Python proxy's delta behaviour; a fresh thread sends the
-//! flattened transcript.
+//! `(chat_session_id, parent_message_id)`. Threads are keyed by an explicit
+//! `thread_id`, then the `x-thread-id` header, then the client session id
+//! (`x-session-affinity` / `x-session-id`), and only then by a message hash —
+//! the same precedence as the Python proxy. Continuation turns send only the
+//! newest user message, matching the Python proxy's delta behaviour; a fresh
+//! thread sends the flattened transcript.
 //!
 //! ## Not yet ported
 //!
@@ -21,8 +22,10 @@
 //! - `tools/format.py` prompt + tool-call dialect injection
 //! - multi-account failover
 
+mod cli;
 mod config;
 mod dialect;
+mod log;
 mod pool;
 mod store;
 
@@ -43,8 +46,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::hash::{Hash, Hasher};
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
@@ -66,12 +71,42 @@ struct AppState {
     settings: Settings,
     threads: Arc<Mutex<HashMap<String, ThreadState>>>,
     store: store::Store,
+    stats: Arc<Stats>,
+}
+
+/// Process counters reported by `GET /stats`. Cheap atomics only; anything
+/// expensive (account gates, db counts) is read live by the handler.
+#[derive(Default)]
+struct Stats {
+    started: Option<Instant>,
+    total: AtomicU64,
+    ok: AtomicU64,
+    errors: AtomicU64,
+    auth_failed: AtomicU64,
+    retries: AtomicU64,
+    tool_calls: AtomicU64,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Self {
+            started: Some(Instant::now()),
+            ..Default::default()
+        }
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
     #[serde(default)]
     model: Option<String>,
+    /// Explicit conversation key, mirroring the Python proxy's `thread_id`.
+    #[serde(default)]
+    thread_id: Option<String>,
     #[serde(default)]
     messages: Vec<Msg>,
     #[serde(default)]
@@ -240,20 +275,84 @@ fn want_thinking(req: &ChatRequest, default: bool) -> bool {
     default
 }
 
+/// Client-advertised session identity headers, mirroring the Python proxy's
+/// `_SESSION_HEADERS`. pi sends `X-Session-Id`/`session_id`, opencode sends
+/// `x-session-affinity`. Their session UUID survives compaction, which the
+/// first-message hash does not.
+const SESSION_HEADERS: [&str; 4] = [
+    "x-session-affinity",
+    "x-opencode-session",
+    "x-session-id",
+    "session_id",
+];
+
+/// Same sentinel the Python proxy uses to spot Hermes' session-title calls.
+const TITLE_PROMPT_MARKER: &str = "You name chat sessions";
+
+fn sha256_hex(prefix: &str, seed: &str, user: Option<&str>) -> String {
+    let mut payload = String::new();
+    if let Some(user) = user.filter(|u| !u.is_empty()) {
+        payload.push_str(user);
+        payload.push('\0');
+    }
+    payload.push_str(seed);
+    let digest = Sha256::digest(payload.as_bytes());
+    let hexed = hex::encode(digest);
+    format!("{prefix}{}", &hexed[..24])
+}
+
+/// Title-generation calls inherit the parent session's headers, so they must
+/// get their own namespace or their responses cross with the real chat.
+fn is_title_request(req: &ChatRequest) -> bool {
+    req.messages
+        .iter()
+        .filter(|m| m.role == "system" || m.role == "developer")
+        .any(|m| content_text(&m.content).starts_with(TITLE_PROMPT_MARKER))
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve the conversation key for a request.
+///
+/// Precedence mirrors the Python proxy: explicit `thread_id` body field, then
+/// the `x-thread-id` header, then the client session id (hashed, so a stable
+/// UUID keeps one DeepSeek conversation across compaction), and only then a
+/// hash of the messages. The old message-only hash stranded a conversation on
+/// a fresh remote session every time the first message changed.
 fn thread_key(headers: &HeaderMap, req: &ChatRequest) -> String {
-    if let Some(v) = headers.get("x-thread-id").and_then(|v| v.to_str().ok()) {
-        if !v.trim().is_empty() {
-            return v.trim().to_string();
-        }
+    if let Some(v) = req.thread_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        return v.to_string();
     }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for m in &req.messages {
-        if m.role == "system" || m.role == "user" {
-            m.role.hash(&mut h);
-            content_text(&m.content).hash(&mut h);
-        }
+    if let Some(v) = header_value(headers, "x-thread-id") {
+        return v;
     }
-    format!("auto-{:x}", h.finish())
+    // Title calls must be detected before the session id is consulted.
+    let prefix = if is_title_request(req) { "title_" } else { "thread_" };
+    if let Some(session) = SESSION_HEADERS
+        .iter()
+        .find_map(|name| header_value(headers, name))
+    {
+        return sha256_hex(prefix, &session, None);
+    }
+    if let Some(first) = req
+        .messages
+        .iter()
+        .find(|m| m.role == "user" && !content_text(&m.content).is_empty())
+    {
+        return sha256_hex(prefix, &content_text(&first.content), None);
+    }
+    let all: String = req
+        .messages
+        .iter()
+        .map(|m| content_text(&m.content))
+        .collect();
+    sha256_hex(prefix, &all, None)
 }
 
 /// Fresh thread: flatten the whole conversation.
@@ -309,6 +408,54 @@ fn continuation_prompt(messages: &[Msg]) -> Option<String> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// `GET /stats` — everything `deepseek-rs stats` and `status` need.
+async fn stats(State(state): State<AppState>) -> Json<Value> {
+    let s = &state.stats;
+    let counts = state.store.counts().unwrap_or_default();
+    let threads_in_memory = state.threads.lock().unwrap().len();
+
+    let accounts: Vec<Value> = state
+        .pool
+        .snapshot()
+        .await
+        .into_iter()
+        .map(|a| {
+            json!({
+                "email": a.email,
+                "healthy": a.healthy,
+                "bound_threads": a.bound_threads,
+                "waiting": a.waiting,
+                "cooldown_ms": a.cooldown_ms,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "pid": std::process::id(),
+        "uptime_secs": s.uptime_secs(),
+        "model": state.settings.model_name,
+        "thinking": state.settings.thinking_default,
+        "search": state.settings.search_enabled,
+        "requests": {
+            "total": s.total.load(Ordering::Relaxed),
+            "ok": s.ok.load(Ordering::Relaxed),
+            "errors": s.errors.load(Ordering::Relaxed),
+            "auth_failed": s.auth_failed.load(Ordering::Relaxed),
+            "retries": s.retries.load(Ordering::Relaxed),
+            "tool_calls": s.tool_calls.load(Ordering::Relaxed),
+        },
+        "threads": { "in_memory": threads_in_memory },
+        "db": {
+            "threads": counts.threads,
+            "bindings": counts.bindings,
+            "api_keys": counts.api_keys,
+            "accounts": counts.accounts,
+            "cached_tokens": counts.cached_tokens,
+        },
+        "accounts": accounts,
+    }))
 }
 
 async fn models(State(state): State<AppState>) -> Json<Value> {
@@ -395,6 +542,7 @@ async fn completion_with_retry(
                     break;
                 }
                 let wait_ms = 1000u64 * (1 << attempt);
+                state.stats.retries.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("completion failed ({last}); retrying in {wait_ms}ms");
                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
             }
@@ -409,10 +557,26 @@ async fn chat_completions(
     Json(req): Json<ChatRequest>,
 ) -> Response {
     if let Err(resp) = authorize(&state, &headers) {
+        state.stats.auth_failed.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!("rejected request: invalid api key");
         return resp;
     }
 
+    let started = std::time::Instant::now();
     let key = thread_key(&headers, &req);
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.settings.model_name.clone());
+    tracing::info!(
+        thread = %key,
+        model = %model,
+        stream = req.stream,
+        messages = req.messages.len(),
+        tools = req.tools.len(),
+        "request in"
+    );
+    state.stats.total.fetch_add(1, Ordering::Relaxed);
 
     // In-memory cache first, then SQLite (survives restarts).
     let existing = state
@@ -434,8 +598,16 @@ async fn chat_completions(
 
     let (prompt, replay) = build_prompts(&req, existing.as_ref(), &system_extra);
     if prompt.is_empty() {
+        tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
         return bad_request("no user message or tool result in continuation turn");
     }
+    tracing::debug!(
+        thread = %key,
+        fresh = existing.is_none(),
+        prompt_chars = prompt.len(),
+        replay_chars = replay.len(),
+        "turn built"
+    );
     // A brand-new thread has nothing to replay into, so a limit hit is final.
     let can_recover = existing.is_some() && !replay.is_empty();
 
@@ -459,6 +631,7 @@ async fn chat_completions(
                 session_id,
                 parent_message_id: None,
             };
+            tracing::info!(thread = %key, session = %t.session_id, "new remote session");
             state
                 .threads
                 .lock()
@@ -471,7 +644,6 @@ async fn chat_completions(
     let thinking = want_thinking(&req, state.settings.thinking_default);
     let mut body = completion_body(&thread, &prompt, thinking, state.settings.search_enabled);
 
-    let model = req.model.clone().unwrap_or_else(|| state.settings.model_name.clone());
     let id = format!("chatcmpl-{}", uuid_like());
     let created = unix_secs();
 
@@ -480,9 +652,22 @@ async fn chat_completions(
         Err(e) => return backend_error(&format!("completion: {e}")),
     };
 
+    tracing::debug!(thread = %key, thinking, parent = ?thread.parent_message_id, "upstream completion accepted");
+
     if req.stream {
-        return stream_response(state, key, resp, body, id, model, created, replay, can_recover)
-            .await;
+        return stream_response(
+            state,
+            key,
+            resp,
+            body,
+            id,
+            model,
+            created,
+            replay,
+            can_recover,
+            started,
+        )
+        .await;
     }
 
     // Non-stream: buffer everything, then answer in one shot.
@@ -509,6 +694,20 @@ async fn chat_completions(
         _ => raw,
     };
     let (reasoning, answer, message_id) = route_all(&raw);
+    let tool_calls = dialect::extract_tool_calls(&answer);
+    state
+        .stats
+        .tool_calls
+        .fetch_add(tool_calls.len() as u64, Ordering::Relaxed);
+    state.stats.ok.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(
+        thread = %key,
+        reasoning_chars = reasoning.len(),
+        answer_chars = answer.len(),
+        tool_calls = tool_calls.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "response out"
+    );
 
     // Persist the resume point so a restart resumes the same remote session.
     if let Some(mid) = message_id {
@@ -525,7 +724,6 @@ async fn chat_completions(
     }
 
     // Tool calls live inside the answer text as <invoke ...> blocks.
-    let tool_calls = dialect::extract_tool_calls(&answer);
     let visible = if tool_calls.is_empty() {
         answer.clone()
     } else {
@@ -676,6 +874,7 @@ async fn stream_response(
     created: u64,
     replay: String,
     can_recover: bool,
+    started: std::time::Instant,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
@@ -744,6 +943,20 @@ async fn stream_response(
             let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
             "tool_calls"
         };
+
+        state
+            .stats
+            .tool_calls
+            .fetch_add(filter.calls.len() as u64, Ordering::Relaxed);
+        state.stats.ok.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            thread = %key,
+            finish_reason,
+            tool_calls = filter.calls.len(),
+            parent = ?parent,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "stream done"
+        );
 
         let done = json!({
             "id": id,
@@ -831,166 +1044,79 @@ fn backend_error(msg: &str) -> Response {
         .into_response()
 }
 
-fn env_from_dotenv(key: &str) -> Option<String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
-    let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
-        .filter_map(|l| l.split_once('='))
-        .find(|(k, _)| k.trim() == key)
-        .map(|(_, v)| v.trim().trim_matches('"').to_string())
-}
 
-/// Load accounts from DEEPSEEK_EMAIL_<i>/PASSWORD_<i>/TOKEN_<i>, falling back to
-/// an unindexed EMAIL/PASSWORD/TOKEN, then to ../deepseek/.env.
-fn load_accounts() -> Vec<pool::AccountSpec> {
-    fn val(key: &str) -> Option<String> {
-        std::env::var(key)
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| env_from_dotenv(key).filter(|v| !v.trim().is_empty()))
-    }
-
-    let mut out = Vec::new();
-    for i in 0.. {
-        let email = val(&format!("DEEPSEEK_EMAIL_{i}"));
-        let password = val(&format!("DEEPSEEK_PASSWORD_{i}"));
-        let token = val(&format!("DEEPSEEK_TOKEN_{i}"));
-        if token.is_none() && !(email.is_some() && password.is_some()) {
-            break;
-        }
-        out.push(pool::AccountSpec {
-            email: email.unwrap_or_else(|| format!("token-account-{i}")),
-            password: password.unwrap_or_default(),
-            token,
-        });
-    }
-
-    if out.is_empty() {
-        let email = val("DEEPSEEK_EMAIL");
-        let password = val("DEEPSEEK_PASSWORD");
-        let token = val("DEEPSEEK_TOKEN");
-        if token.is_some() || (email.is_some() && password.is_some()) {
-            out.push(pool::AccountSpec {
-                email: email.unwrap_or_else(|| "token-account".into()),
-                password: password.unwrap_or_default(),
-                token,
-            });
-        }
-    }
-    out
-}
-
-fn db_path() -> Result<String, Box<dyn std::error::Error>> {
-    Ok(config::Config::load()?.db_path)
-}
-
-/// `deepseek-rs key <name> <key>` — register an API key and exit.
-fn cmd_key(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let name = args.get(2).map(String::as_str).unwrap_or("default");
-    let key = args
-        .get(3)
-        .cloned()
-        .ok_or("usage: deepseek-rs key <name> <api-key>")?;
-    let path = db_path()?;
-    let store = store::Store::open_path(&path)?;
-    store.insert_api_key(name, &key)?;
-    println!("registered key '{name}' in {path}");
-    Ok(())
-}
-
-fn usage() {
-    println!(
-        "deepseek-rs — OpenAI-compatible proxy for the DeepSeek private API
-
-Usage:
-  deepseek-rs serve                      run the proxy (foreground)
-  deepseek-rs key <name> <api-key>       register an API key
-  deepseek-rs accounts                   list configured accounts
-  deepseek-rs check                      verify login + PoW, then exit
-  deepseek-rs url                        print the base URL
-  deepseek-rs help                       this message
-
-Environment:
-  PROXY_HOST / PROXY_PORT   bind address (default 0.0.0.0:9174)
-  DB_PATH                   sqlite file (default deepseek-rs.db)
-  REQUEST_DELAY             seconds between requests per account (default 2)
-  THINKING_ENABLED          default thinking flag (default false)
-  SEARCH_ENABLED            send search flag (default false)
-  DEEPSEEK_EMAIL_<i> / DEEPSEEK_PASSWORD_<i> / DEEPSEEK_TOKEN_<i>
-                            accounts, checked in order"
-    );
+/// Build a connected account pool from resolved config.
+pub(crate) async fn connect_pool(
+    cfg: &config::Config,
+    store: &store::Store,
+    accounts: Vec<pool::AccountSpec>,
+) -> Result<Arc<pool::Pool>, Box<dyn std::error::Error>> {
+    let pool_config = pool::PoolConfig {
+        request_delay: std::time::Duration::from_secs_f64(cfg.request_delay_secs),
+        queue_limit: cfg.queue_limit,
+        login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
+    };
+    let p = pool::Pool::connect(accounts, pool_config, store.clone()).await?;
+    Ok(Arc::new(p))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Rust ignores SIGPIPE by default, so `deepseek-rs stats | head` panics with
+    // "failed printing to stdout: Broken pipe". Restore the usual Unix
+    // behaviour: die quietly when the reader goes away.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("serve");
 
-    match cmd {
-        "key" => return cmd_key(&args),
-        "help" | "-h" | "--help" => {
-            usage();
-            return Ok(());
-        }
-        "url" => {
-            let cfg = config::Config::load()?;
-            println!("http://127.0.0.1:{}/v1", cfg.port);
-            return Ok(());
-        }
-        _ => {}
+    // `serve` is the only long-running command; everything else is short-lived
+    // and lives in `cli`.
+    if cmd != "serve" {
+        let code = cli::run(&args).await?;
+        std::process::exit(code);
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "proxy=info".into()),
-        )
-        .init();
+    let profile = log::Profile::from_env();
+    log::init(profile);
 
-    let accounts = load_accounts();
+    // Claim the pidfile before doing any work, so a second `serve` fails fast
+    // instead of fighting over the DB lock.
+    let _pid_guard = cli::PidGuard::claim()?;
+
+    let cfg = config::Config::load()?;
+    let store = store::Store::open_path(&cfg.db_path)?;
+
+    let accounts = cli::load_accounts(&store);
     if accounts.is_empty() {
-        return Err("no DeepSeek accounts configured (DEEPSEEK_EMAIL_0/PASSWORD_0)".into());
+        return Err(
+            "no DeepSeek accounts configured — add one with `deepseek-rs accounts add <email> <password>`"
+                .into(),
+        );
     }
 
-    if cmd == "accounts" {
-        for (i, a) in accounts.iter().enumerate() {
-            let kind = if a.token.is_some() { "token" } else { "password" };
-            println!("{i}: {} ({kind})", a.email);
-        }
-        return Ok(());
-    }
-
-    let store = store::Store::open_path(db_path()?)?;
-
-    let cfg = match config::Config::load() {
-        Ok(c) => c,
-        Err(e) => return Err(e.into()),
-    };
-    let delay = cfg.request_delay_secs;
-    let pool_config = pool::PoolConfig {
-        request_delay: std::time::Duration::from_secs_f64(delay),
-        queue_limit: cfg.queue_limit,
-        login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
-    };
-
-    tracing::info!("connecting {} account(s), {delay}s between requests", accounts.len());
-    let pool = match pool::Pool::connect(accounts, pool_config, store.clone()).await {
-        Ok(p) => Arc::new(p),
-        Err(e) => return Err(e.into()),
-    };
+    tracing::info!(
+        profile = ?profile,
+        accounts = accounts.len(),
+        request_delay_secs = cfg.request_delay_secs,
+        "starting deepseek-rs"
+    );
+    tracing::info!(
+        "connecting {} account(s), {}s between requests",
+        accounts.len(),
+        cfg.request_delay_secs
+    );
+    let pool = connect_pool(&cfg, &store, accounts).await?;
     tracing::info!("login ok for {} account(s)", pool.len());
 
     // Fail fast on a broken PoW path rather than on the first user request.
     {
-        let conn = pool.route("startup-check").await;
+        let conn = pool.any();
         let client = conn.client().await;
         client.pow_challenge(COMPLETION_PATH).await?;
         tracing::info!("pow challenge ok (account {})", conn.email);
-    }
-
-    if cmd == "check" {
-        println!("ok: {} account(s), login + pow verified", pool.len());
-        return Ok(());
     }
 
     let settings = Settings {
@@ -999,9 +1125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_name: cfg.model.clone(),
     };
     tracing::info!(
-        "thinking={} search={}",
-        settings.thinking_default,
-        settings.search_enabled
+        db_path = %cfg.db_path,
+        model = %settings.model_name,
+        thinking = settings.thinking_default,
+        search = settings.search_enabled,
+        "settings loaded"
     );
 
     let state = AppState {
@@ -1009,10 +1137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings,
         threads: Arc::new(Mutex::new(HashMap::new())),
         store,
+        stats: Arc::new(Stats::new()),
     };
 
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/stats", get(stats))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(state);
@@ -1020,6 +1150,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
-    axum::serve(listener, app).await?;
+
+    // Graceful shutdown: finish in-flight requests, drop the pidfile.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!("stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    let term = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut s) = signal(SignalKind::terminate()) {
+            s.recv().await;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("SIGINT received, shutting down"),
+        _ = term => tracing::info!("SIGTERM received, shutting down"),
+    }
 }
