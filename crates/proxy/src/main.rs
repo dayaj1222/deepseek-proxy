@@ -89,6 +89,12 @@ struct Msg {
     role: String,
     #[serde(default)]
     content: Option<Value>,
+    #[serde(default)]
+    tool_calls: Vec<Value>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn content_text(content: &Option<Value>) -> String {
@@ -177,6 +183,34 @@ fn newest_user_message(messages: &[Msg]) -> Option<String> {
         .find(|m| m.role == "user")
         .map(|m| content_text(&m.content))
         .filter(|s| !s.is_empty())
+}
+
+/// Build the continuation prompt for a thread that already exists.
+///
+/// Handles the tool round trip: after the model emits a tool call, the client
+/// sends back `role: "tool"` messages with the results. Those must be
+/// forwarded, otherwise the model never sees what its call returned.
+fn continuation_prompt(messages: &[Msg]) -> Option<String> {
+    // Tool results are the most recent thing to forward when present.
+    let tool_results: Vec<String> = messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role == "tool" || m.role == "assistant")
+        .filter(|m| m.role == "tool")
+        .map(|m| {
+            let body = content_text(&m.content);
+            let label = m.name.as_deref().unwrap_or("tool");
+            format!("Tool result ({label}):\n{body}")
+        })
+        .collect();
+
+    if !tool_results.is_empty() {
+        let mut joined = tool_results;
+        joined.reverse();
+        return Some(joined.join("\n\n"));
+    }
+
+    newest_user_message(messages)
 }
 
 async fn healthz() -> &'static str {
@@ -277,9 +311,9 @@ async fn chat_completions(
     let system_extra = dialect::inject_tool_descriptions("", &req.tools);
 
     let prompt = match &existing {
-        Some(_) => match newest_user_message(&req.messages) {
+        Some(_) => match continuation_prompt(&req.messages) {
             Some(p) => p,
-            None => return bad_request("no user message in continuation turn"),
+            None => return bad_request("no user message or tool result in continuation turn"),
         },
         None => {
             let transcript = flatten_transcript(&req.messages);
