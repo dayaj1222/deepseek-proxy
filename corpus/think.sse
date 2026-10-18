@@ -1,0 +1,123 @@
+event: ready
+data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1792332558.632139}
+
+data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":0,"feedback":null,"inserted_at":1792332558.621269,"search_enabled":false,"fragments":[{"id":2,"type":"THINK","content":"We","elapsed_secs":null,"references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":" need"}
+
+data: {"v":" answer"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" think"}
+
+data: {"v":" step"}
+
+data: {"v":" by"}
+
+data: {"v":" step"}
+
+data: {"v":" but"}
+
+data: {"v":" final"}
+
+data: {"v":" likely"}
+
+data: {"v":" concise"}
+
+data: {"v":"."}
+
+data: {"v":" Compute"}
+
+data: {"v":" "}
+
+data: {"v":"17"}
+
+data: {"v":"*"}
+
+data: {"v":"23"}
+
+data: {"v":"="}
+
+data: {"v":"391"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" show"}
+
+data: {"v":" step"}
+
+data: {"v":"."}
+
+data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.786572777}
+
+data: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"17","references":[],"stage_id":1}]}
+
+data: {"p":"response/fragments/-1/content","v":" ×"}
+
+data: {"v":" "}
+
+data: {"v":"23"}
+
+data: {"v":" ="}
+
+data: {"v":" "}
+
+data: {"v":"17"}
+
+data: {"v":" ×"}
+
+data: {"v":" ("}
+
+data: {"v":"20"}
+
+data: {"v":" +"}
+
+data: {"v":" "}
+
+data: {"v":"3"}
+
+data: {"v":")"}
+
+data: {"v":" ="}
+
+data: {"v":" "}
+
+data: {"v":"340"}
+
+data: {"v":" +"}
+
+data: {"v":" "}
+
+data: {"v":"51"}
+
+data: {"v":" ="}
+
+data: {"v":" **"}
+
+data: {"v":"391"}
+
+data: {"v":"**."}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":96},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1792332558.9785728}
+
+event: title
+data: {"content":"17 times 23 equals 391"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

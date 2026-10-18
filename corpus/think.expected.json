@@ -1,0 +1,206 @@
+[
+{
+"channel": "reasoning",
+"text": "We"
+},
+{
+"channel": "reasoning",
+"text": " need"
+},
+{
+"channel": "reasoning",
+"text": " answer"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " think"
+},
+{
+"channel": "reasoning",
+"text": " step"
+},
+{
+"channel": "reasoning",
+"text": " by"
+},
+{
+"channel": "reasoning",
+"text": " step"
+},
+{
+"channel": "reasoning",
+"text": " but"
+},
+{
+"channel": "reasoning",
+"text": " final"
+},
+{
+"channel": "reasoning",
+"text": " likely"
+},
+{
+"channel": "reasoning",
+"text": " concise"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Compute"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "17"
+},
+{
+"channel": "reasoning",
+"text": "*"
+},
+{
+"channel": "reasoning",
+"text": "23"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "391"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " show"
+},
+{
+"channel": "reasoning",
+"text": " step"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "text",
+"text": "17"
+},
+{
+"channel": "text",
+"text": " \u00d7"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": "23"
+},
+{
+"channel": "text",
+"text": " ="
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": "17"
+},
+{
+"channel": "text",
+"text": " \u00d7"
+},
+{
+"channel": "text",
+"text": " ("
+},
+{
+"channel": "text",
+"text": "20"
+},
+{
+"channel": "text",
+"text": " +"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": "3"
+},
+{
+"channel": "text",
+"text": ")"
+},
+{
+"channel": "text",
+"text": " ="
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": "340"
+},
+{
+"channel": "text",
+"text": " +"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": "51"
+},
+{
+"channel": "text",
+"text": " ="
+},
+{
+"channel": "text",
+"text": " **"
+},
+{
+"channel": "text",
+"text": "391"
+},
+{
+"channel": "text",
+"text": "**."
+}
+]

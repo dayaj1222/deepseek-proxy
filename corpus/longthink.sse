@@ -1,0 +1,2907 @@
+event: ready
+data: {"request_message_id":1,"response_message_id":2,"model_type":"default"}
+
+event: update_session
+data: {"updated_at":1792332563.864949}
+
+data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":0,"feedback":null,"inserted_at":1792332563.856355,"search_enabled":false,"fragments":[{"id":2,"type":"THINK","content":"We","elapsed_secs":null,"references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":" need"}
+
+data: {"v":" answer"}
+
+data: {"v":" explain"}
+
+data: {"v":" merge"}
+
+data: {"v":" sort"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")"}
+
+data: {"v":" detailed"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" think"}
+
+data: {"v":" through"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" mention"}
+
+data: {"v":" recurrence"}
+
+data: {"v":","}
+
+data: {"v":" levels"}
+
+data: {"v":","}
+
+data: {"v":" merging"}
+
+data: {"v":" costs"}
+
+data: {"v":","}
+
+data: {"v":" proof"}
+
+data: {"v":" by"}
+
+data: {"v":" recursion"}
+
+data: {"v":" tree"}
+
+data: {"v":","}
+
+data: {"v":" master"}
+
+data: {"v":" theorem"}
+
+data: {"v":","}
+
+data: {"v":" assumptions"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" be"}
+
+data: {"v":" accurate"}
+
+data: {"v":":"}
+
+data: {"v":" merging"}
+
+data: {"v":" two"}
+
+data: {"v":" sorted"}
+
+data: {"v":" halves"}
+
+data: {"v":" linear"}
+
+data: {"v":" in"}
+
+data: {"v":" total"}
+
+data: {"v":" elements"}
+
+data: {"v":"."}
+
+data: {"v":" At"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" total"}
+
+data: {"v":" merge"}
+
+data: {"v":" work"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" Number"}
+
+data: {"v":" levels"}
+
+data: {"v":" log"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":"."}
+
+data: {"v":" Thus"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":" Also"}
+
+data: {"v":" lower"}
+
+data: {"v":" bound"}
+
+data: {"v":"?"}
+
+data: {"v":" It"}
+
+data: {"v":" is"}
+
+data: {"v":" O"}
+
+data: {"v":" not"}
+
+data: {"v":" The"}
+
+data: {"v":"ta"}
+
+data: {"v":";"}
+
+data: {"v":" can"}
+
+data: {"v":" mention"}
+
+data: {"v":" The"}
+
+data: {"v":"ta"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")"}
+
+data: {"v":" for"}
+
+data: {"v":" comparison"}
+
+data: {"v":" sort"}
+
+data: {"v":" merge"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" explain"}
+
+data: {"v":" base"}
+
+data: {"v":" cases"}
+
+data: {"v":","}
+
+data: {"v":" uneven"}
+
+data: {"v":" splits"}
+
+data: {"v":" ceil"}
+
+data: {"v":"/"}
+
+data: {"v":"floor"}
+
+data: {"v":","}
+
+data: {"v":" n"}
+
+data: {"v":" not"}
+
+data: {"v":" power"}
+
+data: {"v":" of"}
+
+data: {"v":" "}
+
+data: {"v":"2"}
+
+data: {"v":","}
+
+data: {"v":" depth"}
+
+data: {"v":" ceil"}
+
+data: {"v":"(log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":" Need"}
+
+data: {"v":" perhaps"}
+
+data: {"v":" discuss"}
+
+data: {"v":" why"}
+
+data: {"v":" not"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")"}
+
+data: {"v":" despite"}
+
+data: {"v":" sorted"}
+
+data: {"v":" halves"}
+
+data: {"v":"?"}
+
+data: {"v":" Because"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" does"}
+
+data: {"v":" linear"}
+
+data: {"v":" work"}
+
+data: {"v":" and"}
+
+data: {"v":" log"}
+
+data: {"v":" levels"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" explain"}
+
+data: {"v":" recurrence"}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"T"}
+
+data: {"v":"("}
+
+data: {"v":"floor"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+"}
+
+data: {"v":"T"}
+
+data: {"v":"("}
+
+data: {"v":"ceil"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+"}
+
+data: {"v":"Theta"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" Solve"}
+
+data: {"v":" via"}
+
+data: {"v":" recursion"}
+
+data: {"v":" tree"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" mention"}
+
+data: {"v":" space"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" Need"}
+
+data: {"v":" answer"}
+
+data: {"v":" \""}
+
+data: {"v":"Think"}
+
+data: {"v":" it"}
+
+data: {"v":" through"}
+
+data: {"v":"\""}
+
+data: {"v":" maybe"}
+
+data: {"v":" step"}
+
+data: {"v":"-by"}
+
+data: {"v":"-step"}
+
+data: {"v":"."}
+
+data: {"v":" Des"}
+
+data: {"v":"ired"}
+
+data: {"v":" over"}
+
+data: {"v":"verb"}
+
+data: {"v":"osity"}
+
+data: {"v":" "}
+
+data: {"v":"5"}
+
+data: {"v":":"}
+
+data: {"v":" detailed"}
+
+data: {"v":" but"}
+
+data: {"v":" not"}
+
+data: {"v":" huge"}
+
+data: {"v":"."}
+
+data: {"v":" Let"}
+
+data: {"v":"'s"}
+
+data: {"v":" craft"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" include"}
+
+data: {"v":" example"}
+
+data: {"v":" n"}
+
+data: {"v":"="}
+
+data: {"v":"8"}
+
+data: {"v":" tree"}
+
+data: {"v":"."}
+
+data: {"v":" Explain"}
+
+data: {"v":" merge"}
+
+data: {"v":" procedure"}
+
+data: {"v":":"}
+
+data: {"v":" compare"}
+
+data: {"v":" heads"}
+
+data: {"v":","}
+
+data: {"v":" copy"}
+
+data: {"v":" smaller"}
+
+data: {"v":","}
+
+data: {"v":" advance"}
+
+data: {"v":";"}
+
+data: {"v":" each"}
+
+data: {"v":" element"}
+
+data: {"v":" moved"}
+
+data: {"v":" once"}
+
+data: {"v":" per"}
+
+data: {"v":" merge"}
+
+data: {"v":"."}
+
+data: {"v":" At"}
+
+data: {"v":" a"}
+
+data: {"v":" given"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" sub"}
+
+data: {"v":"arrays"}
+
+data: {"v":" partition"}
+
+data: {"v":" array"}
+
+data: {"v":";"}
+
+data: {"v":" total"}
+
+data: {"v":" lengths"}
+
+data: {"v":" n"}
+
+data: {"v":","}
+
+data: {"v":" so"}
+
+data: {"v":" total"}
+
+data: {"v":" comparisons"}
+
+data: {"v":"/c"}
+
+data: {"v":"opies"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")"}
+
+data: {"v":" ("}
+
+data: {"v":"actually"}
+
+data: {"v":" at"}
+
+data: {"v":" most"}
+
+data: {"v":" n"}
+
+data: {"v":"-"}
+
+data: {"v":"1"}
+
+data: {"v":" comparisons"}
+
+data: {"v":" per"}
+
+data: {"v":" merge"}
+
+data: {"v":"?"}
+
+data: {"v":" total"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":"))."}
+
+data: {"v":" Number"}
+
+data: {"v":" levels"}
+
+data: {"v":"?"}
+
+data: {"v":" splitting"}
+
+data: {"v":" until"}
+
+data: {"v":" size"}
+
+data: {"v":" "}
+
+data: {"v":"1"}
+
+data: {"v":"."}
+
+data: {"v":" For"}
+
+data: {"v":" n"}
+
+data: {"v":"="}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":" exactly"}
+
+data: {"v":" k"}
+
+data: {"v":"="}
+
+data: {"v":"log"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":" levels"}
+
+data: {"v":" of"}
+
+data: {"v":" splitting"}
+
+data: {"v":" and"}
+
+data: {"v":" k"}
+
+data: {"v":" merge"}
+
+data: {"v":" levels"}
+
+data: {"v":"?"}
+
+data: {"v":" Let"}
+
+data: {"v":"'s"}
+
+data: {"v":" define"}
+
+data: {"v":":"}
+
+data: {"v":" recursion"}
+
+data: {"v":" tree"}
+
+data: {"v":" has"}
+
+data: {"v":" root"}
+
+data: {"v":" size"}
+
+data: {"v":" n"}
+
+data: {"v":","}
+
+data: {"v":" level"}
+
+data: {"v":" "}
+
+data: {"v":"0"}
+
+data: {"v":";"}
+
+data: {"v":" level"}
+
+data: {"v":" "}
+
+data: {"v":"1"}
+
+data: {"v":" two"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":";"}
+
+data: {"v":" ..."}
+
+data: {"v":" level"}
+
+data: {"v":" k"}
+
+data: {"v":" leaves"}
+
+data: {"v":" size"}
+
+data: {"v":" "}
+
+data: {"v":"1"}
+
+data: {"v":"."}
+
+data: {"v":" Merg"}
+
+data: {"v":"ing"}
+
+data: {"v":" happens"}
+
+data: {"v":" from"}
+
+data: {"v":" leaves"}
+
+data: {"v":" upward"}
+
+data: {"v":";"}
+
+data: {"v":" at"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" from"}
+
+data: {"v":" leaves"}
+
+data: {"v":" to"}
+
+data: {"v":" root"}
+
+data: {"v":" cost"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":"),"}
+
+data: {"v":" and"}
+
+data: {"v":" there"}
+
+data: {"v":" are"}
+
+data: {"v":" k"}
+
+data: {"v":" levels"}
+
+data: {"v":" with"}
+
+data: {"v":" non"}
+
+data: {"v":"-leaf"}
+
+data: {"v":" merg"}
+
+data: {"v":"es"}
+
+data: {"v":"?"}
+
+data: {"v":" If"}
+
+data: {"v":" tree"}
+
+data: {"v":" levels"}
+
+data: {"v":" root"}
+
+data: {"v":" to"}
+
+data: {"v":" leaves"}
+
+data: {"v":" k"}
+
+data: {"v":"+"}
+
+data: {"v":"1"}
+
+data: {"v":" including"}
+
+data: {"v":" leaves"}
+
+data: {"v":"."}
+
+data: {"v":" Merge"}
+
+data: {"v":" costs"}
+
+data: {"v":" at"}
+
+data: {"v":" levels"}
+
+data: {"v":" "}
+
+data: {"v":"0"}
+
+data: {"v":".."}
+
+data: {"v":"k"}
+
+data: {"v":"-"}
+
+data: {"v":"1"}
+
+data: {"v":":"}
+
+data: {"v":" k"}
+
+data: {"v":" levels"}
+
+data: {"v":"."}
+
+data: {"v":" k"}
+
+data: {"v":"="}
+
+data: {"v":"log"}
+
+data: {"v":" n"}
+
+data: {"v":"."}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":" For"}
+
+data: {"v":" non"}
+
+data: {"v":"-power"}
+
+data: {"v":","}
+
+data: {"v":" depth"}
+
+data: {"v":" ceil"}
+
+data: {"v":"(log"}
+
+data: {"v":" n"}
+
+data: {"v":"),"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" So"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":" Re"}
+
+data: {"v":"cur"}
+
+data: {"v":"rence"}
+
+data: {"v":" solution"}
+
+data: {"v":":"}
+
+data: {"v":" expand"}
+
+data: {"v":":"}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":"."}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"2"}
+
+data: {"v":"("}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")+"}
+
+data: {"v":"c"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":" ="}
+
+data: {"v":"4"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")+"}
+
+data: {"v":"2"}
+
+data: {"v":"cn"}
+
+data: {"v":" ..."}
+
+data: {"v":" ="}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":")+"}
+
+data: {"v":"k"}
+
+data: {"v":"cn"}
+
+data: {"v":"."}
+
+data: {"v":" When"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":"="}
+
+data: {"v":"1"}
+
+data: {"v":","}
+
+data: {"v":" k"}
+
+data: {"v":"="}
+
+data: {"v":"log"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":","}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"n"}
+
+data: {"v":"T"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":" ="}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":" Need"}
+
+data: {"v":" handle"}
+
+data: {"v":" floors"}
+
+data: {"v":" ce"}
+
+data: {"v":"ils"}
+
+data: {"v":" by"}
+
+data: {"v":" induction"}
+
+data: {"v":":"}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":")"}
+
+data: {"v":" <="}
+
+data: {"v":" c"}
+
+data: {"v":" n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":" for"}
+
+data: {"v":" n"}
+
+data: {"v":">="}
+
+data: {"v":"2"}
+
+data: {"v":" maybe"}
+
+data: {"v":" with"}
+
+data: {"v":" constant"}
+
+data: {"v":"."}
+
+data: {"v":" But"}
+
+data: {"v":" simple"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" mention"}
+
+data: {"v":" lower"}
+
+data: {"v":" bound"}
+
+data: {"v":":"}
+
+data: {"v":" any"}
+
+data: {"v":" comparison"}
+
+data: {"v":" sort"}
+
+data: {"v":" needs"}
+
+data: {"v":" Omega"}
+
+data: {"v":"(n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":"),"}
+
+data: {"v":" merge"}
+
+data: {"v":" sort"}
+
+data: {"v":" achieves"}
+
+data: {"v":";"}
+
+data: {"v":" so"}
+
+data: {"v":" The"}
+
+data: {"v":"ta"}
+
+data: {"v":"."}
+
+data: {"v":" But"}
+
+data: {"v":" question"}
+
+data: {"v":" asks"}
+
+data: {"v":" why"}
+
+data: {"v":" O"}
+
+data: {"v":"."}
+
+data: {"v":" Include"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Potential"}
+
+data: {"v":" pitfalls"}
+
+data: {"v":":"}
+
+data: {"v":" At"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" total"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":"),"}
+
+data: {"v":" but"}
+
+data: {"v":" merge"}
+
+data: {"v":" cost"}
+
+data: {"v":" includes"}
+
+data: {"v":" copying"}
+
+data: {"v":" to"}
+
+data: {"v":" temp"}
+
+data: {"v":" and"}
+
+data: {"v":" back"}
+
+data: {"v":":"}
+
+data: {"v":" O"}
+
+data: {"v":"(length"}
+
+data: {"v":")."}
+
+data: {"v":" Number"}
+
+data: {"v":" of"}
+
+data: {"v":" levels"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" mention"}
+
+data: {"v":" not"}
+
+data: {"v":" all"}
+
+data: {"v":" levels"}
+
+data: {"v":" exactly"}
+
+data: {"v":" n"}
+
+data: {"v":" if"}
+
+data: {"v":" uneven"}
+
+data: {"v":" but"}
+
+data: {"v":" within"}
+
+data: {"v":" constant"}
+
+data: {"v":"."}
+
+data: {"v":" Good"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Need"}
+
+data: {"v":" final"}
+
+data: {"v":" in"}
+
+data: {"v":" English"}
+
+data: {"v":"."}
+
+data: {"v":" Use"}
+
+data: {"v":" equations"}
+
+data: {"v":"."}
+
+data: {"v":" Maybe"}
+
+data: {"v":" include"}
+
+data: {"v":" pseud"}
+
+data: {"v":"ocode"}
+
+data: {"v":"?"}
+
+data: {"v":" Not"}
+
+data: {"v":" necessary"}
+
+data: {"v":"."}
+
+data: {"v":" Could"}
+
+data: {"v":" include"}
+
+data: {"v":" \""}
+
+data: {"v":"n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":"\""}
+
+data: {"v":" base"}
+
+data: {"v":" of"}
+
+data: {"v":" log"}
+
+data: {"v":" irrelevant"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" mention"}
+
+data: {"v":" base"}
+
+data: {"v":" case"}
+
+data: {"v":" T"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")."}
+
+data: {"v":" Good"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" explain"}
+
+data: {"v":" \""}
+
+data: {"v":"Why"}
+
+data: {"v":" not"}
+
+data: {"v":" n"}
+
+data: {"v":" log"}
+
+data: {"v":" n"}
+
+data: {"v":" from"}
+
+data: {"v":" comparisons"}
+
+data: {"v":" only"}
+
+data: {"v":"?\""}
+
+data: {"v":" merge"}
+
+data: {"v":" comparisons"}
+
+data: {"v":" <="}
+
+data: {"v":" m"}
+
+data: {"v":"+n"}
+
+data: {"v":"-"}
+
+data: {"v":"1"}
+
+data: {"v":" for"}
+
+data: {"v":" merging"}
+
+data: {"v":" lengths"}
+
+data: {"v":" m"}
+
+data: {"v":",n"}
+
+data: {"v":";"}
+
+data: {"v":" total"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" Copy"}
+
+data: {"v":"ing"}
+
+data: {"v":" also"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":")."}
+
+data: {"v":" So"}
+
+data: {"v":" yes"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Need"}
+
+data: {"v":" maybe"}
+
+data: {"v":" answer"}
+
+data: {"v":" \""}
+
+data: {"v":"Think"}
+
+data: {"v":" it"}
+
+data: {"v":" through"}
+
+data: {"v":"\""}
+
+data: {"v":" with"}
+
+data: {"v":" structured"}
+
+data: {"v":" explanation"}
+
+data: {"v":"."}
+
+data: {"v":" Need"}
+
+data: {"v":" no"}
+
+data: {"v":" analysis"}
+
+data: {"v":"."}
+
+data: {"v":" Final"}
+
+data: {"v":"."}
+
+data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":4.181477912}
+
+data: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Merge","references":[],"stage_id":1}]}
+
+data: {"p":"response/fragments/-1/content","v":" sort"}
+
+data: {"v":" is"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\)"}
+
+data: {"v":" because"}
+
+data: {"v":" it"}
+
+data: {"v":" splits"}
+
+data: {"v":" the"}
+
+data: {"v":" array"}
+
+data: {"v":" into"}
+
+data: {"v":" halves"}
+
+data: {"v":" recursively"}
+
+data: {"v":" and"}
+
+data: {"v":" then"}
+
+data: {"v":" merg"}
+
+data: {"v":"es"}
+
+data: {"v":" sorted"}
+
+data: {"v":" halves"}
+
+data: {"v":" in"}
+
+data: {"v":" linear"}
+
+data: {"v":" time"}
+
+data: {"v":"."}
+
+data: {"v":" The"}
+
+data: {"v":" total"}
+
+data: {"v":" work"}
+
+data: {"v":" is"}
+
+data: {"v":" the"}
+
+data: {"v":" sum"}
+
+data: {"v":" of"}
+
+data: {"v":" linear"}
+
+data: {"v":" work"}
+
+data: {"v":" done"}
+
+data: {"v":" at"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" of"}
+
+data: {"v":" the"}
+
+data: {"v":" recursion"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Let"}
+
+data: {"v":"\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":")=\\"}
+
+data: {"v":"text"}
+
+data: {"v":"{"}
+
+data: {"v":"time"}
+
+data: {"v":" to"}
+
+data: {"v":" sort"}
+
+data: {"v":" }"}
+
+data: {"v":" n"}
+
+data: {"v":" \\"}
+
+data: {"v":"text"}
+
+data: {"v":"{"}
+
+data: {"v":" elements"}
+
+data: {"v":"}.\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"Merge"}
+
+data: {"v":" sort"}
+
+data: {"v":" does"}
+
+data: {"v":":\n\n"}
+
+data: {"v":"1"}
+
+data: {"v":"."}
+
+data: {"v":" Split"}
+
+data: {"v":" the"}
+
+data: {"v":" array"}
+
+data: {"v":" into"}
+
+data: {"v":" two"}
+
+data: {"v":" halves"}
+
+data: {"v":":"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")\\)"}
+
+data: {"v":" or"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\)"}
+
+data: {"v":" depending"}
+
+data: {"v":" on"}
+
+data: {"v":" implementation"}
+
+data: {"v":","}
+
+data: {"v":" but"}
+
+data: {"v":" not"}
+
+data: {"v":" dominant"}
+
+data: {"v":".\n"}
+
+data: {"v":"2"}
+
+data: {"v":"."}
+
+data: {"v":" Rec"}
+
+data: {"v":"urs"}
+
+data: {"v":"ively"}
+
+data: {"v":" sort"}
+
+data: {"v":" each"}
+
+data: {"v":" half"}
+
+data: {"v":":\n"}
+
+data: {"v":"  "}
+
+data: {"v":" \\["}
+
+data: {"v":"\n"}
+
+data: {"v":"  "}
+
+data: {"v":" T"}
+
+data: {"v":"(\\"}
+
+data: {"v":"l"}
+
+data: {"v":"floor"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"\\r"}
+
+data: {"v":"floor"}
+
+data: {"v":")+"}
+
+data: {"v":"T"}
+
+data: {"v":"(\\"}
+
+data: {"v":"l"}
+
+data: {"v":"ceil"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"\\r"}
+
+data: {"v":"ceil"}
+
+data: {"v":").\n"}
+
+data: {"v":"  "}
+
+data: {"v":" \\"}
+
+data: {"v":"]\n"}
+
+data: {"v":"3"}
+
+data: {"v":"."}
+
+data: {"v":" Merge"}
+
+data: {"v":" the"}
+
+data: {"v":" two"}
+
+data: {"v":" sorted"}
+
+data: {"v":" halves"}
+
+data: {"v":" in"}
+
+data: {"v":" linear"}
+
+data: {"v":" time"}
+
+data: {"v":":\n"}
+
+data: {"v":"  "}
+
+data: {"v":" \\["}
+
+data: {"v":"\n"}
+
+data: {"v":"  "}
+
+data: {"v":" \\"}
+
+data: {"v":"Theta"}
+
+data: {"v":"(n"}
+
+data: {"v":").\n"}
+
+data: {"v":"  "}
+
+data: {"v":" \\"}
+
+data: {"v":"]\n\n"}
+
+data: {"v":"So"}
+
+data: {"v":" the"}
+
+data: {"v":" recurrence"}
+
+data: {"v":" is"}
+
+data: {"v":" approximately"}
+
+data: {"v":"\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+\\"}
+
+data: {"v":"Theta"}
+
+data: {"v":"(n"}
+
+data: {"v":"),\n"}
+
+data: {"v":"\\qquad"}
+
+data: {"v":" T"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":").\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"Now"}
+
+data: {"v":" expand"}
+
+data: {"v":" the"}
+
+data: {"v":" recurrence"}
+
+data: {"v":":\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"\\begin"}
+
+data: {"v":"{aligned"}
+
+data: {"v":"}\n"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":")\n"}
+
+data: {"v":"&="}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":" \\\\\n"}
+
+data: {"v":"&="}
+
+data: {"v":"2"}
+
+data: {"v":"\\left"}
+
+data: {"v":"("}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")+"}
+
+data: {"v":"c"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")\\"}
+
+data: {"v":"right"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":" \\\\\n"}
+
+data: {"v":"&="}
+
+data: {"v":"4"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")+"}
+
+data: {"v":"2"}
+
+data: {"v":"cn"}
+
+data: {"v":" \\\\\n"}
+
+data: {"v":"&="}
+
+data: {"v":"4"}
+
+data: {"v":"\\left"}
+
+data: {"v":"("}
+
+data: {"v":"2"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"8"}
+
+data: {"v":")+"}
+
+data: {"v":"c"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")\\"}
+
+data: {"v":"right"}
+
+data: {"v":")+"}
+
+data: {"v":"2"}
+
+data: {"v":"cn"}
+
+data: {"v":" \\\\\n"}
+
+data: {"v":"&="}
+
+data: {"v":"8"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"8"}
+
+data: {"v":")+"}
+
+data: {"v":"3"}
+
+data: {"v":"cn"}
+
+data: {"v":".\n"}
+
+data: {"v":"\\end"}
+
+data: {"v":"{aligned"}
+
+data: {"v":"}\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"After"}
+
+data: {"v":" \\("}
+
+data: {"v":"k"}
+
+data: {"v":"\\)"}
+
+data: {"v":" expansions"}
+
+data: {"v":",\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":" T"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":")+"}
+
+data: {"v":"k"}
+
+data: {"v":"cn"}
+
+data: {"v":".\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"The"}
+
+data: {"v":" recursion"}
+
+data: {"v":" stops"}
+
+data: {"v":" when"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":"="}
+
+data: {"v":"1"}
+
+data: {"v":"\\),"}
+
+data: {"v":" i"}
+
+data: {"v":".e"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"2"}
+
+data: {"v":"^k"}
+
+data: {"v":"=n"}
+
+data: {"v":",\n"}
+
+data: {"v":"\\qquad"}
+
+data: {"v":" k"}
+
+data: {"v":"=\\"}
+
+data: {"v":"log"}
+
+data: {"v":"_"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":".\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"Thus"}
+
+data: {"v":"\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"n"}
+
+data: {"v":"T"}
+
+data: {"v":"("}
+
+data: {"v":"1"}
+
+data: {"v":")+"}
+
+data: {"v":"cn"}
+
+data: {"v":"\\log"}
+
+data: {"v":"_"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":"\n"}
+
+data: {"v":"="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")+"}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")\n"}
+
+data: {"v":"="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":").\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"Equ"}
+
+data: {"v":"ival"}
+
+data: {"v":"ently"}
+
+data: {"v":","}
+
+data: {"v":" view"}
+
+data: {"v":" the"}
+
+data: {"v":" recursion"}
+
+data: {"v":" as"}
+
+data: {"v":" a"}
+
+data: {"v":" tree"}
+
+data: {"v":":\n\n"}
+
+data: {"v":"-"}
+
+data: {"v":" At"}
+
+data: {"v":" the"}
+
+data: {"v":" top"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" one"}
+
+data: {"v":" merge"}
+
+data: {"v":" of"}
+
+data: {"v":" size"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"\\)"}
+
+data: {"v":":"}
+
+data: {"v":" cost"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\)"}
+
+data: {"v":".\n"}
+
+data: {"v":"-"}
+
+data: {"v":" Next"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" two"}
+
+data: {"v":" merg"}
+
+data: {"v":"es"}
+
+data: {"v":" of"}
+
+data: {"v":" size"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"\\)"}
+
+data: {"v":":"}
+
+data: {"v":" total"}
+
+data: {"v":" cost"}
+
+data: {"v":"\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\["}
+
+data: {"v":"\n"}
+
+data: {"v":"  "}
+
+data: {"v":"2"}
+
+data: {"v":"\\cdot"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":").\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\"}
+
+data: {"v":"]\n"}
+
+data: {"v":"-"}
+
+data: {"v":" Next"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" four"}
+
+data: {"v":" merg"}
+
+data: {"v":"es"}
+
+data: {"v":" of"}
+
+data: {"v":" size"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":"\\)"}
+
+data: {"v":":"}
+
+data: {"v":" total"}
+
+data: {"v":" cost"}
+
+data: {"v":"\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\["}
+
+data: {"v":"\n"}
+
+data: {"v":"  "}
+
+data: {"v":"4"}
+
+data: {"v":"\\cdot"}
+
+data: {"v":" O"}
+
+data: {"v":"(n"}
+
+data: {"v":"/"}
+
+data: {"v":"4"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":").\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\"}
+
+data: {"v":"]\n"}
+
+data: {"v":"-"}
+
+data: {"v":" In"}
+
+data: {"v":" general"}
+
+data: {"v":","}
+
+data: {"v":" at"}
+
+data: {"v":" every"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" the"}
+
+data: {"v":" sub"}
+
+data: {"v":"arrays"}
+
+data: {"v":" partition"}
+
+data: {"v":" the"}
+
+data: {"v":" original"}
+
+data: {"v":" array"}
+
+data: {"v":","}
+
+data: {"v":" so"}
+
+data: {"v":" the"}
+
+data: {"v":" total"}
+
+data: {"v":" size"}
+
+data: {"v":" of"}
+
+data: {"v":" all"}
+
+data: {"v":" merg"}
+
+data: {"v":"es"}
+
+data: {"v":" at"}
+
+data: {"v":" that"}
+
+data: {"v":" level"}
+
+data: {"v":" is"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"\\)."}
+
+data: {"v":" Therefore"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" costs"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\)"}
+
+data: {"v":".\n"}
+
+data: {"v":"-"}
+
+data: {"v":" The"}
+
+data: {"v":" array"}
+
+data: {"v":" is"}
+
+data: {"v":" hal"}
+
+data: {"v":"ved"}
+
+data: {"v":" repeatedly"}
+
+data: {"v":" until"}
+
+data: {"v":" pieces"}
+
+data: {"v":" have"}
+
+data: {"v":" size"}
+
+data: {"v":" \\("}
+
+data: {"v":"1"}
+
+data: {"v":"\\),"}
+
+data: {"v":" so"}
+
+data: {"v":" there"}
+
+data: {"v":" are"}
+
+data: {"v":" about"}
+
+data: {"v":"\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\["}
+
+data: {"v":"\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\"}
+
+data: {"v":"log"}
+
+data: {"v":"_"}
+
+data: {"v":"2"}
+
+data: {"v":" n"}
+
+data: {"v":"\n"}
+
+data: {"v":" "}
+
+data: {"v":" \\"}
+
+data: {"v":"]\n"}
+
+data: {"v":" "}
+
+data: {"v":" levels"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Therefore"}
+
+data: {"v":" total"}
+
+data: {"v":" time"}
+
+data: {"v":" is"}
+
+data: {"v":"\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\"}
+
+data: {"v":"cdot"}
+
+data: {"v":" O"}
+
+data: {"v":"(\\"}
+
+data: {"v":"log"}
+
+data: {"v":" n"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":").\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"For"}
+
+data: {"v":" \\("}
+
+data: {"v":"n"}
+
+data: {"v":"\\)"}
+
+data: {"v":" not"}
+
+data: {"v":" a"}
+
+data: {"v":" power"}
+
+data: {"v":" of"}
+
+data: {"v":" two"}
+
+data: {"v":","}
+
+data: {"v":" the"}
+
+data: {"v":" splits"}
+
+data: {"v":" are"}
+
+data: {"v":" uneven"}
+
+data: {"v":","}
+
+data: {"v":" e"}
+
+data: {"v":".g"}
+
+data: {"v":"."}
+
+data: {"v":" \\(\\"}
+
+data: {"v":"l"}
+
+data: {"v":"floor"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"\\r"}
+
+data: {"v":"floor"}
+
+data: {"v":"\\)"}
+
+data: {"v":" and"}
+
+data: {"v":" \\(\\"}
+
+data: {"v":"l"}
+
+data: {"v":"ceil"}
+
+data: {"v":" n"}
+
+data: {"v":"/"}
+
+data: {"v":"2"}
+
+data: {"v":"\\r"}
+
+data: {"v":"ceil"}
+
+data: {"v":"\\),"}
+
+data: {"v":" but"}
+
+data: {"v":" the"}
+
+data: {"v":" recursion"}
+
+data: {"v":" depth"}
+
+data: {"v":" is"}
+
+data: {"v":" still"}
+
+data: {"v":" \\(\\"}
+
+data: {"v":"Theta"}
+
+data: {"v":"(\\"}
+
+data: {"v":"log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\),"}
+
+data: {"v":" and"}
+
+data: {"v":" the"}
+
+data: {"v":" total"}
+
+data: {"v":" work"}
+
+data: {"v":" at"}
+
+data: {"v":" each"}
+
+data: {"v":" level"}
+
+data: {"v":" remains"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\)."}
+
+data: {"v":" So"}
+
+data: {"v":" the"}
+
+data: {"v":" bound"}
+
+data: {"v":" is"}
+
+data: {"v":" unchanged"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"Finally"}
+
+data: {"v":","}
+
+data: {"v":" merge"}
+
+data: {"v":" sort"}
+
+data: {"v":" is"}
+
+data: {"v":" not"}
+
+data: {"v":" just"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\)"}
+
+data: {"v":";"}
+
+data: {"v":" for"}
+
+data: {"v":" comparison"}
+
+data: {"v":"-based"}
+
+data: {"v":" sorting"}
+
+data: {"v":" it"}
+
+data: {"v":" is"}
+
+data: {"v":" \\(\\"}
+
+data: {"v":"Theta"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\),"}
+
+data: {"v":" because"}
+
+data: {"v":" this"}
+
+data: {"v":" upper"}
+
+data: {"v":" bound"}
+
+data: {"v":" is"}
+
+data: {"v":" tight"}
+
+data: {"v":" and"}
+
+data: {"v":" comparison"}
+
+data: {"v":" sorting"}
+
+data: {"v":" has"}
+
+data: {"v":" an"}
+
+data: {"v":" \\(\\"}
+
+data: {"v":"Omega"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\)"}
+
+data: {"v":" lower"}
+
+data: {"v":" bound"}
+
+data: {"v":"."}
+
+data: {"v":" Its"}
+
+data: {"v":" extra"}
+
+data: {"v":" space"}
+
+data: {"v":" usage"}
+
+data: {"v":" is"}
+
+data: {"v":" typically"}
+
+data: {"v":" \\("}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\)"}
+
+data: {"v":" for"}
+
+data: {"v":" the"}
+
+data: {"v":" temporary"}
+
+data: {"v":" merge"}
+
+data: {"v":" array"}
+
+data: {"v":".\n\n"}
+
+data: {"v":"So"}
+
+data: {"v":" the"}
+
+data: {"v":" key"}
+
+data: {"v":" idea"}
+
+data: {"v":" is"}
+
+data: {"v":":\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"\\"}
+
+data: {"v":"box"}
+
+data: {"v":"ed"}
+
+data: {"v":"{\\"}
+
+data: {"v":"text"}
+
+data: {"v":"{"}
+
+data: {"v":"merge"}
+
+data: {"v":" sort"}
+
+data: {"v":" does"}
+
+data: {"v":" }"}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":")\\"}
+
+data: {"v":"text"}
+
+data: {"v":"{"}
+
+data: {"v":" work"}
+
+data: {"v":" per"}
+
+data: {"v":" recursion"}
+
+data: {"v":" level"}
+
+data: {"v":","}
+
+data: {"v":" and"}
+
+data: {"v":" there"}
+
+data: {"v":" are"}
+
+data: {"v":" }"}
+
+data: {"v":"O"}
+
+data: {"v":"(\\"}
+
+data: {"v":"log"}
+
+data: {"v":" n"}
+
+data: {"v":")\\"}
+
+data: {"v":"text"}
+
+data: {"v":"{"}
+
+data: {"v":" levels"}
+
+data: {"v":"."}
+
+data: {"v":"}}\n"}
+
+data: {"v":"\\]\n\n"}
+
+data: {"v":"Hence"}
+
+data: {"v":"\n\n"}
+
+data: {"v":"\\["}
+
+data: {"v":"\n"}
+
+data: {"v":"\\"}
+
+data: {"v":"box"}
+
+data: {"v":"ed"}
+
+data: {"v":"{T"}
+
+data: {"v":"(n"}
+
+data: {"v":")="}
+
+data: {"v":"O"}
+
+data: {"v":"(n"}
+
+data: {"v":"\\log"}
+
+data: {"v":" n"}
+
+data: {"v":")."}
+
+data: {"v":"}\n"}
+
+data: {"v":"\\]"}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":815},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1792332570.535652}
+
+event: title
+data: {"content":"Merge sort O n log n explained"}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+

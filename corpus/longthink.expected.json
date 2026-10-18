@@ -1,0 +1,5774 @@
+[
+{
+"channel": "reasoning",
+"text": "We"
+},
+{
+"channel": "reasoning",
+"text": " need"
+},
+{
+"channel": "reasoning",
+"text": " answer"
+},
+{
+"channel": "reasoning",
+"text": " explain"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " sort"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")"
+},
+{
+"channel": "reasoning",
+"text": " detailed"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " think"
+},
+{
+"channel": "reasoning",
+"text": " through"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " recurrence"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " merging"
+},
+{
+"channel": "reasoning",
+"text": " costs"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " proof"
+},
+{
+"channel": "reasoning",
+"text": " by"
+},
+{
+"channel": "reasoning",
+"text": " recursion"
+},
+{
+"channel": "reasoning",
+"text": " tree"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " master"
+},
+{
+"channel": "reasoning",
+"text": " theorem"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " assumptions"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " be"
+},
+{
+"channel": "reasoning",
+"text": " accurate"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " merging"
+},
+{
+"channel": "reasoning",
+"text": " two"
+},
+{
+"channel": "reasoning",
+"text": " sorted"
+},
+{
+"channel": "reasoning",
+"text": " halves"
+},
+{
+"channel": "reasoning",
+"text": " linear"
+},
+{
+"channel": "reasoning",
+"text": " in"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " elements"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " At"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " work"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Number"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Thus"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Also"
+},
+{
+"channel": "reasoning",
+"text": " lower"
+},
+{
+"channel": "reasoning",
+"text": " bound"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " It"
+},
+{
+"channel": "reasoning",
+"text": " is"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " The"
+},
+{
+"channel": "reasoning",
+"text": "ta"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " can"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " The"
+},
+{
+"channel": "reasoning",
+"text": "ta"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")"
+},
+{
+"channel": "reasoning",
+"text": " for"
+},
+{
+"channel": "reasoning",
+"text": " comparison"
+},
+{
+"channel": "reasoning",
+"text": " sort"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " explain"
+},
+{
+"channel": "reasoning",
+"text": " base"
+},
+{
+"channel": "reasoning",
+"text": " cases"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " uneven"
+},
+{
+"channel": "reasoning",
+"text": " splits"
+},
+{
+"channel": "reasoning",
+"text": " ceil"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "floor"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " power"
+},
+{
+"channel": "reasoning",
+"text": " of"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " depth"
+},
+{
+"channel": "reasoning",
+"text": " ceil"
+},
+{
+"channel": "reasoning",
+"text": "(log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " perhaps"
+},
+{
+"channel": "reasoning",
+"text": " discuss"
+},
+{
+"channel": "reasoning",
+"text": " why"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")"
+},
+{
+"channel": "reasoning",
+"text": " despite"
+},
+{
+"channel": "reasoning",
+"text": " sorted"
+},
+{
+"channel": "reasoning",
+"text": " halves"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " Because"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " does"
+},
+{
+"channel": "reasoning",
+"text": " linear"
+},
+{
+"channel": "reasoning",
+"text": " work"
+},
+{
+"channel": "reasoning",
+"text": " and"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " explain"
+},
+{
+"channel": "reasoning",
+"text": " recurrence"
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")="
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "floor"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "ceil"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "Theta"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Solve"
+},
+{
+"channel": "reasoning",
+"text": " via"
+},
+{
+"channel": "reasoning",
+"text": " recursion"
+},
+{
+"channel": "reasoning",
+"text": " tree"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " space"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " answer"
+},
+{
+"channel": "reasoning",
+"text": " \""
+},
+{
+"channel": "reasoning",
+"text": "Think"
+},
+{
+"channel": "reasoning",
+"text": " it"
+},
+{
+"channel": "reasoning",
+"text": " through"
+},
+{
+"channel": "reasoning",
+"text": "\""
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " step"
+},
+{
+"channel": "reasoning",
+"text": "-by"
+},
+{
+"channel": "reasoning",
+"text": "-step"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Des"
+},
+{
+"channel": "reasoning",
+"text": "ired"
+},
+{
+"channel": "reasoning",
+"text": " over"
+},
+{
+"channel": "reasoning",
+"text": "verb"
+},
+{
+"channel": "reasoning",
+"text": "osity"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "5"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " detailed"
+},
+{
+"channel": "reasoning",
+"text": " but"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " huge"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Let"
+},
+{
+"channel": "reasoning",
+"text": "'s"
+},
+{
+"channel": "reasoning",
+"text": " craft"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " include"
+},
+{
+"channel": "reasoning",
+"text": " example"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "8"
+},
+{
+"channel": "reasoning",
+"text": " tree"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Explain"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " procedure"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " compare"
+},
+{
+"channel": "reasoning",
+"text": " heads"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " copy"
+},
+{
+"channel": "reasoning",
+"text": " smaller"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " advance"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " element"
+},
+{
+"channel": "reasoning",
+"text": " moved"
+},
+{
+"channel": "reasoning",
+"text": " once"
+},
+{
+"channel": "reasoning",
+"text": " per"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " At"
+},
+{
+"channel": "reasoning",
+"text": " a"
+},
+{
+"channel": "reasoning",
+"text": " given"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " sub"
+},
+{
+"channel": "reasoning",
+"text": "arrays"
+},
+{
+"channel": "reasoning",
+"text": " partition"
+},
+{
+"channel": "reasoning",
+"text": " array"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " lengths"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " so"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " comparisons"
+},
+{
+"channel": "reasoning",
+"text": "/c"
+},
+{
+"channel": "reasoning",
+"text": "opies"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")"
+},
+{
+"channel": "reasoning",
+"text": " ("
+},
+{
+"channel": "reasoning",
+"text": "actually"
+},
+{
+"channel": "reasoning",
+"text": " at"
+},
+{
+"channel": "reasoning",
+"text": " most"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "-"
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": " comparisons"
+},
+{
+"channel": "reasoning",
+"text": " per"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "))."
+},
+{
+"channel": "reasoning",
+"text": " Number"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " splitting"
+},
+{
+"channel": "reasoning",
+"text": " until"
+},
+{
+"channel": "reasoning",
+"text": " size"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " For"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "^k"
+},
+{
+"channel": "reasoning",
+"text": " exactly"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "log"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " of"
+},
+{
+"channel": "reasoning",
+"text": " splitting"
+},
+{
+"channel": "reasoning",
+"text": " and"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " Let"
+},
+{
+"channel": "reasoning",
+"text": "'s"
+},
+{
+"channel": "reasoning",
+"text": " define"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " recursion"
+},
+{
+"channel": "reasoning",
+"text": " tree"
+},
+{
+"channel": "reasoning",
+"text": " has"
+},
+{
+"channel": "reasoning",
+"text": " root"
+},
+{
+"channel": "reasoning",
+"text": " size"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "0"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": " two"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " ..."
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": " leaves"
+},
+{
+"channel": "reasoning",
+"text": " size"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Merg"
+},
+{
+"channel": "reasoning",
+"text": "ing"
+},
+{
+"channel": "reasoning",
+"text": " happens"
+},
+{
+"channel": "reasoning",
+"text": " from"
+},
+{
+"channel": "reasoning",
+"text": " leaves"
+},
+{
+"channel": "reasoning",
+"text": " upward"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " at"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " from"
+},
+{
+"channel": "reasoning",
+"text": " leaves"
+},
+{
+"channel": "reasoning",
+"text": " to"
+},
+{
+"channel": "reasoning",
+"text": " root"
+},
+{
+"channel": "reasoning",
+"text": " cost"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "),"
+},
+{
+"channel": "reasoning",
+"text": " and"
+},
+{
+"channel": "reasoning",
+"text": " there"
+},
+{
+"channel": "reasoning",
+"text": " are"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " with"
+},
+{
+"channel": "reasoning",
+"text": " non"
+},
+{
+"channel": "reasoning",
+"text": "-leaf"
+},
+{
+"channel": "reasoning",
+"text": " merg"
+},
+{
+"channel": "reasoning",
+"text": "es"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " If"
+},
+{
+"channel": "reasoning",
+"text": " tree"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " root"
+},
+{
+"channel": "reasoning",
+"text": " to"
+},
+{
+"channel": "reasoning",
+"text": " leaves"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": "+"
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": " including"
+},
+{
+"channel": "reasoning",
+"text": " leaves"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Merge"
+},
+{
+"channel": "reasoning",
+"text": " costs"
+},
+{
+"channel": "reasoning",
+"text": " at"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " "
+},
+{
+"channel": "reasoning",
+"text": "0"
+},
+{
+"channel": "reasoning",
+"text": ".."
+},
+{
+"channel": "reasoning",
+"text": "k"
+},
+{
+"channel": "reasoning",
+"text": "-"
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " For"
+},
+{
+"channel": "reasoning",
+"text": " non"
+},
+{
+"channel": "reasoning",
+"text": "-power"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " depth"
+},
+{
+"channel": "reasoning",
+"text": " ceil"
+},
+{
+"channel": "reasoning",
+"text": "(log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "),"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " So"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Re"
+},
+{
+"channel": "reasoning",
+"text": "cur"
+},
+{
+"channel": "reasoning",
+"text": "rence"
+},
+{
+"channel": "reasoning",
+"text": " solution"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " expand"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")="
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "cn"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")="
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "4"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "c"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "cn"
+},
+{
+"channel": "reasoning",
+"text": " ="
+},
+{
+"channel": "reasoning",
+"text": "4"
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "4"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "cn"
+},
+{
+"channel": "reasoning",
+"text": " ..."
+},
+{
+"channel": "reasoning",
+"text": " ="
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "^k"
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "^k"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "k"
+},
+{
+"channel": "reasoning",
+"text": "cn"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " When"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "/"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": "^k"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " k"
+},
+{
+"channel": "reasoning",
+"text": "="
+},
+{
+"channel": "reasoning",
+"text": "log"
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ","
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")="
+},
+{
+"channel": "reasoning",
+"text": "n"
+},
+{
+"channel": "reasoning",
+"text": "T"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": ")+"
+},
+{
+"channel": "reasoning",
+"text": "cn"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " ="
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " handle"
+},
+{
+"channel": "reasoning",
+"text": " floors"
+},
+{
+"channel": "reasoning",
+"text": " ce"
+},
+{
+"channel": "reasoning",
+"text": "ils"
+},
+{
+"channel": "reasoning",
+"text": " by"
+},
+{
+"channel": "reasoning",
+"text": " induction"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")"
+},
+{
+"channel": "reasoning",
+"text": " <="
+},
+{
+"channel": "reasoning",
+"text": " c"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " for"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": ">="
+},
+{
+"channel": "reasoning",
+"text": "2"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " with"
+},
+{
+"channel": "reasoning",
+"text": " constant"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " But"
+},
+{
+"channel": "reasoning",
+"text": " simple"
+},
+{
+"channel": "reasoning",
+"text": ".\n\n"
+},
+{
+"channel": "reasoning",
+"text": "Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " lower"
+},
+{
+"channel": "reasoning",
+"text": " bound"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " any"
+},
+{
+"channel": "reasoning",
+"text": " comparison"
+},
+{
+"channel": "reasoning",
+"text": " sort"
+},
+{
+"channel": "reasoning",
+"text": " needs"
+},
+{
+"channel": "reasoning",
+"text": " Omega"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "),"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " sort"
+},
+{
+"channel": "reasoning",
+"text": " achieves"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " so"
+},
+{
+"channel": "reasoning",
+"text": " The"
+},
+{
+"channel": "reasoning",
+"text": "ta"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " But"
+},
+{
+"channel": "reasoning",
+"text": " question"
+},
+{
+"channel": "reasoning",
+"text": " asks"
+},
+{
+"channel": "reasoning",
+"text": " why"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Include"
+},
+{
+"channel": "reasoning",
+"text": ".\n\n"
+},
+{
+"channel": "reasoning",
+"text": "Potential"
+},
+{
+"channel": "reasoning",
+"text": " pitfalls"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " At"
+},
+{
+"channel": "reasoning",
+"text": " each"
+},
+{
+"channel": "reasoning",
+"text": " level"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": "),"
+},
+{
+"channel": "reasoning",
+"text": " but"
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " cost"
+},
+{
+"channel": "reasoning",
+"text": " includes"
+},
+{
+"channel": "reasoning",
+"text": " copying"
+},
+{
+"channel": "reasoning",
+"text": " to"
+},
+{
+"channel": "reasoning",
+"text": " temp"
+},
+{
+"channel": "reasoning",
+"text": " and"
+},
+{
+"channel": "reasoning",
+"text": " back"
+},
+{
+"channel": "reasoning",
+"text": ":"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(length"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Number"
+},
+{
+"channel": "reasoning",
+"text": " of"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " all"
+},
+{
+"channel": "reasoning",
+"text": " levels"
+},
+{
+"channel": "reasoning",
+"text": " exactly"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " if"
+},
+{
+"channel": "reasoning",
+"text": " uneven"
+},
+{
+"channel": "reasoning",
+"text": " but"
+},
+{
+"channel": "reasoning",
+"text": " within"
+},
+{
+"channel": "reasoning",
+"text": " constant"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Good"
+},
+{
+"channel": "reasoning",
+"text": ".\n\n"
+},
+{
+"channel": "reasoning",
+"text": "Need"
+},
+{
+"channel": "reasoning",
+"text": " final"
+},
+{
+"channel": "reasoning",
+"text": " in"
+},
+{
+"channel": "reasoning",
+"text": " English"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Use"
+},
+{
+"channel": "reasoning",
+"text": " equations"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Maybe"
+},
+{
+"channel": "reasoning",
+"text": " include"
+},
+{
+"channel": "reasoning",
+"text": " pseud"
+},
+{
+"channel": "reasoning",
+"text": "ocode"
+},
+{
+"channel": "reasoning",
+"text": "?"
+},
+{
+"channel": "reasoning",
+"text": " Not"
+},
+{
+"channel": "reasoning",
+"text": " necessary"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Could"
+},
+{
+"channel": "reasoning",
+"text": " include"
+},
+{
+"channel": "reasoning",
+"text": " \""
+},
+{
+"channel": "reasoning",
+"text": "n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": "\""
+},
+{
+"channel": "reasoning",
+"text": " base"
+},
+{
+"channel": "reasoning",
+"text": " of"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " irrelevant"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " mention"
+},
+{
+"channel": "reasoning",
+"text": " base"
+},
+{
+"channel": "reasoning",
+"text": " case"
+},
+{
+"channel": "reasoning",
+"text": " T"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": ")="
+},
+{
+"channel": "reasoning",
+"text": "O"
+},
+{
+"channel": "reasoning",
+"text": "("
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Good"
+},
+{
+"channel": "reasoning",
+"text": ".\n\n"
+},
+{
+"channel": "reasoning",
+"text": "Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " explain"
+},
+{
+"channel": "reasoning",
+"text": " \""
+},
+{
+"channel": "reasoning",
+"text": "Why"
+},
+{
+"channel": "reasoning",
+"text": " not"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " log"
+},
+{
+"channel": "reasoning",
+"text": " n"
+},
+{
+"channel": "reasoning",
+"text": " from"
+},
+{
+"channel": "reasoning",
+"text": " comparisons"
+},
+{
+"channel": "reasoning",
+"text": " only"
+},
+{
+"channel": "reasoning",
+"text": "?\""
+},
+{
+"channel": "reasoning",
+"text": " merge"
+},
+{
+"channel": "reasoning",
+"text": " comparisons"
+},
+{
+"channel": "reasoning",
+"text": " <="
+},
+{
+"channel": "reasoning",
+"text": " m"
+},
+{
+"channel": "reasoning",
+"text": "+n"
+},
+{
+"channel": "reasoning",
+"text": "-"
+},
+{
+"channel": "reasoning",
+"text": "1"
+},
+{
+"channel": "reasoning",
+"text": " for"
+},
+{
+"channel": "reasoning",
+"text": " merging"
+},
+{
+"channel": "reasoning",
+"text": " lengths"
+},
+{
+"channel": "reasoning",
+"text": " m"
+},
+{
+"channel": "reasoning",
+"text": ",n"
+},
+{
+"channel": "reasoning",
+"text": ";"
+},
+{
+"channel": "reasoning",
+"text": " total"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " Copy"
+},
+{
+"channel": "reasoning",
+"text": "ing"
+},
+{
+"channel": "reasoning",
+"text": " also"
+},
+{
+"channel": "reasoning",
+"text": " O"
+},
+{
+"channel": "reasoning",
+"text": "(n"
+},
+{
+"channel": "reasoning",
+"text": ")."
+},
+{
+"channel": "reasoning",
+"text": " So"
+},
+{
+"channel": "reasoning",
+"text": " yes"
+},
+{
+"channel": "reasoning",
+"text": ".\n\n"
+},
+{
+"channel": "reasoning",
+"text": "Need"
+},
+{
+"channel": "reasoning",
+"text": " maybe"
+},
+{
+"channel": "reasoning",
+"text": " answer"
+},
+{
+"channel": "reasoning",
+"text": " \""
+},
+{
+"channel": "reasoning",
+"text": "Think"
+},
+{
+"channel": "reasoning",
+"text": " it"
+},
+{
+"channel": "reasoning",
+"text": " through"
+},
+{
+"channel": "reasoning",
+"text": "\""
+},
+{
+"channel": "reasoning",
+"text": " with"
+},
+{
+"channel": "reasoning",
+"text": " structured"
+},
+{
+"channel": "reasoning",
+"text": " explanation"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Need"
+},
+{
+"channel": "reasoning",
+"text": " no"
+},
+{
+"channel": "reasoning",
+"text": " analysis"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "reasoning",
+"text": " Final"
+},
+{
+"channel": "reasoning",
+"text": "."
+},
+{
+"channel": "text",
+"text": "Merge"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": " because"
+},
+{
+"channel": "text",
+"text": " it"
+},
+{
+"channel": "text",
+"text": " splits"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " array"
+},
+{
+"channel": "text",
+"text": " into"
+},
+{
+"channel": "text",
+"text": " halves"
+},
+{
+"channel": "text",
+"text": " recursively"
+},
+{
+"channel": "text",
+"text": " and"
+},
+{
+"channel": "text",
+"text": " then"
+},
+{
+"channel": "text",
+"text": " merg"
+},
+{
+"channel": "text",
+"text": "es"
+},
+{
+"channel": "text",
+"text": " sorted"
+},
+{
+"channel": "text",
+"text": " halves"
+},
+{
+"channel": "text",
+"text": " in"
+},
+{
+"channel": "text",
+"text": " linear"
+},
+{
+"channel": "text",
+"text": " time"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " The"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " work"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " sum"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " linear"
+},
+{
+"channel": "text",
+"text": " work"
+},
+{
+"channel": "text",
+"text": " done"
+},
+{
+"channel": "text",
+"text": " at"
+},
+{
+"channel": "text",
+"text": " each"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " recursion"
+},
+{
+"channel": "text",
+"text": ".\n\n"
+},
+{
+"channel": "text",
+"text": "Let"
+},
+{
+"channel": "text",
+"text": "\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")=\\"
+},
+{
+"channel": "text",
+"text": "text"
+},
+{
+"channel": "text",
+"text": "{"
+},
+{
+"channel": "text",
+"text": "time"
+},
+{
+"channel": "text",
+"text": " to"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " }"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "text"
+},
+{
+"channel": "text",
+"text": "{"
+},
+{
+"channel": "text",
+"text": " elements"
+},
+{
+"channel": "text",
+"text": "}.\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "Merge"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " does"
+},
+{
+"channel": "text",
+"text": ":\n\n"
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " Split"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " array"
+},
+{
+"channel": "text",
+"text": " into"
+},
+{
+"channel": "text",
+"text": " two"
+},
+{
+"channel": "text",
+"text": " halves"
+},
+{
+"channel": "text",
+"text": ":"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": " or"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": " depending"
+},
+{
+"channel": "text",
+"text": " on"
+},
+{
+"channel": "text",
+"text": " implementation"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " but"
+},
+{
+"channel": "text",
+"text": " not"
+},
+{
+"channel": "text",
+"text": " dominant"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " Rec"
+},
+{
+"channel": "text",
+"text": "urs"
+},
+{
+"channel": "text",
+"text": "ively"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " each"
+},
+{
+"channel": "text",
+"text": " half"
+},
+{
+"channel": "text",
+"text": ":\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " \\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " T"
+},
+{
+"channel": "text",
+"text": "(\\"
+},
+{
+"channel": "text",
+"text": "l"
+},
+{
+"channel": "text",
+"text": "floor"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\r"
+},
+{
+"channel": "text",
+"text": "floor"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(\\"
+},
+{
+"channel": "text",
+"text": "l"
+},
+{
+"channel": "text",
+"text": "ceil"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\r"
+},
+{
+"channel": "text",
+"text": "ceil"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "]\n"
+},
+{
+"channel": "text",
+"text": "3"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " Merge"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " two"
+},
+{
+"channel": "text",
+"text": " sorted"
+},
+{
+"channel": "text",
+"text": " halves"
+},
+{
+"channel": "text",
+"text": " in"
+},
+{
+"channel": "text",
+"text": " linear"
+},
+{
+"channel": "text",
+"text": " time"
+},
+{
+"channel": "text",
+"text": ":\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " \\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "Theta"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "]\n\n"
+},
+{
+"channel": "text",
+"text": "So"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " recurrence"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " approximately"
+},
+{
+"channel": "text",
+"text": "\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": ")+\\"
+},
+{
+"channel": "text",
+"text": "Theta"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "),\n"
+},
+{
+"channel": "text",
+"text": "\\qquad"
+},
+{
+"channel": "text",
+"text": " T"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "Now"
+},
+{
+"channel": "text",
+"text": " expand"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " recurrence"
+},
+{
+"channel": "text",
+"text": ":\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "\\begin"
+},
+{
+"channel": "text",
+"text": "{aligned"
+},
+{
+"channel": "text",
+"text": "}\n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\n"
+},
+{
+"channel": "text",
+"text": "&="
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": " \\\\\n"
+},
+{
+"channel": "text",
+"text": "&="
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\left"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "c"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": ")\\"
+},
+{
+"channel": "text",
+"text": "right"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": " \\\\\n"
+},
+{
+"channel": "text",
+"text": "&="
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": " \\\\\n"
+},
+{
+"channel": "text",
+"text": "&="
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": "\\left"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "8"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "c"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": ")\\"
+},
+{
+"channel": "text",
+"text": "right"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": " \\\\\n"
+},
+{
+"channel": "text",
+"text": "&="
+},
+{
+"channel": "text",
+"text": "8"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "8"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "3"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "\\end"
+},
+{
+"channel": "text",
+"text": "{aligned"
+},
+{
+"channel": "text",
+"text": "}\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "After"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "k"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": " expansions"
+},
+{
+"channel": "text",
+"text": ",\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "^k"
+},
+{
+"channel": "text",
+"text": " T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "^k"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "k"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "The"
+},
+{
+"channel": "text",
+"text": " recursion"
+},
+{
+"channel": "text",
+"text": " stops"
+},
+{
+"channel": "text",
+"text": " when"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "^k"
+},
+{
+"channel": "text",
+"text": "="
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": "\\),"
+},
+{
+"channel": "text",
+"text": " i"
+},
+{
+"channel": "text",
+"text": ".e"
+},
+{
+"channel": "text",
+"text": ".\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "^k"
+},
+{
+"channel": "text",
+"text": "=n"
+},
+{
+"channel": "text",
+"text": ",\n"
+},
+{
+"channel": "text",
+"text": "\\qquad"
+},
+{
+"channel": "text",
+"text": " k"
+},
+{
+"channel": "text",
+"text": "=\\"
+},
+{
+"channel": "text",
+"text": "log"
+},
+{
+"channel": "text",
+"text": "_"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "Thus"
+},
+{
+"channel": "text",
+"text": "\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "T"
+},
+{
+"channel": "text",
+"text": "("
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "cn"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": "_"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")+"
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\n"
+},
+{
+"channel": "text",
+"text": "="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "Equ"
+},
+{
+"channel": "text",
+"text": "ival"
+},
+{
+"channel": "text",
+"text": "ently"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " view"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " recursion"
+},
+{
+"channel": "text",
+"text": " as"
+},
+{
+"channel": "text",
+"text": " a"
+},
+{
+"channel": "text",
+"text": " tree"
+},
+{
+"channel": "text",
+"text": ":\n\n"
+},
+{
+"channel": "text",
+"text": "-"
+},
+{
+"channel": "text",
+"text": " At"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " top"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " one"
+},
+{
+"channel": "text",
+"text": " merge"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " size"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": ":"
+},
+{
+"channel": "text",
+"text": " cost"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "-"
+},
+{
+"channel": "text",
+"text": " Next"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " two"
+},
+{
+"channel": "text",
+"text": " merg"
+},
+{
+"channel": "text",
+"text": "es"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " size"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": ":"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " cost"
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\cdot"
+},
+{
+"channel": "text",
+"text": " O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "]\n"
+},
+{
+"channel": "text",
+"text": "-"
+},
+{
+"channel": "text",
+"text": " Next"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " four"
+},
+{
+"channel": "text",
+"text": " merg"
+},
+{
+"channel": "text",
+"text": "es"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " size"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": ":"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " cost"
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "  "
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": "\\cdot"
+},
+{
+"channel": "text",
+"text": " O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "4"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "]\n"
+},
+{
+"channel": "text",
+"text": "-"
+},
+{
+"channel": "text",
+"text": " In"
+},
+{
+"channel": "text",
+"text": " general"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " at"
+},
+{
+"channel": "text",
+"text": " every"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " sub"
+},
+{
+"channel": "text",
+"text": "arrays"
+},
+{
+"channel": "text",
+"text": " partition"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " original"
+},
+{
+"channel": "text",
+"text": " array"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " so"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " size"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " all"
+},
+{
+"channel": "text",
+"text": " merg"
+},
+{
+"channel": "text",
+"text": "es"
+},
+{
+"channel": "text",
+"text": " at"
+},
+{
+"channel": "text",
+"text": " that"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "\\)."
+},
+{
+"channel": "text",
+"text": " Therefore"
+},
+{
+"channel": "text",
+"text": " each"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": " costs"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": ".\n"
+},
+{
+"channel": "text",
+"text": "-"
+},
+{
+"channel": "text",
+"text": " The"
+},
+{
+"channel": "text",
+"text": " array"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " hal"
+},
+{
+"channel": "text",
+"text": "ved"
+},
+{
+"channel": "text",
+"text": " repeatedly"
+},
+{
+"channel": "text",
+"text": " until"
+},
+{
+"channel": "text",
+"text": " pieces"
+},
+{
+"channel": "text",
+"text": " have"
+},
+{
+"channel": "text",
+"text": " size"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "1"
+},
+{
+"channel": "text",
+"text": "\\),"
+},
+{
+"channel": "text",
+"text": " so"
+},
+{
+"channel": "text",
+"text": " there"
+},
+{
+"channel": "text",
+"text": " are"
+},
+{
+"channel": "text",
+"text": " about"
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "log"
+},
+{
+"channel": "text",
+"text": "_"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " \\"
+},
+{
+"channel": "text",
+"text": "]\n"
+},
+{
+"channel": "text",
+"text": " "
+},
+{
+"channel": "text",
+"text": " levels"
+},
+{
+"channel": "text",
+"text": ".\n\n"
+},
+{
+"channel": "text",
+"text": "Therefore"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " time"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": "\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\"
+},
+{
+"channel": "text",
+"text": "cdot"
+},
+{
+"channel": "text",
+"text": " O"
+},
+{
+"channel": "text",
+"text": "(\\"
+},
+{
+"channel": "text",
+"text": "log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ").\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "For"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "n"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": " not"
+},
+{
+"channel": "text",
+"text": " a"
+},
+{
+"channel": "text",
+"text": " power"
+},
+{
+"channel": "text",
+"text": " of"
+},
+{
+"channel": "text",
+"text": " two"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " splits"
+},
+{
+"channel": "text",
+"text": " are"
+},
+{
+"channel": "text",
+"text": " uneven"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " e"
+},
+{
+"channel": "text",
+"text": ".g"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " \\(\\"
+},
+{
+"channel": "text",
+"text": "l"
+},
+{
+"channel": "text",
+"text": "floor"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\r"
+},
+{
+"channel": "text",
+"text": "floor"
+},
+{
+"channel": "text",
+"text": "\\)"
+},
+{
+"channel": "text",
+"text": " and"
+},
+{
+"channel": "text",
+"text": " \\(\\"
+},
+{
+"channel": "text",
+"text": "l"
+},
+{
+"channel": "text",
+"text": "ceil"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": "/"
+},
+{
+"channel": "text",
+"text": "2"
+},
+{
+"channel": "text",
+"text": "\\r"
+},
+{
+"channel": "text",
+"text": "ceil"
+},
+{
+"channel": "text",
+"text": "\\),"
+},
+{
+"channel": "text",
+"text": " but"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " recursion"
+},
+{
+"channel": "text",
+"text": " depth"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " still"
+},
+{
+"channel": "text",
+"text": " \\(\\"
+},
+{
+"channel": "text",
+"text": "Theta"
+},
+{
+"channel": "text",
+"text": "(\\"
+},
+{
+"channel": "text",
+"text": "log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\),"
+},
+{
+"channel": "text",
+"text": " and"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " total"
+},
+{
+"channel": "text",
+"text": " work"
+},
+{
+"channel": "text",
+"text": " at"
+},
+{
+"channel": "text",
+"text": " each"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": " remains"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\)."
+},
+{
+"channel": "text",
+"text": " So"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " bound"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " unchanged"
+},
+{
+"channel": "text",
+"text": ".\n\n"
+},
+{
+"channel": "text",
+"text": "Finally"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " merge"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " not"
+},
+{
+"channel": "text",
+"text": " just"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": ";"
+},
+{
+"channel": "text",
+"text": " for"
+},
+{
+"channel": "text",
+"text": " comparison"
+},
+{
+"channel": "text",
+"text": "-based"
+},
+{
+"channel": "text",
+"text": " sorting"
+},
+{
+"channel": "text",
+"text": " it"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " \\(\\"
+},
+{
+"channel": "text",
+"text": "Theta"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\),"
+},
+{
+"channel": "text",
+"text": " because"
+},
+{
+"channel": "text",
+"text": " this"
+},
+{
+"channel": "text",
+"text": " upper"
+},
+{
+"channel": "text",
+"text": " bound"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " tight"
+},
+{
+"channel": "text",
+"text": " and"
+},
+{
+"channel": "text",
+"text": " comparison"
+},
+{
+"channel": "text",
+"text": " sorting"
+},
+{
+"channel": "text",
+"text": " has"
+},
+{
+"channel": "text",
+"text": " an"
+},
+{
+"channel": "text",
+"text": " \\(\\"
+},
+{
+"channel": "text",
+"text": "Omega"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": " lower"
+},
+{
+"channel": "text",
+"text": " bound"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": " Its"
+},
+{
+"channel": "text",
+"text": " extra"
+},
+{
+"channel": "text",
+"text": " space"
+},
+{
+"channel": "text",
+"text": " usage"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": " typically"
+},
+{
+"channel": "text",
+"text": " \\("
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\)"
+},
+{
+"channel": "text",
+"text": " for"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " temporary"
+},
+{
+"channel": "text",
+"text": " merge"
+},
+{
+"channel": "text",
+"text": " array"
+},
+{
+"channel": "text",
+"text": ".\n\n"
+},
+{
+"channel": "text",
+"text": "So"
+},
+{
+"channel": "text",
+"text": " the"
+},
+{
+"channel": "text",
+"text": " key"
+},
+{
+"channel": "text",
+"text": " idea"
+},
+{
+"channel": "text",
+"text": " is"
+},
+{
+"channel": "text",
+"text": ":\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "\\"
+},
+{
+"channel": "text",
+"text": "box"
+},
+{
+"channel": "text",
+"text": "ed"
+},
+{
+"channel": "text",
+"text": "{\\"
+},
+{
+"channel": "text",
+"text": "text"
+},
+{
+"channel": "text",
+"text": "{"
+},
+{
+"channel": "text",
+"text": "merge"
+},
+{
+"channel": "text",
+"text": " sort"
+},
+{
+"channel": "text",
+"text": " does"
+},
+{
+"channel": "text",
+"text": " }"
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")\\"
+},
+{
+"channel": "text",
+"text": "text"
+},
+{
+"channel": "text",
+"text": "{"
+},
+{
+"channel": "text",
+"text": " work"
+},
+{
+"channel": "text",
+"text": " per"
+},
+{
+"channel": "text",
+"text": " recursion"
+},
+{
+"channel": "text",
+"text": " level"
+},
+{
+"channel": "text",
+"text": ","
+},
+{
+"channel": "text",
+"text": " and"
+},
+{
+"channel": "text",
+"text": " there"
+},
+{
+"channel": "text",
+"text": " are"
+},
+{
+"channel": "text",
+"text": " }"
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(\\"
+},
+{
+"channel": "text",
+"text": "log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")\\"
+},
+{
+"channel": "text",
+"text": "text"
+},
+{
+"channel": "text",
+"text": "{"
+},
+{
+"channel": "text",
+"text": " levels"
+},
+{
+"channel": "text",
+"text": "."
+},
+{
+"channel": "text",
+"text": "}}\n"
+},
+{
+"channel": "text",
+"text": "\\]\n\n"
+},
+{
+"channel": "text",
+"text": "Hence"
+},
+{
+"channel": "text",
+"text": "\n\n"
+},
+{
+"channel": "text",
+"text": "\\["
+},
+{
+"channel": "text",
+"text": "\n"
+},
+{
+"channel": "text",
+"text": "\\"
+},
+{
+"channel": "text",
+"text": "box"
+},
+{
+"channel": "text",
+"text": "ed"
+},
+{
+"channel": "text",
+"text": "{T"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": ")="
+},
+{
+"channel": "text",
+"text": "O"
+},
+{
+"channel": "text",
+"text": "(n"
+},
+{
+"channel": "text",
+"text": "\\log"
+},
+{
+"channel": "text",
+"text": " n"
+},
+{
+"channel": "text",
+"text": ")."
+},
+{
+"channel": "text",
+"text": "}\n"
+},
+{
+"channel": "text",
+"text": "\\]"
+}
+]
