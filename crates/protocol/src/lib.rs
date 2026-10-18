@@ -6,4 +6,4 @@
 
 pub mod fragment;
 
-pub use fragment::{route_stream, Channel, RerouteEvent};
+pub use fragment::{route_event, route_stream, Channel, FragmentRouter, RerouteEvent};
