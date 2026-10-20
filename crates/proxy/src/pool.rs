@@ -35,6 +35,7 @@ pub struct Connection {
     request_delay: Duration,
     waiting: AtomicUsize,
     queue_limit: usize,
+    queue_timeout: Duration,
     store: crate::store::Store,
 }
 
@@ -46,6 +47,7 @@ impl Connection {
         client: Client,
         request_delay: Duration,
         queue_limit: usize,
+        queue_timeout: Duration,
         store: crate::store::Store,
     ) -> Self {
         Self {
@@ -60,6 +62,7 @@ impl Connection {
             request_delay,
             waiting: AtomicUsize::new(0),
             queue_limit,
+            queue_timeout,
             store,
         }
     }
@@ -76,7 +79,17 @@ impl Connection {
         }
         self.waiting.fetch_add(1, Ordering::Relaxed);
 
-        let guard = self.gate.clone().lock_owned().await;
+        let guard =
+            match tokio::time::timeout(self.queue_timeout, self.gate.clone().lock_owned()).await {
+                Ok(g) => g,
+                Err(_) => {
+                    self.waiting.fetch_sub(1, Ordering::Relaxed);
+                    return Err(format!(
+                        "account queue timeout after {}s",
+                        self.queue_timeout.as_secs_f64()
+                    ));
+                }
+            };
         self.waiting.fetch_sub(1, Ordering::Relaxed);
 
         let now = Instant::now();
@@ -95,9 +108,15 @@ impl Connection {
             }
         }
 
-        Ok(RateTicket {
-            guard: Some(guard),
-        })
+        Ok(RateTicket { guard: Some(guard) })
+    }
+
+    /// Hold this account out of service for `cooldown` without moving threads.
+    ///
+    /// The rate-limit backoff uses this so the gate itself sleeps: a second
+    /// timer would race `acquire()` and let the retry fire too early.
+    pub async fn cool_down(&self, cooldown: Duration) {
+        self.penalize(cooldown).await;
     }
 
     /// Mark this account unhealthy for `cooldown`.
@@ -110,9 +129,28 @@ impl Connection {
         });
     }
 
+    /// Point-in-time view of this account for `stats`.
+    pub async fn snapshot(&self, bound_threads: usize) -> ConnectionSnapshot {
+        let g = self.gate.lock().await;
+        let now = Instant::now();
+        let cooldown_ms = g
+            .cooldown_until
+            .filter(|u| *u > now)
+            .map(|u| u.saturating_duration_since(now).as_millis() as u64);
+        ConnectionSnapshot {
+            email: self.email.clone(),
+            healthy: cooldown_ms.is_none(),
+            bound_threads,
+            waiting: self.waiting.load(Ordering::Relaxed),
+            cooldown_ms,
+        }
+    }
+
     async fn healthy(&self) -> bool {
         let g = self.gate.lock().await;
-        g.cooldown_until.map(|u| u <= Instant::now()).unwrap_or(true)
+        g.cooldown_until
+            .map(|u| u <= Instant::now())
+            .unwrap_or(true)
     }
 
     /// Re-login, replacing the client. Resume ids stay valid.
@@ -164,6 +202,16 @@ impl Connection {
     }
 }
 
+/// One account's state, as reported by `GET /stats`.
+#[derive(Debug, Clone)]
+pub struct ConnectionSnapshot {
+    pub email: String,
+    pub healthy: bool,
+    pub bound_threads: usize,
+    pub waiting: usize,
+    pub cooldown_ms: Option<u64>,
+}
+
 /// Holds an account's rate slot; release is implicit on drop.
 pub struct RateTicket {
     guard: Option<OwnedMutexGuard<GateState>>,
@@ -180,14 +228,17 @@ impl Drop for RateTicket {
 pub struct PoolConfig {
     pub request_delay: Duration,
     pub queue_limit: usize,
+    /// Max time to wait for a busy account's rate slot. Python: `QUEUE_TIMEOUT`.
+    pub queue_timeout: Duration,
     pub login_cooldown: Duration,
 }
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            request_delay: Duration::from_secs(2),
+            request_delay: Duration::ZERO,
             queue_limit: 64,
+            queue_timeout: Duration::from_secs(120),
             login_cooldown: Duration::from_secs(300),
         }
     }
@@ -227,6 +278,7 @@ impl Pool {
                 Client::from_token(String::new()),
                 config.request_delay,
                 config.queue_limit,
+                config.queue_timeout,
                 store.clone(),
             );
             let client = conn
@@ -246,6 +298,12 @@ impl Pool {
 
     pub fn len(&self) -> usize {
         self.conns.len()
+    }
+
+    /// First account, without binding a thread to it. Used for health probes
+    /// that must not leave a fake thread in the database.
+    pub fn any(&self) -> Arc<Connection> {
+        self.conns[0].clone()
     }
 
     #[allow(dead_code)] // used by tests and future admin UI
@@ -271,7 +329,7 @@ impl Pool {
             .flatten()
             .and_then(|email| self.conns.iter().position(|c| c.email == email));
 
-        let idx = bound.unwrap_or_else(|| 0);
+        let idx = bound.unwrap_or(0);
         let chosen = if bound.is_some() {
             idx
         } else {
@@ -321,9 +379,7 @@ impl Pool {
             owner.get(thread_id).copied()
         };
         if let Some(idx) = current {
-            self.conns[idx]
-                .penalize(self.config.login_cooldown)
-                .await;
+            self.conns[idx].penalize(self.config.login_cooldown).await;
         }
         self.owner.lock().await.remove(thread_id);
 
@@ -353,6 +409,17 @@ impl Pool {
         Some(self.conns[chosen].clone())
     }
 
+    /// Per-account state plus how many threads each one owns.
+    pub async fn snapshot(&self) -> Vec<ConnectionSnapshot> {
+        let counts = self.occupancy().await;
+        let mut out = Vec::with_capacity(self.conns.len());
+        for c in &self.conns {
+            let bound = counts.get(&c.email).copied().unwrap_or(0);
+            out.push(c.snapshot(bound).await);
+        }
+        out
+    }
+
     /// Try to re-login an account (invalid/expired token recovery).
     pub async fn recover(&self, conn: &Arc<Connection>) -> bool {
         conn.reconnect().await.is_ok()
@@ -378,4 +445,50 @@ pub fn is_login_dead(msg: &str) -> bool {
 pub fn is_invalid_token(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("invalidtoken") || m.contains("invalid token") || m.contains("40003")
+}
+
+/// Markers that mean "throttled, come back later" rather than "broken".
+///
+/// Verbatim from `_RATE_LIMIT_MARKERS` in `deepseek_proxy/backend.py`, including
+/// the deliberately broad `busy`/`too many` entries the Python proxy shipped.
+const RATE_LIMIT_MARKERS: [&str; 10] = [
+    "rate_limit",
+    "rate limit",
+    "too frequent",
+    "too many",
+    "429",
+    "throttl",
+    "overloaded",
+    "busy",
+    "generation_err",
+    "server is temporarily unavailable",
+];
+
+/// True when the error is a throttle, i.e. retrying with backoff can work.
+pub fn is_rate_limit(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    RATE_LIMIT_MARKERS.iter().any(|k| m.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_throttles_not_auth() {
+        assert!(is_rate_limit(
+            "upstream hint error: Messages too frequent. Try again later."
+        ));
+        assert!(is_rate_limit("rate_limit_reached"));
+        assert!(!is_rate_limit("invalid token"));
+        assert!(!is_rate_limit("login failed: risk_device"));
+    }
+
+    #[test]
+    fn rate_limit_markers_do_not_claim_login_errors() {
+        for msg in ["login failed", "risk_device", "authentication failed"] {
+            assert!(!is_rate_limit(msg), "{msg} must be a login error");
+            assert!(is_login_dead(msg));
+        }
+    }
 }

@@ -5,6 +5,7 @@
 //! abstraction (that was the main source of monkey-patching in Python).
 
 pub mod device_ids;
+pub mod images;
 
 pub use device_ids::get_device_id;
 
@@ -15,6 +16,25 @@ use thiserror::Error;
 
 pub const BASE_URL: &str = "https://chat.deepseek.com";
 pub const COMPLETION_PATH: &str = "/api/v0/chat/completion";
+pub const UPLOAD_PATH: &str = "/api/v0/file/upload_file";
+const FETCH_FILES_PATH: &str = "/api/v0/file/fetch_files";
+
+/// Upload statuses the server reports while it is still ingesting the file.
+const UPLOAD_PENDING_STATUSES: [&str; 4] = ["PENDING", "PROCESSING", "UPLOADING", "PARSING"];
+/// Seconds between `/file/fetch_files` polls (Python: `_UPLOAD_POLL_INTERVAL`).
+const UPLOAD_POLL_INTERVAL_SECS: f64 = 2.0;
+/// Give up polling after this long (Python: `_UPLOAD_POLL_TIMEOUT`).
+const UPLOAD_POLL_TIMEOUT_SECS: f64 = 30.0;
+
+/// An image the backend has accepted and that a completion can reference via
+/// `ref_file_ids`.
+#[derive(Debug, Clone)]
+pub struct UploadedImage {
+    pub file_id: String,
+    pub size_bytes: usize,
+    pub width: u32,
+    pub height: u32,
+}
 const LOGIN_PATH: &str = "/api/v0/users/login";
 const SESSION_CREATE_PATH: &str = "/api/v0/chat_session/create";
 const POW_CHALLENGE_PATH: &str = "/api/v0/chat/create_pow_challenge";
@@ -263,6 +283,140 @@ impl Client {
             serde_json::to_string(target_path)?,
         );
         Ok(base64::engine::general_purpose::STANDARD.encode(payload))
+    }
+
+    /// Poll `/file/fetch_files` until the upload leaves a pending status.
+    ///
+    /// Port of `_FilesClient._wait_for_file`: `CONTENT_EMPTY` and any
+    /// `*ERROR*`/`*FAIL*` status are hard failures, and the deadline is wall
+    /// clock, not per-poll.
+    async fn wait_for_file(&self, file_id: &str) -> Result<String, ClientError> {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(UPLOAD_POLL_TIMEOUT_SECS);
+        loop {
+            let resp = self
+                .http
+                .get(format!("{BASE_URL}{FETCH_FILES_PATH}"))
+                .headers(self.authed_headers())
+                .query(&[("file_ids", file_id)])
+                .send()
+                .await?;
+            let body: Value = resp.json().await?;
+            let file = body
+                .pointer("/data/biz_data/files")
+                .and_then(|f| f.as_array())
+                .and_then(|f| f.first())
+                .ok_or_else(|| {
+                    ClientError::Shape(format!("fetch_files: empty list for {file_id}"))
+                })?;
+            let status = file
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            if !UPLOAD_PENDING_STATUSES.contains(&status.as_str()) {
+                if status == "CONTENT_EMPTY" {
+                    return Err(ClientError::Api {
+                        code: 0,
+                        message: format!(
+                            "uploaded file {file_id} rejected by DeepSeek: CONTENT_EMPTY"
+                        ),
+                    });
+                }
+                if status.to_ascii_uppercase().contains("ERROR")
+                    || status.to_ascii_uppercase().contains("FAIL")
+                {
+                    return Err(ClientError::Shape(format!(
+                        "file processing failed: status={status} meta={file}"
+                    )));
+                }
+                return Ok(status);
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Err(ClientError::Shape(format!(
+                    "timed out waiting for file {file_id} (last status={status})"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs_f64(
+                UPLOAD_POLL_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    }
+
+    /// Upload PNG/JPEG bytes and return the id a completion can reference.
+    ///
+    /// Port of `_FilesClient._upload_image`: a PoW challenge scoped to the
+    /// upload path, a multipart body, then polling until the file is ready.
+    pub async fn upload_image(
+        &self,
+        data: &[u8],
+        model: &str,
+    ) -> Result<UploadedImage, ClientError> {
+        let meta = images::meta(data).map_err(ClientError::Shape)?;
+        let filename = if meta.mime == "image/png" {
+            "image.png"
+        } else {
+            "image.jpg"
+        };
+        let pow = self.pow_header(UPLOAD_PATH).await?;
+
+        let mut headers = self.authed_headers();
+        // reqwest sets the multipart boundary itself; the base header would
+        // override it and the server would reject the body.
+        headers.remove(reqwest::header::CONTENT_TYPE);
+        for (name, value) in [
+            ("x-ds-pow-response", pow),
+            ("x-thinking-enabled", "0".to_string()),
+            ("x-file-size", data.len().to_string()),
+            ("x-model-type", model.to_string()),
+        ] {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .expect("static header name"),
+                reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
+                    ClientError::Shape(format!("header {name}: {e}"))
+                })?,
+            );
+        }
+
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(meta.mime)
+            .map_err(|e| ClientError::Shape(format!("multipart: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let resp = self
+            .http
+            .post(format!("{BASE_URL}{UPLOAD_PATH}"))
+            .headers(headers)
+            .multipart(form)
+            .send()
+            .await?;
+        let body: Value = resp.json().await?;
+        let file_id = body
+            .pointer("/data/biz_data/id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ClientError::Shape(format!("upload: {body}")))?
+            .to_string();
+        let status = body
+            .pointer("/data/biz_data/status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if UPLOAD_PENDING_STATUSES.contains(&status.as_str()) {
+            self.wait_for_file(&file_id).await?;
+        }
+
+        Ok(UploadedImage {
+            file_id,
+            size_bytes: data.len(),
+            width: meta.width,
+            height: meta.height,
+        })
     }
 
     /// Start a streaming completion. Caller drives the byte stream.

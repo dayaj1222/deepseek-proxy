@@ -13,6 +13,11 @@ port = 9174
 
 [storage]
 # SQLite file holding thread resume state and API-key hashes.
+#
+# Relative values resolve against this file's directory, never the process
+# cwd, so `deepseek-rs serve` launched from /tmp or a systemd unit uses the
+# same threads and keys. Override with DB_PATH when you want a second
+# instance on its own database.
 db_path = "deepseek-rs.db"
 
 [deepseek]
@@ -35,7 +40,7 @@ search = false
 # back-to-back requests on one account, and 10 concurrent thinking+search
 # requests, all returned 200 with no upstream rate-limit error. Raise this only
 # if you actually see `rate_limit_reached` or "Messages too frequent".
-request_delay_secs = 0.0
+request_delay_secs = 2
 
 # How many requests may queue behind a busy account before being rejected.
 queue_limit = 64
@@ -43,8 +48,31 @@ queue_limit = 64
 # How long an account is skipped after a failed login, in seconds.
 login_cooldown_secs = 300
 
-# Re-assert the tool-call wire format every N user/tool messages on a thread.
-# The system prompt (which teaches the format) is only sent on the first turn,
-# so long threads drift and start emitting malformed blocks. 1 = every turn.
-# 0 disables it (the Python proxy's default).
-tool_reminder_interval = 1
+# How long a request may wait for a busy account's rate slot, in seconds.
+# Python: QUEUE_TIMEOUT. Without this a leaked slot blocks every later request
+# on that account forever, silently — nothing is logged because no upstream
+# call has been made yet. Times out as HTTP 503 queue_unavailable.
+queue_timeout_secs = 120
+
+# Wall-clock budget for one turn, in seconds (Python: REQUEST_TIMEOUT).
+# A stalled upstream becomes a 504 request_timeout instead of a hang.
+request_timeout_secs = 300
+
+# SSE keep-alive interval in seconds (Python: HEARTBEAT_INTERVAL). Emits
+# `: keep-alive` while the upstream is quiet; it does not abort the turn.
+heartbeat_interval_secs = 10
+
+# Retries for a throttled turn ("Messages too frequent", `rate_limit_reached`),
+# applied BEFORE the first byte so streaming callers can still be retried.
+# Mirrors the Python proxy's RATE_LIMIT_MAX_RETRIES / RATE_LIMIT_BACKOFF_S.
+# The wait is backoff * min(attempt + 1, retries) and floors at 0.5s.
+rate_limit_max_retries = 5
+rate_limit_backoff_secs = 10.0
+
+# Correction turns for malformed tool calls. 0 disables repair.
+# Mirrors the Python proxy's TOOL_REPAIR_MAX_RETRIES.
+tool_repair_max_retries = 5
+
+# The tool-call wire format is re-asserted on EVERY turn, appended to the end
+# of the outgoing prompt. The system prompt that teaches the format is only
+# sent on the first turn, so long threads drift without this. Not tunable.

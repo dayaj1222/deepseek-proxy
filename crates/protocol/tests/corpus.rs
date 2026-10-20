@@ -43,10 +43,9 @@ fn cases() -> Vec<(String, PathBuf, PathBuf)> {
 fn matches_python_router_on_all_captured_streams() {
     for (name, sse, expected_path) in cases() {
         let raw = std::fs::read_to_string(&sse).expect("read sse");
-        let expected: Vec<RerouteEvent> = serde_json::from_str(
-            &std::fs::read_to_string(&expected_path).expect("read expected"),
-        )
-        .expect("parse expected json");
+        let expected: Vec<RerouteEvent> =
+            serde_json::from_str(&std::fs::read_to_string(&expected_path).expect("read expected"))
+                .expect("parse expected json");
 
         let actual = route_stream(&raw);
 

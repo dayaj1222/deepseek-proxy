@@ -86,7 +86,10 @@ fn fragment_type(fragment: &Value) -> String {
 }
 
 fn fragment_content(fragment: &Value) -> &str {
-    fragment.get("content").and_then(|v| v.as_str()).unwrap_or("")
+    fragment
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
 }
 
 fn looks_like_fragment_list(value: &Value) -> bool {
@@ -94,9 +97,10 @@ fn looks_like_fragment_list(value: &Value) -> bool {
         return false;
     };
     !items.is_empty()
-        && items
-            .iter()
-            .all(|i| i.as_object().is_some_and(|o| o.contains_key("type") || o.contains_key("id")))
+        && items.iter().all(|i| {
+            i.as_object()
+                .is_some_and(|o| o.contains_key("type") || o.contains_key("id"))
+        })
 }
 
 /// Route one parsed SSE event, appending to `out`.
@@ -154,7 +158,10 @@ pub fn route_event(event: &Value, router: &mut FragmentRouter, out: &mut Vec<Rer
     }
 
     // APPEND declaration: includes the fragment's first token.
-    if o == "APPEND" && p == "response/fragments" && looks_like_fragment_list(v.unwrap_or(&Value::Null)) {
+    if o == "APPEND"
+        && p == "response/fragments"
+        && looks_like_fragment_list(v.unwrap_or(&Value::Null))
+    {
         for fragment in v.and_then(|v| v.as_array()).into_iter().flatten() {
             router.declare(std::slice::from_ref(fragment));
             let content = fragment_content(fragment);
@@ -174,9 +181,22 @@ pub fn route_event(event: &Value, router: &mut FragmentRouter, out: &mut Vec<Rer
     }
 
     // Content chunk for the current fragment.
+    //
+    // aiodeepseek's `_extract_fragment` documents three shapes that carry text,
+    // and the third is `{"o": "APPEND", "v": "<fragment>"}` with **no path at
+    // all**. Requiring `p == "response/fragments/-1/content"` for APPEND — as
+    // this function used to — silently dropped those deltas, and a turn that
+    // produced only such deltas ended as a clean "empty response". Accept an
+    // APPEND with an empty path too.
+    //
+    // `p` is compared with surrounding slashes trimmed so an absolute pointer
+    // (`/response/fragments/-1/content`) is not dropped either; unknown patch
+    // paths are still never treated as text.
+    let p_norm = p.trim_matches('/');
     let is_text_delta = matches!(v, Some(Value::String(_)))
-        && ((o.is_empty() && p.is_empty())
-            || ((o.is_empty() || o == "APPEND") && p == "response/fragments/-1/content"));
+        && ((o.is_empty() && p_norm.is_empty())
+            || ((o.is_empty() || o == "APPEND") && p_norm == "response/fragments/-1/content")
+            || (o == "APPEND" && p_norm.is_empty()));
 
     if is_text_delta {
         let text = v.and_then(|v| v.as_str()).unwrap_or("");
@@ -228,7 +248,8 @@ pub enum LineKind {
     Ignored,
     /// A normal event, already parsed so the caller need not parse it again.
     Event(Value),
-    /// A fatal `event: hint` error sent by the upstream.
+    /// A fatal `event: hint` error, exactly as aiodeepseek defines it:
+    /// `event: hint` followed by `{"type": "error", ...}`.
     HintError { content: String },
 }
 
@@ -258,26 +279,53 @@ pub fn classify_line(line: &str, current_event: &mut String) -> LineKind {
         return LineKind::Ignored;
     }
 
+    let was_hint = *current_event == "hint";
     let Ok(value) = serde_json::from_str::<Value>(payload) else {
         current_event.clear();
         return LineKind::Ignored;
     };
-
-    let is_hint = *current_event == "hint"
-        && value.get("type").and_then(|t| t.as_str()) == Some("error");
     current_event.clear();
 
-    if is_hint {
+    // Exactly aiodeepseek's test: the event name must be `hint` AND the payload
+    // must carry `type == "error"`. Anything else is a normal message, even if
+    // it happens to contain an `error` field.
+    if was_hint && value.get("type").and_then(|t| t.as_str()) == Some("error") {
         LineKind::HintError {
-            content: value
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or_default()
-                .to_string(),
+            content: hint_message(&value),
         }
     } else {
         LineKind::Event(value)
     }
+}
+
+/// Message for a fatal hint.
+///
+/// Mirrors `raise_for_sse_hint()`: `content` is the payload field, and when the
+/// registered patterns do not match aiodeepseek raises
+/// `SSE hint error: finish_reason=... content=...`. That fallback keeps the
+/// finish reason in the log, which is what tells throttle from context limit.
+fn hint_message(value: &Value) -> String {
+    let content = value.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    if !content.trim().is_empty() {
+        return content.to_string();
+    }
+    let finish_reason = value
+        .get("finish_reason")
+        .and_then(|f| f.as_str())
+        .unwrap_or("");
+    format!("SSE hint error: finish_reason={finish_reason:?} content={content:?}")
+}
+
+/// True when the backend rejected the conversation cursor itself.
+///
+/// DeepSeek answers with a JSON body and HTTP 200 — `{"code":26,
+/// "biz_msg":"invalid message id"}` — when `parent_message_id` no longer
+/// exists (deleted thread, rebuilt session, or a cursor saved before a reset).
+/// The session is fine; only the cursor is stale, so clearing it and retrying
+/// recovers the turn without discarding the remote conversation.
+pub fn is_invalid_message_id(content: &str) -> bool {
+    let m = content.to_ascii_lowercase();
+    m.contains("invalid message id") || m.contains("\"code\":26") || m.contains("code:26")
 }
 
 /// True when an upstream hint says the prompt no longer fits the session.
@@ -307,10 +355,35 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                RerouteEvent { channel: Channel::Text, text: "hello".into() },
-                RerouteEvent { channel: Channel::Text, text: " world".into() },
+                RerouteEvent {
+                    channel: Channel::Text,
+                    text: "hello".into()
+                },
+                RerouteEvent {
+                    channel: Channel::Text,
+                    text: " world".into()
+                },
             ]
         );
+    }
+
+    #[test]
+    fn append_without_path_is_text() {
+        // aiodeepseek's `_extract_fragment` accepts `{"o":"APPEND","v":"..."}`
+        // with no path. Dropping it made turns that used only this shape end
+        // as a clean "empty response".
+        let mut r = FragmentRouter::new();
+        let mut out = ev();
+        route_event(&json!({"o": "APPEND", "v": "hello"}), &mut r, &mut out);
+        route_event(
+            &json!({"o": "APPEND", "p": "/response/fragments/-1/content", "v": "!"}),
+            &mut r,
+            &mut out,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|e| e.channel == Channel::Text));
+        assert_eq!(out[0].text, "hello");
+        assert_eq!(out[1].text, "!");
     }
 
     #[test]
@@ -398,12 +471,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_error_payload_without_hint_event_is_normal() {
+        // aiodeepseek only raises on `event: hint` + `type == "error"`. An
+        // error-shaped payload under a normal event must stay a message,
+        // otherwise a benign field named `error` would abort the turn.
+        let mut ev = String::new();
+        assert!(matches!(
+            classify_line("data: {\"type\":\"error\",\"content\":\"x\"}", &mut ev),
+            LineKind::Event(_)
+        ));
+    }
+
+    #[test]
     fn classify_hint_without_error_type_is_normal() {
         let mut ev = String::new();
         assert_eq!(classify_line("event: hint", &mut ev), LineKind::Ignored);
         assert!(matches!(
             classify_line("data: {\"type\":\"info\"}", &mut ev),
             LineKind::Event(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_message_id_is_recognised() {
+        assert!(is_invalid_message_id(
+            "non-SSE upstream body: {\"code\":26,\"biz_msg\":\"invalid message id\",\"biz_data\":null}"
+        ));
+        assert!(!is_invalid_message_id(
+            "non-SSE upstream body: {\"code\":3,\"biz_msg\":\"rate limit\"}"
         ));
     }
 

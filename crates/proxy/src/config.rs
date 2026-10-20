@@ -5,7 +5,7 @@
 //! config file invites silent divergence from the server.
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// File-backed configuration. Every field is optional; unset means "use the
 /// default", so a partial `config.toml` is valid.
@@ -78,12 +78,29 @@ pub struct LimitsSection {
     pub request_delay_secs: f64,
     /// Requests allowed to queue behind a busy account before rejecting.
     pub queue_limit: usize,
+    /// Max time to wait for a busy account's slot, in seconds. Python:
+    /// `QUEUE_TIMEOUT` (default 120).
+    pub queue_timeout_secs: f64,
     /// Cooldown for an account that fails to log in, in seconds.
     pub login_cooldown_secs: u64,
-    /// Re-assert the tool-call wire format every N user/tool messages on a
-    /// thread. 0 disables it, matching the Python proxy's
-    /// `TOOL_REMINDER_INTERVAL` default.
-    pub tool_reminder_interval: usize,
+    /// Retries for a throttled turn, before the first byte. Python:
+    /// `RATE_LIMIT_MAX_RETRIES`.
+    pub rate_limit_max_retries: u32,
+    /// Base backoff in seconds, multiplied by the attempt number. Python:
+    /// `RATE_LIMIT_BACKOFF_S` (and it floors at 0.5s).
+    pub rate_limit_backoff_secs: f64,
+    /// Correction turns for malformed tool calls. Python:
+    /// `TOOL_REPAIR_MAX_RETRIES`.
+    pub tool_repair_max_retries: u32,
+    /// Wall-clock budget for one turn, in seconds. Python:
+    /// `REQUEST_TIMEOUT` (default 300), applied by `asyncio.timeout` around the
+    /// whole turn. Without it a stalled upstream socket hangs the request
+    /// forever and nothing is ever logged.
+    pub request_timeout_secs: f64,
+    /// SSE keep-alive interval in seconds. Python: `HEARTBEAT_INTERVAL`
+    /// (default 10). Clients and proxies drop an idle stream otherwise.
+    pub heartbeat_interval_secs: f64,
+    pub image_max_bytes: usize,
 }
 
 impl Default for LimitsSection {
@@ -94,8 +111,14 @@ impl Default for LimitsSection {
             // `rate_limit_reached` / `Messages too frequent`.
             request_delay_secs: 0.0,
             queue_limit: 64,
+            queue_timeout_secs: 120.0,
             login_cooldown_secs: 300,
-            tool_reminder_interval: 0,
+            rate_limit_max_retries: 3,
+            rate_limit_backoff_secs: 10.0,
+            tool_repair_max_retries: 3,
+            request_timeout_secs: 300.0,
+            heartbeat_interval_secs: 10.0,
+            image_max_bytes: 10 * 1024 * 1024,
         }
     }
 }
@@ -111,8 +134,14 @@ pub struct Config {
     pub search: bool,
     pub request_delay_secs: f64,
     pub queue_limit: usize,
+    pub queue_timeout_secs: f64,
     pub login_cooldown_secs: u64,
-    pub tool_reminder_interval: usize,
+    pub rate_limit_max_retries: u32,
+    pub rate_limit_backoff_secs: f64,
+    pub tool_repair_max_retries: u32,
+    pub request_timeout_secs: f64,
+    pub heartbeat_interval_secs: f64,
+    pub image_max_bytes: usize,
 }
 
 impl Config {
@@ -120,13 +149,17 @@ impl Config {
     ///
     /// `CONFIG_PATH` selects a different file; a missing file is not an error.
     pub fn load() -> Result<Self, String> {
-        let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.toml".into());
+        let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| default_config_path());
         let file = Self::read_file(&path)?;
 
         Ok(Self {
             host: env_str("PROXY_HOST").unwrap_or(file.proxy.host),
             port: env_num("PROXY_PORT").unwrap_or(file.proxy.port),
-            db_path: env_str("DB_PATH").unwrap_or(file.storage.db_path),
+            db_path: env_str("DB_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| anchor_path(&path, &file.storage.db_path))
+                .to_string_lossy()
+                .into_owned(),
             model: env_str("MODEL_NAME").unwrap_or(file.deepseek.model),
             thinking: env_flag("THINKING_ENABLED", file.deepseek.thinking),
             search: env_flag("SEARCH_ENABLED", file.deepseek.search),
@@ -134,10 +167,26 @@ impl Config {
                 .unwrap_or(file.limits.request_delay_secs)
                 .max(0.0),
             queue_limit: env_num("QUEUE_LIMIT").unwrap_or(file.limits.queue_limit),
+            queue_timeout_secs: env_num("QUEUE_TIMEOUT")
+                .unwrap_or(file.limits.queue_timeout_secs)
+                .max(1.0),
             login_cooldown_secs: env_num("LOGIN_COOLDOWN")
                 .unwrap_or(file.limits.login_cooldown_secs),
-            tool_reminder_interval: env_num("TOOL_REMINDER_INTERVAL")
-                .unwrap_or(file.limits.tool_reminder_interval),
+            rate_limit_max_retries: env_num("RATE_LIMIT_MAX_RETRIES")
+                .unwrap_or(file.limits.rate_limit_max_retries),
+            rate_limit_backoff_secs: env_num("RATE_LIMIT_BACKOFF_S")
+                .unwrap_or(file.limits.rate_limit_backoff_secs)
+                .max(0.0),
+            tool_repair_max_retries: env_num("TOOL_REPAIR_MAX_RETRIES")
+                .unwrap_or(file.limits.tool_repair_max_retries),
+            request_timeout_secs: env_num("REQUEST_TIMEOUT")
+                .unwrap_or(file.limits.request_timeout_secs)
+                .max(1.0),
+            heartbeat_interval_secs: env_num("HEARTBEAT_INTERVAL")
+                .unwrap_or(file.limits.heartbeat_interval_secs)
+                .max(1.0),
+            image_max_bytes: env_num("IMAGE_MAX_BYTES")
+                .unwrap_or(file.limits.image_max_bytes),
         })
     }
 
@@ -148,6 +197,34 @@ impl Config {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
         toml::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))
     }
+}
+
+/// Resolve a relative path against the config file's directory, so a relative
+/// `db_path` means "next to config.toml" rather than "wherever the process was
+/// started". Absolute paths pass through untouched.
+fn anchor_path(config_path: &str, value: &str) -> PathBuf {
+    let p = PathBuf::from(value);
+    if p.is_absolute() {
+        return p;
+    }
+    match Path::new(config_path).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(p),
+        _ => p,
+    }
+}
+
+/// Default `config.toml` location: the repo root this binary was built from,
+/// not the process working directory. Running the server from `/` or from a
+/// systemd unit must still pick up the checked-in config.
+fn default_config_path() -> String {
+    // Compiled-in repo root; `config.rs` lives at <root>/crates/proxy/src/.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let candidate = root.join("config.toml");
+    if candidate.exists() {
+        return candidate.to_string_lossy().into_owned();
+    }
+    // Packaged/moved binary: fall back to the working directory.
+    "config.toml".into()
 }
 
 fn env_str(key: &str) -> Option<String> {
@@ -187,7 +264,20 @@ mod tests {
         assert_eq!(f.proxy.port, 9174);
         assert_eq!(f.storage.db_path, "deepseek-rs.db");
         assert_eq!(f.limits.queue_limit, 64);
-        assert_eq!(f.limits.tool_reminder_interval, 0);
+    }
+
+    #[test]
+    fn relative_db_path_is_anchored_to_the_config_dir() {
+        let got = anchor_path("/srv/app/config.toml", "data/deepseek-rs.db");
+        assert_eq!(got, PathBuf::from("/srv/app/data/deepseek-rs.db"));
+        // Absolute values are left alone, whatever the config location.
+        let abs = anchor_path("/srv/app/config.toml", "/var/lib/ds.db");
+        assert_eq!(abs, PathBuf::from("/var/lib/ds.db"));
+        // Bare filename with no directory component: never becomes absolute.
+        assert_eq!(
+            anchor_path("config.toml", "deepseek-rs.db"),
+            PathBuf::from("deepseek-rs.db")
+        );
     }
 
     #[test]

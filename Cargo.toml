@@ -10,7 +10,9 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "net", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 base64 = "0.22"
 thiserror = "2"
+# JSON Schema validation for tool arguments (Python: jsonschema Draft202012).
+jsonschema = { version = "0.59", default-features = false }

@@ -26,6 +26,34 @@ pub struct ThreadResume {
     pub parent_message_id: Option<String>,
 }
 
+/// One account added through the CLI (`deepseek-rs accounts add`).
+#[derive(Debug, Clone)]
+pub struct AccountRow {
+    pub email: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub created_at: i64,
+}
+
+/// One registered API key (only its hash is stored).
+#[derive(Debug, Clone)]
+pub struct ApiKeyRow {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    pub created_at: i64,
+}
+
+/// Row counts for `deepseek-rs stats` when the server is not running.
+#[derive(Debug, Clone, Default)]
+pub struct DbCounts {
+    pub threads: i64,
+    pub bindings: i64,
+    pub api_keys: i64,
+    pub accounts: i64,
+    pub cached_tokens: i64,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite: {0}")]
@@ -79,6 +107,14 @@ impl Store {
                  email      TEXT PRIMARY KEY,
                  token      TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
+             );
+             -- Accounts added with the CLI. Environment credentials still work
+             -- and are merged on top of these at startup.
+             CREATE TABLE IF NOT EXISTS accounts (
+                 email      TEXT PRIMARY KEY,
+                 password   TEXT NOT NULL DEFAULT '',
+                 token      TEXT,
+                 created_at INTEGER NOT NULL
              );",
         )?;
         Ok(())
@@ -136,8 +172,109 @@ impl Store {
     /// Drop a cached token (it was rejected upstream).
     pub fn forget_token(&self, email: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute("DELETE FROM account_tokens WHERE email = ?1", params![email])?;
+        conn.execute(
+            "DELETE FROM account_tokens WHERE email = ?1",
+            params![email],
+        )?;
         Ok(())
+    }
+
+    /// Accounts added through the CLI, oldest first.
+    pub fn accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT email, password, token, created_at FROM accounts
+             ORDER BY created_at, email",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AccountRow {
+                email: r.get(0)?,
+                password: r.get(1)?,
+                token: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Insert or update an account. An empty password keeps the stored one, and
+    /// `None` keeps the stored token.
+    pub fn upsert_account(
+        &self,
+        email: &str,
+        password: &str,
+        token: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "INSERT INTO accounts (email, password, token, created_at)
+             VALUES (?1, ?2, ?3, unixepoch())
+             ON CONFLICT(email) DO UPDATE SET
+                 password = CASE WHEN excluded.password = ''
+                                 THEN accounts.password ELSE excluded.password END,
+                 token    = COALESCE(excluded.token, accounts.token)",
+            params![email, password, token],
+        )?;
+        Ok(())
+    }
+
+    /// Remove an account and any token cached for it. True when a row was deleted.
+    pub fn delete_account(&self, email: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n = conn.execute("DELETE FROM accounts WHERE email = ?1", params![email])?;
+        conn.execute(
+            "DELETE FROM account_tokens WHERE email = ?1",
+            params![email],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn api_keys(&self) -> Result<Vec<ApiKeyRow>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, name, key_prefix, created_at FROM api_keys
+             ORDER BY created_at, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ApiKeyRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                prefix: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Revoke by name or id. Returns how many rows were removed.
+    pub fn delete_api_key(&self, name_or_id: &str) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn.execute(
+            "DELETE FROM api_keys WHERE name = ?1 OR id = ?1",
+            params![name_or_id],
+        )?)
+    }
+
+    /// Cheap row counts for `stats` when the server is not running.
+    pub fn counts(&self) -> Result<DbCounts, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let one =
+            |sql: &str| -> Result<i64, rusqlite::Error> { conn.query_row(sql, [], |r| r.get(0)) };
+        Ok(DbCounts {
+            threads: one("SELECT COUNT(*) FROM threads")?,
+            bindings: one("SELECT COUNT(*) FROM thread_bindings")?,
+            api_keys: one("SELECT COUNT(*) FROM api_keys")?,
+            accounts: one("SELECT COUNT(*) FROM accounts")?,
+            cached_tokens: one("SELECT COUNT(*) FROM account_tokens")?,
+        })
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadResume>, StoreError> {
@@ -157,11 +294,7 @@ impl Store {
         Ok(row)
     }
 
-    pub fn save_thread(
-        &self,
-        thread_id: &str,
-        resume: &ThreadResume,
-    ) -> Result<(), StoreError> {
+    pub fn save_thread(&self, thread_id: &str, resume: &ThreadResume) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
         conn.execute(
             "INSERT INTO threads (thread_id, session_id, parent_message_id, updated_at)
@@ -178,7 +311,10 @@ impl Store {
     #[allow(dead_code)] // used by tests and future admin UI
     pub fn delete_thread(&self, thread_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
-        conn.execute("DELETE FROM threads WHERE thread_id = ?1", params![thread_id])?;
+        conn.execute(
+            "DELETE FROM threads WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
         Ok(())
     }
 
@@ -271,7 +407,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            s.get_thread("t1").unwrap().unwrap().parent_message_id.as_deref(),
+            s.get_thread("t1")
+                .unwrap()
+                .unwrap()
+                .parent_message_id
+                .as_deref(),
             Some("43"),
             "upsert must overwrite"
         );

@@ -4,3 +4,5 @@ target/
 *.db-wal
 .run/
 .env
+*.log
+*.db.pre-local-*

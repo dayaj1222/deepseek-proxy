@@ -2,8 +2,10 @@
 
 Single-binary Rust port of the Python `aiodeepseek` client + `deepseek_proxy`.
 
-The Python implementation in `../deepseek` stays authoritative until parity is
-proven; this repo is the port target.
+**This is the canonical implementation.** The Python proxy this was ported
+from is preserved unchanged on the `python-archive` branch (tag
+`python-final`) for reference and for the captured SSE corpus — not for
+running.
 
 ## Status
 
@@ -41,6 +43,7 @@ crates/pow       DeepSeekHashV1 + multithreaded nonce search
 crates/protocol  SSE parsing + fragment routing + OpenAI chunk shaping
 crates/proxy     axum server, tool dialect, SQLite storage, auth
 corpus/          real captured SSE streams used as test fixtures
+python-archive   (branch) the Python implementation this replaced
 ```
 
 ## Corpus
@@ -62,3 +65,79 @@ Regenerate expectations with:
 cargo build --release
 cargo test
 ```
+
+## CLI
+
+One binary, `deepseek-rs`. `serve` is the only long-running command; everything
+else is short-lived.
+
+```
+SERVER
+  serve                       run in the foreground (Ctrl-C to stop)
+  start                       run in the background, wait until healthy
+  stop                        SIGTERM (SIGKILL after 15s)
+  restart                     stop, then start
+  status                      pid, url, uptime, account count
+  health                      one-shot health check (exit 1 when down)
+  stats [--json]              counters, per-account state, db counts
+
+LOGS
+  logs [-n N] [-f] [--path P] last N lines (default 50); -f follows
+
+ACCOUNTS
+  accounts                    list accounts + where they come from
+  accounts add <email> <password>
+  accounts add <email> --token <token>
+  accounts rm <email>
+
+API KEYS
+  keys                        list (name, prefix, id, created)
+  keys add <name> <key>       alias: key <name> <key>
+  keys rm <name|id>
+
+MISC
+  check | url | version | help
+```
+
+Accounts can live in two places: the environment (`DEEPSEEK_EMAIL_<i>` etc.,
+which also reads `../deepseek/.env`) and the `accounts` table in SQLite, written
+by `accounts add`. Environment entries win on an email collision, and neither
+kind needs the other to exist.
+
+Background mode keeps a pidfile and a log file under `DEEPSEEK_RUNTIME_DIR`
+(default `${XDG_STATE_HOME:-~/.local/state}/deepseek-rs`). `start` only returns
+success once `/healthz` answers, so a script can chain on it. `serve` claims the
+pidfile too, so a second instance fails immediately instead of fighting over the
+SQLite lock.
+
+`GET /stats` backs both `stats` and `status`:
+
+```json
+{"pid":0,"uptime_secs":0,"model":"...","thinking":false,"search":false,
+ "requests":{"total":0,"ok":0,"errors":0,"auth_failed":0,"retries":0,"tool_calls":0},
+ "threads":{"in_memory":0},
+ "db":{"threads":0,"bindings":0,"api_keys":0,"accounts":0,"cached_tokens":0},
+ "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null}]}
+```
+
+With the server down, `stats` falls back to database counts and says so on
+stderr.
+
+## Logging
+
+One pretty, human-readable format in both profiles (`crates/proxy/src/log.rs`).
+
+| | prod (default) | debug (`DEEPSEEK_LOG=debug`) |
+|---|---|---|
+| spans | hidden | shown |
+| target / file / line | omitted | shown |
+| thread ids | omitted | shown |
+| ANSI | only when stdout is a TTY | only when stdout is a TTY |
+
+`RUST_LOG` overrides the filter entirely (a blank value is ignored rather than
+meaning "log nothing"); `NO_COLOR` or `DEEPSEEK_LOG_ANSI=1|0` forces colour off
+or on.
+
+Per request you get `request in` -> `new remote session` -> `stream done` (or
+`response out` for non-streaming), with thread id, model, tool-call count, and
+elapsed milliseconds.
