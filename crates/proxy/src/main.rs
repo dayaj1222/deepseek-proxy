@@ -1090,8 +1090,8 @@ async fn chat_completions(
 
     tracing::debug!(thread = %key, thinking, parent = ?thread.parent_message_id, "upstream completion accepted");
 
-    stream_response(
-        turn,
+    stream_response(LiveTurn {
+        guard: turn,
         state,
         key,
         resp,
@@ -1102,12 +1102,12 @@ async fn chat_completions(
         created,
         replay,
         can_recover,
-        turn::include_usage(req.stream_options.as_ref()),
+        include_usage: turn::include_usage(req.stream_options.as_ref()),
         started,
         specs,
         required,
-        req.parallel_tool_calls,
-    )
+        parallel: req.parallel_tool_calls,
+    })
     .await
 }
 
@@ -1149,17 +1149,25 @@ async fn fail_turn(
     send_stream_error(tx, err).await;
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn stream_response(
-    turn: tokio::sync::OwnedMutexGuard<()>,
+/// One live turn, from an accepted upstream response to `[DONE]`.
+///
+/// This used to be sixteen positional arguments to `stream_response`, which
+/// made the interface as large as the implementation and forced every reader to
+/// count arguments to learn what the turn carried. One struct instead, built by
+/// `chat_completions` from `turn::prepare` plus the response it just opened.
+struct LiveTurn {
+    /// Held for the whole turn, including every correction turn.
+    guard: tokio::sync::OwnedMutexGuard<()>,
     state: AppState,
     key: String,
     resp: reqwest::Response,
     slot: pool::RateTicket,
+    /// Upstream body, re-sent for retries and correction turns.
     body: CompletionBody,
     id: String,
     model: String,
     created: u64,
+    /// Flattened transcript, used to rebuild a session after a context limit.
     replay: String,
     can_recover: bool,
     include_usage: bool,
@@ -1167,7 +1175,27 @@ async fn stream_response(
     specs: Vec<dialect::ToolSpec>,
     required: bool,
     parallel: bool,
-) -> Response {
+}
+
+async fn stream_response(live: LiveTurn) -> Response {
+    let LiveTurn {
+        guard: turn,
+        state,
+        key,
+        resp,
+        slot,
+        body,
+        id,
+        model,
+        created,
+        replay,
+        can_recover,
+        include_usage,
+        started,
+        specs,
+        required,
+        parallel,
+    } = live;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
 
     tokio::spawn(async move {
