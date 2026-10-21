@@ -28,6 +28,7 @@ mod dialect;
 mod images;
 mod log;
 mod pool;
+mod prompt;
 mod store;
 mod threads;
 
@@ -174,84 +175,22 @@ fn build_prompts(
     system_extra: &str,
     image_note: Option<&str>,
 ) -> (String, String) {
-    let transcript = flatten_transcript(&req.messages);
-    let mut replay = if system_extra.is_empty() {
-        transcript
-    } else {
-        format!("{transcript}\n\n{system_extra}")
-    };
-    let mut delta = match existing {
-        Some(_) => continuation_prompt(delta_messages(&req.messages)).unwrap_or_default(),
-        None => replay.clone(),
-    };
-    // A turn that lost images says so, in both prompts: `replay` is what
-    // rebuilds a remote session after a context overflow, so the notice has to
-    // survive that too. Placed before the tool reminder, which stays last.
-    if let Some(note) = image_note {
-        delta = format!("{note}\n\n{delta}");
-        replay = format!("{note}\n\n{replay}");
-    }
-    // Re-anchor the wire format on EVERY turn. Two placements:
-    //   - at the very start of a fresh thread, so the model is already reminded
-    //     before it reads the first message (nothing has been taught yet in the
-    //     delta case, and compaction can drop the original system block);
-    //   - at the very end of every turn, closest to the generation, so a long
-    //     thread that drifts off the format gets corrected immediately.
-    if !req.tools.is_empty() {
-        let reminder = dialect::periodic_reminder();
-        if existing.is_none() {
-            for prompt in [&mut delta, &mut replay] {
-                *prompt = format!("{reminder}\n\n{prompt}");
-            }
-        }
-        delta.push_str("\n\n");
-        delta.push_str(&reminder);
-        replay.push_str("\n\n");
-        replay.push_str(&reminder);
-    }
-    // `tool_choice` / `parallel_tool_calls` are part of the request contract
-    // and must reach the model as instructions, exactly as Python appends them
-    // after `build_prompt()`.
-    if let Some(directive) = tool_choice_directive(req) {
-        // `directive` already starts with the leading newline Python uses.
-        delta.push_str(&directive);
-        replay.push_str(&directive);
-    }
-    (delta, replay)
-}
-
-/// The extra prompt lines Python appends for `tool_choice` / parallel calls.
-///
-/// Port of the block at the top of `ChatService.events()`:
-///
-/// ```text
-/// if tools:
-///     if recovery.required:      prompt += "\nYou must return a tool call."
-///     if not parallel:           prompt += "\nReturn at most one tool call."
-/// elif request.tool_choice == "none":
-///     prompt += "\nDo not call tools in this turn; reply with normal text."
-/// ```
-///
-/// `tools` there is the *filtered* list, so `tool_choice: "none"` takes the
-/// `elif` branch rather than the `if`.
-fn tool_choice_directive(req: &ChatRequest) -> Option<String> {
     let (specs, required) = resolve_tools(req);
-    let mut out = String::new();
-    if !specs.is_empty() {
-        if required {
-            out.push_str("\nYou must return a tool call.");
-        }
-        if !req.parallel_tool_calls {
-            out.push_str("\nReturn at most one tool call.");
-        }
-    } else if matches!(req.tool_choice.as_ref(), Some(Value::String(s)) if s == "none") {
-        out.push_str("\nDo not call tools in this turn; reply with normal text.");
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    let reminder = prompt::reminder(&req.tools);
+    let out = prompt::for_turn(&prompt::Turn {
+        messages: &req.messages,
+        continuation: existing.is_some(),
+        system_extra,
+        image_note,
+        reminder: reminder.as_deref(),
+        directive: prompt::directive(
+            !specs.is_empty(),
+            required,
+            req.parallel_tool_calls,
+            prompt::choice_none(req.tool_choice.as_ref()),
+        ),
+    });
+    (out.delta, out.replay)
 }
 
 fn completion_body(
