@@ -426,6 +426,111 @@ impl Pool {
     }
 }
 
+/// Why a completion attempt failed, in the caller's vocabulary.
+///
+/// The classifiers (`is_login_dead`, `is_rate_limit`, ...) and the account
+/// objects stay inside this module: a caller never sees a [`Connection`], a
+/// [`RateTicket`] or a raw reqwest error string.
+#[derive(Debug)]
+pub enum PoolError {
+    /// No slot: queue full or queue wait timed out.
+    Queue(String),
+    /// The account's login is dead and no healthy account was left.
+    LoginDead(String),
+    /// Still throttled after every retry.
+    RateLimited {
+        retry_after_s: u64,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for PoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PoolError::Queue(m) | PoolError::LoginDead(m) | PoolError::Other(m) => f.write_str(m),
+            PoolError::RateLimited { retry_after_s } => write!(
+                f,
+                "DeepSeek backend rate-limited this turn (retry after {retry_after_s}s)"
+            ),
+        }
+    }
+}
+
+impl Pool {
+    /// Open a completion stream for `thread_id`, retrying, cooling down and
+    /// failing over inside this module.
+    ///
+    /// Returns the live response together with the rate ticket, which the
+    /// caller must hold until the body is drained: the next request on the
+    /// account starts `request_delay` after the stream really finished.
+    ///
+    /// `on_retry(attempt, wait_secs)` is called before each retry so the caller
+    /// can count and log it without knowing why the retry happened.
+    pub async fn complete(
+        &self,
+        thread_id: &str,
+        body: &client::CompletionBody,
+        max_retries: u32,
+        backoff_secs: f64,
+        mut on_retry: impl FnMut(u32, f64),
+    ) -> Result<(reqwest::Response, RateTicket), PoolError> {
+        let backoff = backoff_secs.max(0.5);
+        let mut attempt = 0u32;
+        let mut conn = self.route(thread_id).await;
+
+        loop {
+            let slot = conn.acquire().await.map_err(PoolError::Queue)?;
+            let client = conn.client().await;
+
+            match client.stream_completion(body).await {
+                Ok(resp) => return Ok((resp, slot)),
+                Err(e) => {
+                    let last = e.to_string();
+
+                    if is_login_dead(&last) {
+                        tracing::warn!("account {} login-dead: {last}", conn.email);
+                        drop(slot);
+                        match self.failover(thread_id).await {
+                            Some(next) => {
+                                tracing::warn!("thread failed over to {}", next.email);
+                                conn = next;
+                                continue;
+                            }
+                            None => return Err(PoolError::LoginDead(last)),
+                        }
+                    }
+
+                    if is_invalid_token(&last) && self.recover(&conn).await {
+                        tracing::info!("recovered account {}", conn.email);
+                        drop(slot);
+                        continue;
+                    }
+
+                    if !is_rate_limit(&last) {
+                        drop(slot);
+                        return Err(PoolError::Other(last));
+                    }
+
+                    let step = (attempt + 1).min(max_retries.max(1)) as f64;
+                    let wait = backoff * step;
+                    drop(slot);
+                    conn.cool_down(Duration::from_secs_f64(wait)).await;
+
+                    if attempt < max_retries {
+                        attempt += 1;
+                        on_retry(attempt, wait);
+                        continue;
+                    }
+
+                    return Err(PoolError::RateLimited {
+                        retry_after_s: wait.ceil() as u64,
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// True when the error looks like a dead login rather than a transient blip.
 pub fn is_login_dead(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
@@ -490,5 +595,22 @@ mod tests {
             assert!(!is_rate_limit(msg), "{msg} must be a login error");
             assert!(is_login_dead(msg));
         }
+    }
+
+    #[test]
+    fn pool_error_display_is_the_client_visible_text() {
+        assert_eq!(
+            PoolError::RateLimited { retry_after_s: 7 }.to_string(),
+            "DeepSeek backend rate-limited this turn (retry after 7s)"
+        );
+        assert_eq!(PoolError::Queue("full".into()).to_string(), "full");
+    }
+
+    #[test]
+    fn classifiers_stay_inside_the_module() {
+        assert!(is_login_dead("login failed for account"));
+        assert!(is_rate_limit("server is temporarily unavailable"));
+        assert!(is_invalid_token("invalid token"));
+        assert!(!is_rate_limit("some other error"));
     }
 }

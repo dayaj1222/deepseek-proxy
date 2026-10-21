@@ -631,6 +631,19 @@ enum CompletionError {
     Other(String),
 }
 
+impl From<pool::PoolError> for CompletionError {
+    fn from(e: pool::PoolError) -> Self {
+        match e {
+            pool::PoolError::Queue(m) => CompletionError::QueueUnavailable(m),
+            pool::PoolError::LoginDead(m) => CompletionError::LoginDead(m),
+            pool::PoolError::RateLimited { retry_after_s } => {
+                CompletionError::RateLimited { retry_after_s }
+            }
+            pool::PoolError::Other(m) => CompletionError::Other(m),
+        }
+    }
+}
+
 impl std::fmt::Display for CompletionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -761,83 +774,30 @@ async fn completion_with_retry(
     thread_id: &str,
     body: &CompletionBody,
 ) -> Result<(reqwest::Response, pool::RateTicket), CompletionError> {
-    let max_retries = state.settings.rate_limit_max_retries;
-    let backoff = state.settings.rate_limit_backoff_secs.max(0.5);
-    let mut attempt = 0u32;
-    let mut conn = state.pool.route(thread_id).await;
-
-    loop {
-        // The slot is held for the WHOLE stream, not just until headers land:
-        // the caller keeps this ticket alive until the body is drained, so the
-        // next request on this account starts `request_delay` after the stream
-        // really finished rather than after it merely started.
-        let slot = conn.acquire().await.map_err(|e| {
-            // `AccountQueueFull` / `AccountQueueTimeout` map to 503 in Python.
-            if e.contains("queue") {
-                CompletionError::QueueUnavailable(e)
-            } else {
-                CompletionError::Other(e)
-            }
-        })?;
-        let client = conn.client().await;
-
-        match client.stream_completion(body).await {
-            Ok(resp) => return Ok((resp, slot)),
-            Err(e) => {
-                let last = e.to_string();
-
-                if pool::is_login_dead(&last) {
-                    tracing::warn!("account {} login-dead: {last}", conn.email);
-                    drop(slot);
-                    match state.pool.failover(thread_id).await {
-                        Some(next) => {
-                            tracing::warn!("thread failed over to {}", next.email);
-                            conn = next;
-                            continue;
-                        }
-                        // No healthy account left: this is a login failure, not a
-                        // generic backend error, and `error_for()` says so.
-                        None => return Err(CompletionError::LoginDead(last)),
-                    }
-                }
-
-                if pool::is_invalid_token(&last) && state.pool.recover(&conn).await {
-                    tracing::info!("recovered account {}", conn.email);
-                    drop(slot);
-                    continue;
-                }
-
-                if !pool::is_rate_limit(&last) {
-                    drop(slot);
-                    return Err(CompletionError::Other(last));
-                }
-
-                // Python: backoff * min(attempt + 1, max(1, max_retries)).
-                let step = (attempt + 1).min(max_retries.max(1)) as f64;
-                let wait = backoff * step;
-                drop(slot);
-                conn.cool_down(std::time::Duration::from_secs_f64(wait))
-                    .await;
-
-                if attempt < max_retries {
-                    attempt += 1;
-                    state.stats.retries.fetch_add(1, Ordering::Relaxed);
-                    tracing::info!(
-                        thread = %thread_id,
-                        attempt,
-                        retry_delay_s = wait,
-                        "retrying after transient backend error"
-                    );
-                    continue;
-                }
-
+    state
+        .pool
+        .complete(
+            thread_id,
+            body,
+            state.settings.rate_limit_max_retries,
+            state.settings.rate_limit_backoff_secs,
+            |attempt, wait| {
+                state.stats.retries.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(
+                    thread = %thread_id,
+                    attempt,
+                    retry_delay_s = wait,
+                    "retrying after transient backend error"
+                );
+            },
+        )
+        .await
+        .map_err(|e| {
+            if matches!(e, pool::PoolError::RateLimited { .. }) {
                 state.stats.errors.fetch_add(1, Ordering::Relaxed);
-                return Err(CompletionError::RateLimited {
-                    retry_after_s: wait.ceil() as u64,
-                });
             }
-        }
-    }
+            CompletionError::from(e)
+        })
 }
 
 /// Run correction turns for malformed tool calls.
