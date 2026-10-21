@@ -529,6 +529,27 @@ async fn readyz() -> Json<Value> {
     Json(json!({"status": "ready", "backend": "lazy_login"}))
 }
 
+/// Unknown route: `404` in the OpenAI error envelope, so SDK clients parse it
+/// instead of choking on axum's empty-body default.
+async fn fallback() -> Response {
+    ProxyError::new(
+        "Not Found",
+        axum::http::StatusCode::NOT_FOUND,
+        "not_found",
+    )
+    .into_response()
+}
+
+/// Known path, wrong method: same envelope, `405`.
+async fn method_not_allowed() -> Response {
+    ProxyError::new(
+        "Method Not Allowed",
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+    )
+    .into_response()
+}
+
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
     let s = &state.stats;
@@ -602,20 +623,29 @@ fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
         Ok(true) => Ok(()),
         // `require_api_key` raises FastAPI's HTTPException, whose body is
         // `{"detail": ...}` — not the OpenAI error envelope.
-        Ok(false) => {
-            let detail = if presented.is_empty() {
-                "missing api key"
-            } else {
-                "invalid api key"
-            };
-            Err((
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(json!({ "detail": detail })),
-            )
-                .into_response())
-        }
+        Ok(false) => Err(unauthorized(presented.is_empty())),
         Err(e) => Err(backend_error(&format!("store: {e}"))),
     }
+}
+
+/// `401` in the OpenAI envelope, not FastAPI's `{"detail": ...}`.
+///
+/// Official SDKs parse the `error` object to decide whether a failure is
+/// retryable; `detail` makes every auth failure look like an unparseable body.
+/// This is the one intentional break from the Python port (PLAN.md T-01).
+fn unauthorized(missing: bool) -> Response {
+    let (message, code) = if missing {
+        ("Missing bearer token", "missing_api_key")
+    } else {
+        ("Invalid API key", "invalid_api_key")
+    };
+    let mut resp = ProxyError::new(message, axum::http::StatusCode::UNAUTHORIZED, code)
+        .into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str("Bearer") {
+        resp.headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, v);
+    }
+    resp
 }
 
 /// Why a completion attempt ultimately failed.
@@ -692,10 +722,10 @@ impl ProxyError {
         json!({
             "error": {
                 "message": self.message,
-                "type": if self.status == axum::http::StatusCode::BAD_REQUEST {
-                    "invalid_request_error"
-                } else {
-                    "server_error"
+                "type": match self.status.as_u16() {
+                    400..=404 => "invalid_request_error",
+                    429 => "rate_limit_error",
+                    _ => "server_error",
                 },
                 "param": self.param,
                 "code": self.code,
@@ -1906,6 +1936,8 @@ fn build_router(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .fallback(fallback)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         // Must come AFTER the routes: `Router::layer` only wraps routes that
         // already exist, so placing it earlier silently does nothing.
@@ -2450,6 +2482,24 @@ mod tests {
             "data: {\"response_message_id\": 11}\n\n",
         );
         assert_eq!(route_all(raw).2, Some(11));
+    }
+
+    #[test]
+    fn error_payload_type_follows_status() {
+        // SDKs branch on `error.type`, so it must track the status, not the code.
+        for (status, expected) in [
+            (axum::http::StatusCode::BAD_REQUEST, "invalid_request_error"),
+            (axum::http::StatusCode::UNAUTHORIZED, "invalid_request_error"),
+            (axum::http::StatusCode::NOT_FOUND, "invalid_request_error"),
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+            (axum::http::StatusCode::BAD_GATEWAY, "server_error"),
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, "server_error"),
+        ] {
+            let e = ProxyError::new("x", status, "some_code");
+            let payload = e.payload();
+            assert_eq!(payload["error"]["type"], expected, "status {status}");
+            assert_eq!(payload["error"]["code"], "some_code");
+        }
     }
 
     #[test]

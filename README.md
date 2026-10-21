@@ -131,6 +131,14 @@ Keys are stored as SHA-256 hashes; plaintext is never written. With **no** keys
 registered, authentication is open — fine on a trusted loopback bind, worth
 closing before exposing the port.
 
+A rejected request returns `401` in the OpenAI error envelope —
+`{"error":{"message","type":"invalid_request_error","param":null,"code"}}`
+with `code` either `missing_api_key` or `invalid_api_key`, plus
+`WWW-Authenticate: Bearer`. Official SDKs branch on that envelope, so this is the
+one intentional break from the Python proxy, which answered `{"detail": ...}`.
+Unknown paths return `404` and a known path with the wrong method returns `405`,
+both in the same envelope (`not_found`, `method_not_allowed`).
+
 ## HTTP API
 
 | Method | Path | Purpose |

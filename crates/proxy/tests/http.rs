@@ -8,7 +8,8 @@ mod support;
 
 use serde_json::json;
 use support::{
-    complete, hello_turn, spawn_app, sse_reply, start_mock, MockScript, Step, PLAIN_SSE,
+    complete, complete_with_key, hello_turn, spawn_app, spawn_app_with_keys, sse_reply, start_mock,
+    MockScript, Step, PLAIN_SSE,
 };
 
 /// Concatenate every delta content string in an SSE body.
@@ -170,6 +171,94 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     let text = resp.text().await.unwrap();
     assert!(text.contains("tool_calls"), "repaired call missing: {text}");
     assert_eq!(script.completions(), 2, "one repair turn expected");
+}
+
+#[tokio::test]
+async fn a_missing_key_is_a_401_in_the_openai_envelope() {
+    let (upstream, script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app_with_keys(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("main", "sk-test-secret")],
+    )
+    .await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer")
+    );
+    let value: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        value.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("missing_api_key")
+    );
+    assert_eq!(
+        value.pointer("/error/type").and_then(|v| v.as_str()),
+        Some("invalid_request_error")
+    );
+    assert_eq!(script.completions(), 0);
+}
+
+#[tokio::test]
+async fn a_wrong_key_is_a_401_without_echoing_it() {
+    let (upstream, script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app_with_keys(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("main", "sk-test-secret")],
+    )
+    .await;
+
+    let resp = complete_with_key(&app, hello_turn(), "sk-wrong").await;
+    assert_eq!(resp.status(), 401);
+    let text = resp.text().await.unwrap();
+    assert!(!text.contains("sk-wrong"), "key echoed back: {text}");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        value.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("invalid_api_key")
+    );
+    assert_eq!(script.completions(), 0);
+}
+
+#[tokio::test]
+async fn an_unknown_path_is_json_not_an_empty_404() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/nope", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let value: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        value.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("not_found")
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_method_on_a_known_path_is_json_405() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/v1/chat/completions", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 405);
+    let value: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        value.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("method_not_allowed")
+    );
 }
 
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");

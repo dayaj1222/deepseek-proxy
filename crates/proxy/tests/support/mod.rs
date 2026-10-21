@@ -175,11 +175,36 @@ fn free_port() -> u16 {
 /// Boot the real binary against `upstream`, with `accounts` email/password
 /// pairs configured through the environment.
 pub async fn spawn_app(upstream: &str, accounts: &[(&str, &str)]) -> App {
+    spawn_app_with_keys(upstream, accounts, &[]).await
+}
+
+/// Same as `spawn_app`, but registers `keys` (name, secret) first, so the proxy
+/// requires a bearer token. Registering goes through the real `keys add` CLI,
+/// which is the only public way to seed the key table.
+pub async fn spawn_app_with_keys(
+    upstream: &str,
+    accounts: &[(&str, &str)],
+    keys: &[(&str, &str)],
+) -> App {
     let port = free_port();
     let dir =
         std::env::temp_dir().join(format!("deepseek-rs-test-{}-{}", std::process::id(), port));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, secret) in keys {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"))
+            .arg("keys")
+            .arg("add")
+            .arg(name)
+            .arg(secret)
+            .env("DB_PATH", dir.join("test.db"))
+            .env("DEEPSEEK_RUNTIME_DIR", &dir)
+            .env("RUST_LOG", "warn")
+            .status()
+            .expect("run keys add");
+        assert!(status.success(), "keys add {name} failed");
+    }
 
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"));
     cmd.arg("serve")
@@ -220,6 +245,17 @@ pub async fn spawn_app(upstream: &str, accounts: &[(&str, &str)]) -> App {
 pub async fn complete(app: &App, body: Value) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{}/v1/chat/completions", app.base))
+        .json(&body)
+        .send()
+        .await
+        .expect("proxy request")
+}
+
+/// Post one chat completion with a bearer token, so auth can be exercised.
+pub async fn complete_with_key(app: &App, body: Value, key: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .bearer_auth(key)
         .json(&body)
         .send()
         .await
