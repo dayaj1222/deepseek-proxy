@@ -116,7 +116,7 @@ pub fn periodic_reminder() -> String {
     s.push_str(TEMPLATE);
     s.push_str("\n!!IMPORTANT!!\n");
     s.push_str(
-        "1. Never emit </｜｜DSML｜｜ invoke> or related tags those are useless and will be shown to the user.\n",
+        "1. Never emit <｜｜DSML｜｜ invoke>, <｜｜DSML｜｜> or related tags those are useless and will be shown to the user, YOU WILL BE KILLED.\n",
     );
     s.push_str("2. Never emit the </invoke> ending tag more than once per tool call.\n");
     s.push_str(
@@ -490,9 +490,8 @@ pub fn extract_malformed(text: &str) -> Vec<MalformedCall> {
 pub fn build_repair_prompt(malformed: &[MalformedCall], specs: &[ToolSpec]) -> String {
     let mut out = String::from(
         "Your previous response contained malformed tool call(s) that could not be executed. \
-         The failed response is already in the conversation history. Do not quote, copy, \
-         explain, or repeat it. Follow the tool-call instructions you were given and \
-         re-emit EACH corrected call now, and nothing else.",
+         Do not quote, copy, explain, or repeat it. Re-emit EACH corrected call now, \
+         and nothing else.",
     );
     for (i, m) in malformed.iter().enumerate() {
         let name = match &m.name {
@@ -512,13 +511,18 @@ pub fn build_repair_prompt(malformed: &[MalformedCall], specs: &[ToolSpec]) -> S
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         out.push_str(&format!("\nValid tool names: {}.", names.join(", ")));
     }
-    out.push_str("\nRe-emit each fixed call in EXACTLY this shape:\n");
-    out.push_str(TEMPLATE);
     out.push_str(
-        "\nRules: opening tag MUST carry name=\"tool_name\"; body is ONE JSON object with \
-         all arguments. Emit corrected blocks back to back, no chatter, no code fences.",
+        "\nThink about the format before you emit anything. Which tag opens the block, what \
+         goes between the tags, and which tag closes it? What does the JSON body look like, \
+         and does the tool name you are about to use appear in the valid list above? Work \
+         through that in your reasoning, then emit the call once.\n",
     );
-    out.push_str("\nOnly fix the listed failures. Do not repeat calls already accepted.");
+    // The per-turn reminder carries the wire shape and the concrete failure
+    // modes (legacy marker tags, doubled closing tag); a repair turn needs the
+    // same warning, not a weaker one.
+    out.push_str("\n\n");
+    out.push_str(&periodic_reminder());
+    out.push_str("\n\nOnly fix the listed failures. Do not repeat calls already accepted.");
     out
 }
 
@@ -971,6 +975,8 @@ mod tests {
         assert!(prompt.contains("Failure 1: name=\"bash\" reason=invalid_json_body"));
         assert!(prompt.contains("Valid tool names: bash, edit."));
         assert!(prompt.contains(TEMPLATE));
+        // The repair turn carries the same hard-format warning as a normal turn.
+        assert!(prompt.contains("HARD FORMAT REQUIREMENT"));
         // `Recovery.begin_repair()` appends this line, so a repair turn must too.
         assert!(
             prompt.contains("Only fix the listed failures. Do not repeat calls already accepted.")
