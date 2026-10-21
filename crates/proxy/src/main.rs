@@ -2457,7 +2457,7 @@ mod tests {
         let text = dialect::periodic_reminder();
         println!("-----BEGIN-----\n{text}\n-----END-----");
         assert!(text.contains("DROPPED"));
-        assert!(text.contains("Never emit the </invoke> ending tag twice."));
+        assert!(text.contains("Never emit the </invoke> ending tag more than once per tool call."));
         assert!(text.contains(dialect::TEMPLATE));
     }
 }
