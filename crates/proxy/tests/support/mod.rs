@@ -201,6 +201,20 @@ impl App {
     pub fn write_config(&self, body: &str) {
         std::fs::write(&self.config, body).expect("write config.toml");
     }
+
+    /// Paths the proxy was started with, so a test can run the real CLI against
+    /// the same state directory instead of guessing.
+    pub fn db_path(&self) -> std::path::PathBuf {
+        self.dir.join("test.db")
+    }
+
+    pub fn runtime_dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config
+    }
 }
 
 impl Drop for App {

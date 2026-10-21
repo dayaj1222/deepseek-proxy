@@ -98,14 +98,32 @@ impl Settings {
 
 #[derive(Clone)]
 struct AppState {
-    pool: Arc<pool::Pool>,
     /// Live knobs. Behind a handle so a SIGHUP can swap them without a restart
     /// or a lock held across an await.
     settings: Arc<SettingsHandle>,
+    /// Account pool. Swappable so a reload can add or remove an account without
+    /// restarting; callers go through [`AppState::pool`] and never hold the lock
+    /// across an await, so an in-flight turn finishes on the pool it started on.
+    pool: Arc<std::sync::RwLock<Arc<pool::Pool>>>,
     /// Cache, turn lock and persistence for conversation threads.
     threads: Arc<threads::Threads>,
     store: store::Store,
     stats: Arc<Stats>,
+}
+
+impl AppState {
+    /// Snapshot the current pool. One Arc clone; safe to hold for a whole turn.
+    fn pool(&self) -> Arc<pool::Pool> {
+        self.pool
+            .read()
+            .expect("pool lock poisoned")
+            .clone()
+    }
+
+    /// Install a rebuilt pool. Turns already running keep their snapshot.
+    fn set_pool(&self, fresh: Arc<pool::Pool>) {
+        *self.pool.write().expect("pool lock poisoned") = fresh;
+    }
 }
 
 /// The current `Settings`, swappable at runtime.
@@ -351,7 +369,7 @@ async fn rebuild_session(
     key: &str,
     reason: &str,
 ) -> Result<ThreadState, Response> {
-    let conn = state.pool.route(key).await;
+    let conn = state.pool().route(key).await;
     let session_id = {
         let _slot = conn
             .acquire()
@@ -765,7 +783,7 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
     let threads_in_memory = state.threads.cached_len();
 
     let accounts: Vec<Value> = state
-        .pool
+        .pool()
         .snapshot()
         .await
         .into_iter()
@@ -980,7 +998,7 @@ async fn error_for(state: &AppState, key: &str, err: CompletionError) -> ProxyEr
         }
         CompletionError::LoginDead(msg) => {
             tracing::error!(thread = %key, error = %msg, "backend login failed");
-            let _ = state.pool.failover(key).await;
+            let _ = state.pool().failover(key).await;
             ProxyError::new(
                 "Backend login failed; disabled account, retry with a fresh thread",
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1025,7 +1043,7 @@ async fn completion_with_retry(
     body: &CompletionBody,
 ) -> Result<(reqwest::Response, pool::RateTicket), CompletionError> {
     state
-        .pool
+        .pool()
         .complete(
             thread_id,
             body,
@@ -1739,7 +1757,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                     "retrying after backend throttle"
                 );
                 state
-                    .pool
+                    .pool()
                     .route(&key)
                     .await
                     .cool_down(std::time::Duration::from_secs_f64(wait))
@@ -2266,14 +2284,7 @@ pub(crate) async fn connect_pool(
     store: &store::Store,
     accounts: Vec<pool::AccountSpec>,
 ) -> Result<Arc<pool::Pool>, Box<dyn std::error::Error>> {
-    let pool_config = pool::PoolConfig {
-        request_delay: std::time::Duration::from_secs_f64(cfg.request_delay_secs),
-        queue_limit: cfg.queue_limit,
-        queue_timeout: std::time::Duration::from_secs_f64(cfg.queue_timeout_secs),
-        login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
-        account_fail_threshold: cfg.account_fail_threshold,
-        account_cooldown_max: std::time::Duration::from_secs(cfg.account_cooldown_max_secs),
-    };
+    let pool_config = pool::PoolConfig::from_config(cfg);
     let p = pool::Pool::connect(accounts, pool_config, store.clone()).await?;
     Ok(Arc::new(p))
 }
@@ -2395,7 +2406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let state = AppState {
-        pool,
+        pool: Arc::new(std::sync::RwLock::new(pool)),
         settings: Arc::new(SettingsHandle::new(cfg.clone())),
         threads: Arc::new(threads::Threads::new(Arc::new(
             threads::SqlitePersist::new(store.clone()),
@@ -2477,8 +2488,56 @@ async fn reload(state: &AppState) {
     for key in state.settings.restart_only_changes(&fresh) {
         tracing::warn!(key, "not reloadable; restart required");
     }
-    let generation = state.settings.replace(fresh);
+
+    // Accounts and pool tunables are not part of `Settings`: they live in the
+    // pool, which can only be changed by rebuilding it. Decide that here, while
+    // both the old pool and the new config are in hand.
+    let old_pool = state.pool();
+    let pool_changed = old_pool.config() != &pool::PoolConfig::from_config(&fresh);
+    let wanted: Vec<String> = cli::load_accounts(&state.store)
+        .into_iter()
+        .map(|a| a.email)
+        .collect();
+    let accounts_changed = wanted != old_pool.configured_emails();
+
+    let generation = state.settings.replace(fresh.clone());
     tracing::info!(generation, "config reloaded");
+
+    if pool_changed || accounts_changed {
+        rebuild_pool(state, fresh, old_pool).await;
+    }
+}
+
+/// Rebuild the pool off the request path.
+///
+/// Account changes require a login, which is network I/O and must never delay
+/// the settings swap that already happened. `AppState::set_pool` is the only
+/// mutation, so a turn that is already running finishes on the old pool while
+/// new turns get the new one. Thread bindings live in SQLite and are re-read by
+/// `Pool::route`, so no conversation is stranded by the swap.
+async fn rebuild_pool(state: &AppState, cfg: config::Config, old: Arc<pool::Pool>) {
+    let accounts = cli::load_accounts(&state.store);
+    tracing::info!(accounts = accounts.len(), "reloading account pool");
+    match connect_pool(&cfg, &state.store, accounts).await {
+        Ok(fresh) => {
+            let before = old.configured_emails().to_vec();
+            let after = fresh.configured_emails().to_vec();
+            for email in after.iter().filter(|e| !before.contains(e)) {
+                tracing::info!(account = %email, "account added by reload");
+            }
+            for email in before.iter().filter(|e| !after.contains(e)) {
+                tracing::warn!(account = %email, "account removed by reload");
+            }
+            state.set_pool(fresh);
+            tracing::info!("account pool reloaded");
+        }
+        Err(e) => {
+            // The running pool stays: an unbuildable pool must not take the
+            // proxy down, exactly like an unparseable config.
+            tracing::error!(error = %e, "pool reload failed; keeping the running pool");
+            state.settings.note_error(e.to_string());
+        }
+    }
 }
 
 /// Apply SIGHUP forever. Separate from [`shutdown_signal`] so the two never

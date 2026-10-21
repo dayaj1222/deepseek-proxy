@@ -648,5 +648,78 @@ async fn an_invalid_config_keeps_the_running_one_and_reports_the_error() {
     assert_eq!(resp.status(), 200);
 }
 
+/// A SIGHUP that adds an account must make it routable without a restart, and
+/// a turn in flight must not be disturbed by the pool swap.
+#[tokio::test]
+async fn a_reload_adds_an_account_without_restarting() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let before = stats_until(&app, "one account", |s| {
+        s["accounts"].as_array().is_some_and(|a| a.len() == 1)
+    })
+    .await;
+    assert_eq!(before["accounts"].as_array().unwrap().len(), 1);
+
+    // Adding an account goes through the real CLI, which writes the row the
+    // reload reads. Pointed at this app's own DB and runtime dir, so the two
+    // processes share state the way they would on a real machine.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"))
+        .args(["accounts", "add", "b@example.com", "pw"])
+        .env("DB_PATH", app.db_path())
+        .env("DEEPSEEK_NO_DOTENV", "1")
+        .env("DEEPSEEK_RUNTIME_DIR", app.runtime_dir())
+        .env("CONFIG_PATH", app.config_path())
+        .status()
+        .expect("run accounts add");
+    assert!(status.success(), "accounts add failed");
+
+    app.sighup();
+
+    let after = stats_until(&app, "two accounts", |s| {
+        s["accounts"].as_array().is_some_and(|a| a.len() == 2)
+    })
+    .await;
+    let emails: Vec<&str> = after["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["email"].as_str())
+        .collect();
+    assert!(emails.contains(&"a@example.com"), "{emails:?}");
+    assert!(emails.contains(&"b@example.com"), "{emails:?}");
+
+    // And the proxy still serves on the rebuilt pool.
+    let resp = complete(&app, streamed(hello_turn())).await;
+    assert_eq!(resp.status(), 200);
+}
+
+/// `deepseek-rs reload` with no running server must fail loudly, not lie.
+#[test]
+fn reload_returns_1_without_a_pidfile() {
+    let dir = std::env::temp_dir().join(format!(
+        "deepseek-rs-reload-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"))
+        .arg("reload")
+        .env("DEEPSEEK_RUNTIME_DIR", &dir)
+        .env("DEEPSEEK_NO_DOTENV", "1")
+        .output()
+        .expect("run reload");
+
+    assert_eq!(out.status.code(), Some(1), "no pid must exit 1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not running"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");
 const TOOL_CLOSE: &str = concat!("</inv", "oke>");

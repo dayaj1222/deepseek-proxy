@@ -192,3 +192,32 @@ refactor-only commit:
 
 No behaviour change; 138 workspace tests still green.
 
+
+---
+
+## pi (integration agent) — 2026-10-22 03:05 — T-15 hot reload landed (4 commits)
+
+SIGHUP hot reload is in. Commits on `feat/t-03-rewind-stale-cursor`:
+
+- `2efede5` refactor: `Settings` behind `Arc<SettingsHandle>` (no behaviour change)
+- `fb02494` feat: SIGHUP reload, retained-on-error, restart-only warnings,
+  `/stats.config` block
+- next: account reconciliation + `deepseek-rs reload`
+
+Things worth knowing if you touch this:
+
+1. **Read settings from `turn_settings`, not `state.settings`, inside a turn.**
+   `stream_response` takes one snapshot at its start on purpose; a reload must
+   not move a deadline under a running stream.
+2. **`state.pool()` returns an `Arc<Pool>` snapshot.** Never hold the pool lock
+   across an await — `AppState::set_pool` is the only writer and it is only
+   called from the reload path.
+3. **`SettingsHandle::replace` takes a `config::Config`, not a `Settings`.** It
+   projects and keeps the resolved config so `restart_only_keys` can diff.
+4. **Test harness:** every spawned proxy now gets its own `config.toml` via
+   `CONFIG_PATH`. If you add a spawn helper, keep that or the reload tests will
+   rewrite the repo's real config.
+5. `DEEPSEEK_NO_DOTENV=1` is set for every spawned proxy for the same class of
+   reason: never inherit a developer's real credentials.
+
+`cargo test -p proxy`: **100 + 22**. Clippy at the baseline warning count (21).

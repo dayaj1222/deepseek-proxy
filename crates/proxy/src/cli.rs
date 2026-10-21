@@ -381,6 +381,7 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         "stats" => stats(args).await,
         "start" => start(args).await,
         "stop" => stop().await,
+        "reload" => reload().await,
         "restart" => {
             let bg = start_flags(args).0;
             stop().await?;
@@ -568,6 +569,28 @@ async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error
         }
         Ok(1)
     }
+}
+
+/// Send SIGHUP so a running server re-reads its config and account list.
+///
+/// Deliberately fire-and-forget: the server applies the reload asynchronously,
+/// and confirmation is `deepseek-rs stats` (the `config` block) or the log.
+/// Blocking here would mean inventing a timeout for an operation that has no
+/// natural bound when it triggers an account login.
+async fn reload() -> Result<i32, Box<dyn std::error::Error>> {
+    let rt = Runtime::resolve();
+    let Some(pid) = rt.pid() else {
+        eprintln!("not running");
+        rt.clear_pid();
+        return Ok(1);
+    };
+    if let Err(e) = send_signal(pid, libc::SIGHUP) {
+        eprintln!("signal {pid}: {e}");
+        return Ok(1);
+    }
+    println!("reload sent  pid {pid}");
+    println!("check with: deepseek-rs stats   (look for config.generation)");
+    Ok(0)
 }
 
 async fn stop() -> Result<i32, Box<dyn std::error::Error>> {
@@ -900,7 +923,13 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
             }
             store.upsert_account(&email, &password, token.as_deref())?;
             println!("added {email}");
-            println!("restart to apply: deepseek-rs restart");
+            // A running server picks this up on SIGHUP; only a stopped one needs
+            // a restart, and in that case there is no pid to signal.
+            if Runtime::resolve().pid().is_some() {
+                println!("apply to the running server: deepseek-rs reload");
+            } else {
+                println!("takes effect on next start");
+            }
             Ok(0)
         }
         "rm" | "remove" | "delete" => {
@@ -1003,6 +1032,7 @@ SERVER
   start [-b|--bg]             foreground by default (pretty logs, Ctrl-C stops);
                               -b/--bg detaches and waits until healthy
   stop                        SIGTERM the server (SIGKILL after grace + 5s)
+  reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start (same flags as start)
   status                      pid, url, uptime, account count
   health                      one-shot health check (exit 1 when down)

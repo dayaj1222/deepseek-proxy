@@ -395,6 +395,9 @@ impl Drop for RateTicket {
     }
 }
 
+/// Pool tunables. `PartialEq` so a reload can tell whether anything in this
+/// group actually changed before paying for a rebuild (one login per account).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PoolConfig {
     pub request_delay: Duration,
     pub queue_limit: usize,
@@ -405,6 +408,20 @@ pub struct PoolConfig {
     pub account_fail_threshold: u32,
     /// Ceiling for the exponential breaker cooldown.
     pub account_cooldown_max: Duration,
+}
+
+impl PoolConfig {
+    /// Project the pool tunables out of the resolved config.
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            request_delay: Duration::from_secs_f64(cfg.request_delay_secs),
+            queue_limit: cfg.queue_limit,
+            queue_timeout: Duration::from_secs_f64(cfg.queue_timeout_secs),
+            login_cooldown: Duration::from_secs(cfg.login_cooldown_secs),
+            account_fail_threshold: cfg.account_fail_threshold,
+            account_cooldown_max: Duration::from_secs(cfg.account_cooldown_max_secs),
+        }
+    }
 }
 
 impl Default for PoolConfig {
@@ -425,6 +442,11 @@ pub struct Pool {
     owner: Mutex<HashMap<String, usize>>,
     config: PoolConfig,
     store: crate::store::Store,
+    /// Every configured email, including ones that failed to log in at boot.
+    /// A reload compares this against the newly configured list to decide
+    /// whether accounts changed; comparing live `conns` would rebuild on every
+    /// SIGHUP whenever one account is dead.
+    configured_emails: Vec<String>,
 }
 
 /// One configured account before login.
@@ -443,6 +465,7 @@ impl Pool {
         if accounts.is_empty() {
             return Err("no DeepSeek accounts configured".into());
         }
+        let configured_emails: Vec<String> = accounts.iter().map(|a| a.email.clone()).collect();
         let mut conns = Vec::new();
         for a in accounts {
             let conn = Connection::new(
@@ -474,11 +497,22 @@ impl Pool {
             owner: Mutex::new(HashMap::new()),
             config,
             store,
+            configured_emails,
         })
     }
 
     pub fn len(&self) -> usize {
         self.conns.len()
+    }
+
+    /// The tunables this pool was built with, for a reload to diff against.
+    pub fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+
+    /// Emails from the configuration, including any that could not log in.
+    pub fn configured_emails(&self) -> &[String] {
+        &self.configured_emails
     }
 
     /// First account, without binding a thread to it. Used for health probes

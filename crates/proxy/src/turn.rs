@@ -104,7 +104,7 @@ pub async fn prepare(
     let thread = match existing {
         Some(t) => t,
         None => {
-            let conn = state.pool.route(key).await;
+            let conn = state.pool().route(key).await;
             let session_id = {
                 let _slot = conn
                     .acquire()
@@ -137,7 +137,7 @@ pub async fn prepare(
     let ref_file_ids = match loaded.data {
         None => Vec::new(),
         Some(bytes) => {
-            let conn = state.pool.route(key).await;
+            let conn = state.pool().route(key).await;
             let _slot = conn
                 .acquire()
                 .await

@@ -176,7 +176,8 @@ the origin, so no allowlist is needed.
  "threads":{"in_memory":0},
  "db":{"threads":0,"bindings":0,"api_keys":0,"accounts":0,"cached_tokens":0},
  "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null,
-              "breaker":"closed","retry_in_secs":null}]}
+              "breaker":"closed","retry_in_secs":null}],
+ "config":{"generation":1,"loaded_at_secs_ago":0,"last_error":null}}
 ```
 
 With the server down, `stats` falls back to database counts and says so on
@@ -193,7 +194,8 @@ a bug report locates the whole turn.
 SERVER
   serve                       foreground (Ctrl-C stops)
   start [-b|--bg]             foreground by default; -b detaches, waits until healthy
-  stop                        SIGTERM (SIGKILL after 15s)
+  stop                        SIGTERM (SIGKILL after grace + 5s)
+  reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start
   status                      pid, url, uptime, account count
   health                      one-shot check (exit 1 when down)
@@ -247,6 +249,14 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   served; what cannot be retried fails with a typed error.
 - **Shutdown is bounded.** On SIGTERM `/readyz` immediately reports `503`, then
   in-flight turns get `shutdown_grace_secs` to finish before the process exits.
+- **Config is hot-reloadable.** `deepseek-rs reload` (or `kill -HUP <pid>`)
+  re-reads `config.toml` and the account list without a restart and without
+  dropping a turn: a turn keeps the settings it started with. A config that does
+  not parse leaves the running one in place and is reported in
+  `/stats.config.last_error`. `host`, `port`, `db_path` and `image_max_bytes`
+  cannot change while bound; a reload logs `not reloadable; restart required`
+  instead of pretending. Adding or removing an account rebuilds the pool in the
+  background — thread bindings live in SQLite, so no conversation is stranded.
 - **A flapping account is taken out of rotation.** After
   `account_fail_threshold` consecutive failures its breaker opens for
   `login_cooldown_secs * 2^k` (capped by `account_cooldown_max_secs`), its
