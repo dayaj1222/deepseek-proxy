@@ -1885,6 +1885,33 @@ pub(crate) async fn connect_pool(
     Ok(Arc::new(p))
 }
 
+/// Build the HTTP surface. Extracted from `main()` so integration tests can
+/// drive the real router over a real socket without a DeepSeek account.
+fn build_router(state: AppState) -> Router {
+    // axum buffers the whole body before `Json<ChatRequest>` runs and refuses
+    // anything over 2 MiB by default. A single 10 MiB image is ~13.3 MiB of
+    // base64, so the default rejects perfectly valid turns with
+    // "Failed to buffer the request body: length limit exceeded". The cap is
+    // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
+    // large multi-image turns and big tool transcripts get through.
+    let body_limit = state
+        .settings
+        .image_max_bytes
+        .saturating_mul(2)
+        .max(128 << 20);
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/stats", get(stats))
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .with_state(state)
+        // Must come AFTER the routes: `Router::layer` only wraps routes that
+        // already exist, so placing it earlier silently does nothing.
+        .layer(axum::extract::DefaultBodyLimit::max(body_limit))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rust ignores SIGPIPE by default, so `deepseek-rs stats | head` panics with
@@ -1979,22 +2006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "Failed to buffer the request body: length limit exceeded". The cap is
     // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
     // large multi-image turns and big tool transcripts get through.
-    let body_limit = state
-        .settings
-        .image_max_bytes
-        .saturating_mul(2)
-        .max(128 << 20);
-
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/stats", get(stats))
-        .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
-        .with_state(state)
-        // Must come AFTER the routes: `Router::layer` only wraps routes that
-        // already exist, so placing it earlier silently does nothing.
-        .layer(axum::extract::DefaultBodyLimit::max(body_limit));
+    let app = build_router(state);
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

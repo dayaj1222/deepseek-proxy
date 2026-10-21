@@ -15,6 +15,19 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 pub const BASE_URL: &str = "https://chat.deepseek.com";
+
+/// Production base URL unless `DEEPSEEK_BASE_URL` overrides it.
+///
+/// The override exists for the integration tests, which point a real proxy at a
+/// local mock upstream. It is deliberately undocumented in the README's config
+/// table: it is not a supported deployment knob, only a test seam.
+pub fn base_url() -> String {
+    std::env::var("DEEPSEEK_BASE_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| BASE_URL.to_string())
+}
 pub const COMPLETION_PATH: &str = "/api/v0/chat/completion";
 pub const UPLOAD_PATH: &str = "/api/v0/file/upload_file";
 const FETCH_FILES_PATH: &str = "/api/v0/file/fetch_files";
@@ -158,6 +171,8 @@ impl CompletionBody {
 pub struct Client {
     http: reqwest::Client,
     token: String,
+    /// Upstream root, `https://chat.deepseek.com` in production.
+    base: String,
 }
 
 impl Client {
@@ -167,13 +182,24 @@ impl Client {
     }
 
     fn new(token: String) -> Self {
+        Self::with_base_url(token, base_url())
+    }
+
+    /// Build a client against an explicit upstream root.
+    pub fn with_base_url(token: String, base: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .danger_accept_invalid_certs(false)
                 .build()
                 .expect("reqwest client"),
             token,
+            base: base.into().trim_end_matches('/').to_string(),
         }
+    }
+
+    /// Upstream root this client talks to.
+    pub fn base_url(&self) -> &str {
+        &self.base
     }
 
     pub fn token(&self) -> &str {
@@ -195,6 +221,18 @@ impl Client {
     /// `device_id` must come from [`get_device_id`]; the server rejects
     /// fabricated values with `RISK_DEVICE_DETECTED`.
     pub async fn login(email: &str, password: &str, device_id: &str) -> Result<Self, ClientError> {
+        Self::login_at(base_url(), email, password, device_id).await
+    }
+
+    /// Login against an explicit upstream root.
+    pub async fn login_at(
+        base: impl Into<String>,
+        email: &str,
+        password: &str,
+        device_id: &str,
+    ) -> Result<Self, ClientError> {
+        let base = base.into();
+        let base = base.trim_end_matches('/');
         let http = reqwest::Client::new();
         let body = json!({
             "email": email,
@@ -203,7 +241,7 @@ impl Client {
             "os": "ios",
         });
         let resp = http
-            .post(format!("{BASE_URL}{LOGIN_PATH}"))
+            .post(format!("{base}{LOGIN_PATH}"))
             .headers(base_headers())
             .json(&body)
             .send()
@@ -221,7 +259,7 @@ impl Client {
     pub async fn create_chat_session(&self) -> Result<String, ClientError> {
         let resp = self
             .http
-            .post(format!("{BASE_URL}{SESSION_CREATE_PATH}"))
+            .post(format!("{}{SESSION_CREATE_PATH}", self.base))
             .headers(self.authed_headers())
             .json(&json!({ "character_id": 1 }))
             .send()
@@ -237,7 +275,7 @@ impl Client {
     pub async fn pow_challenge(&self, target_path: &str) -> Result<Challenge, ClientError> {
         let resp = self
             .http
-            .post(format!("{BASE_URL}{POW_CHALLENGE_PATH}"))
+            .post(format!("{}{POW_CHALLENGE_PATH}", self.base))
             .headers(self.authed_headers())
             .json(&json!({ "target_path": target_path }))
             .send()
@@ -296,7 +334,7 @@ impl Client {
         loop {
             let resp = self
                 .http
-                .get(format!("{BASE_URL}{FETCH_FILES_PATH}"))
+                .get(format!("{}{FETCH_FILES_PATH}", self.base))
                 .headers(self.authed_headers())
                 .query(&[("file_ids", file_id)])
                 .send()
@@ -389,7 +427,7 @@ impl Client {
 
         let resp = self
             .http
-            .post(format!("{BASE_URL}{UPLOAD_PATH}"))
+            .post(format!("{}{UPLOAD_PATH}", self.base))
             .headers(headers)
             .multipart(form)
             .send()
@@ -435,7 +473,7 @@ impl Client {
         );
         let resp = self
             .http
-            .post(format!("{BASE_URL}{COMPLETION_PATH}"))
+            .post(format!("{}{COMPLETION_PATH}", self.base))
             .headers(headers)
             .json(body)
             .send()
