@@ -75,6 +75,27 @@ struct Settings {
     heartbeat_interval_secs: f64,
 }
 
+impl Settings {
+    /// Project the reloadable subset of the resolved config.
+    ///
+    /// Restart-only keys (`host`, `port`, `db_path`, `image_max_bytes`) are
+    /// still copied here because a running process reads them from somewhere,
+    /// but a reload cannot change them; see [`restart_only_keys`].
+    fn from_config(cfg: &config::Config) -> Self {
+        Self {
+            thinking_default: cfg.thinking,
+            search_enabled: cfg.search,
+            model_name: cfg.model.clone(),
+            rate_limit_max_retries: cfg.rate_limit_max_retries,
+            rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
+            tool_repair_max_retries: cfg.tool_repair_max_retries,
+            request_timeout_secs: cfg.request_timeout_secs,
+            image_max_bytes: cfg.image_max_bytes,
+            heartbeat_interval_secs: cfg.heartbeat_interval_secs,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     pool: Arc<pool::Pool>,
@@ -95,13 +116,81 @@ struct AppState {
 /// values they started with.
 struct SettingsHandle {
     current: std::sync::RwLock<Arc<Settings>>,
+    /// The resolved config behind `current`, kept so a reload can tell a
+    /// restart-only key apart from a live one.
+    config: std::sync::Mutex<config::Config>,
+    /// Bumped on every successful reload; 1 means "as loaded at boot".
+    generation: AtomicU64,
+    /// When the running config was installed.
+    loaded_at: std::sync::Mutex<Instant>,
+    /// Last reload failure. `None` means the running config is the last good
+    /// one and nothing has failed since.
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+/// Keys that cannot change while the process is running.
+///
+/// `host`/`port` are already bound, `db_path` is an open SQLite handle, and
+/// `image_max_bytes` is baked into `DefaultBodyLimit` when the router is built.
+/// A reload reports these instead of pretending to apply them.
+fn restart_only_keys(old: &config::Config, new: &config::Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if old.host != new.host || old.port != new.port {
+        changed.push("host/port");
+    }
+    if old.db_path != new.db_path {
+        changed.push("db_path");
+    }
+    if old.image_max_bytes != new.image_max_bytes {
+        changed.push("image_max_bytes");
+    }
+    changed
 }
 
 impl SettingsHandle {
-    fn new(settings: Settings) -> Self {
+    fn new(config: config::Config) -> Self {
         Self {
-            current: std::sync::RwLock::new(Arc::new(settings)),
+            current: std::sync::RwLock::new(Arc::new(Settings::from_config(&config))),
+            config: std::sync::Mutex::new(config),
+            generation: AtomicU64::new(1),
+            loaded_at: std::sync::Mutex::new(Instant::now()),
+            last_error: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Install a new config. Running turns keep the snapshot they took.
+    fn replace(&self, config: config::Config) -> u64 {
+        let settings = Settings::from_config(&config);
+        *self.current.write().expect("settings lock poisoned") = Arc::new(settings);
+        *self.config.lock().expect("settings lock poisoned") = config;
+        *self.loaded_at.lock().expect("settings lock poisoned") = Instant::now();
+        *self.last_error.lock().expect("settings lock poisoned") = None;
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Record a failed reload. The running config stays untouched.
+    fn note_error(&self, error: String) {
+        *self.last_error.lock().expect("settings lock poisoned") = Some(error);
+    }
+
+    /// `(generation, seconds_since_last_successful_load, last_error)`.
+    fn snapshot(&self) -> (u64, u64, Option<String>) {
+        let last_error = self.last_error.lock().expect("settings lock poisoned").clone();
+        (
+            self.generation.load(Ordering::Relaxed),
+            self.loaded_at
+                .lock()
+                .expect("settings lock poisoned")
+                .elapsed()
+                .as_secs(),
+            last_error,
+        )
+    }
+
+    /// Restart-only keys that changed since the running config was loaded.
+    fn restart_only_changes(&self, new: &config::Config) -> Vec<&'static str> {
+        let old = self.config.lock().expect("settings lock poisoned");
+        restart_only_keys(&old, new)
     }
 
     /// Cheap: one Arc clone under a read lock, never held across an await.
@@ -693,12 +782,21 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
         })
         .collect();
 
+    let (config_generation, config_age_secs, config_last_error) = state.settings.snapshot();
+
     Json(json!({
         "pid": std::process::id(),
         "uptime_secs": s.uptime_secs(),
         "model": state.settings.get().model_name,
         "thinking": state.settings.get().thinking_default,
         "search": state.settings.get().search_enabled,
+        // Reload state, so `deepseek-rs stats` answers "did my SIGHUP take?"
+        // and "is the running config the last good one?" without reading logs.
+        "config": {
+            "generation": config_generation,
+            "loaded_at_secs_ago": config_age_secs,
+            "last_error": config_last_error,
+        },
         "requests": {
             "total": s.total.load(Ordering::Relaxed),
             "ok": s.ok.load(Ordering::Relaxed),
@@ -2287,17 +2385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("pow challenge ok (account {})", conn.email);
     }
 
-    let settings = Settings {
-        thinking_default: cfg.thinking,
-        search_enabled: cfg.search,
-        model_name: cfg.model.clone(),
-        rate_limit_max_retries: cfg.rate_limit_max_retries,
-        rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
-        tool_repair_max_retries: cfg.tool_repair_max_retries,
-        request_timeout_secs: cfg.request_timeout_secs,
-        image_max_bytes: cfg.image_max_bytes,
-        heartbeat_interval_secs: cfg.heartbeat_interval_secs,
-    };
+    let settings = Settings::from_config(&cfg);
     tracing::info!(
         db_path = %cfg.db_path,
         model = %settings.model_name,
@@ -2308,7 +2396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         pool,
-        settings: Arc::new(SettingsHandle::new(settings)),
+        settings: Arc::new(SettingsHandle::new(cfg.clone())),
         threads: Arc::new(threads::Threads::new(Arc::new(
             threads::SqlitePersist::new(store.clone()),
         ))),
@@ -2334,6 +2422,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // first (new turns go elsewhere), then the drain is bounded: whatever is
     // still running when the grace period ends is abandoned, because holding
     // the process hostage is worse than truncating one stream.
+    // Hot reload: SIGHUP re-reads the config. Spawned, never awaited here.
+    tokio::spawn(reload_loop(state.clone()));
+
     let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
     let stats_for_signal = state.stats.clone();
     let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -2353,6 +2444,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("stopped");
     Ok(())
+}
+
+/// Serializes reloads: two SIGHUPs close together must not interleave.
+static RELOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Re-read `config.toml` and install it, without dropping a running turn.
+///
+/// A turn already in flight keeps the snapshot it took, so nothing here can
+/// move a deadline mid-stream. Two failure modes are handled explicitly: a
+/// config that does not parse leaves the running one untouched (and says so in
+/// `/stats`), and a key that cannot change while bound is reported rather than
+/// silently ignored.
+async fn reload(state: &AppState) {
+    let _guard = RELOAD_LOCK.lock().await;
+    if state.stats.shutting_down.load(Ordering::Relaxed) {
+        tracing::info!("SIGHUP ignored: shutting down");
+        return;
+    }
+    tracing::info!("reloading config");
+
+    let fresh = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "config reload failed; keeping the running config");
+            state.settings.note_error(e);
+            return;
+        }
+    };
+
+    // Reported before the swap, because `replace` moves `fresh`.
+    for key in state.settings.restart_only_changes(&fresh) {
+        tracing::warn!(key, "not reloadable; restart required");
+    }
+    let generation = state.settings.replace(fresh);
+    tracing::info!(generation, "config reloaded");
+}
+
+/// Apply SIGHUP forever. Separate from [`shutdown_signal`] so the two never
+/// compete for the same signal.
+async fn reload_loop(state: AppState) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let Ok(mut hup) = signal(SignalKind::hangup()) else {
+        tracing::warn!("SIGHUP unavailable; hot reload is disabled");
+        return;
+    };
+    loop {
+        hup.recv().await;
+        reload(&state).await;
+    }
 }
 
 async fn shutdown_signal() {
@@ -2478,6 +2618,56 @@ mod tests {
         assert_eq!(e.status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(e.code, "invalid_request");
         assert_eq!(e.param.as_deref(), Some("messages.0.tool_call_id"));
+    }
+
+    #[test]
+    fn settings_handle_swaps_and_reports_generation() {
+        let mut cfg = config::Config::load().expect("config loads");
+        cfg.heartbeat_interval_secs = 10.0;
+        let handle = SettingsHandle::new(cfg.clone());
+
+        assert_eq!(handle.get().heartbeat_interval_secs, 10.0);
+        assert_eq!(handle.snapshot().0, 1);
+
+        cfg.heartbeat_interval_secs = 3.0;
+        assert_eq!(handle.replace(cfg), 2);
+        assert_eq!(handle.get().heartbeat_interval_secs, 3.0);
+        assert_eq!(handle.snapshot().0, 2);
+        assert_eq!(handle.snapshot().2, None);
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_running_config_and_records_the_error() {
+        let cfg = config::Config::load().expect("config loads");
+        let before = cfg.model.clone();
+        let handle = SettingsHandle::new(cfg);
+
+        handle.note_error("bad toml".into());
+
+        // The running config is untouched: a parse error must not brick a
+        // server that is already serving.
+        assert_eq!(handle.get().model_name, before);
+        assert_eq!(handle.snapshot().0, 1);
+        assert_eq!(handle.snapshot().2.as_deref(), Some("bad toml"));
+    }
+
+    #[test]
+    fn restart_only_keys_are_reported_not_applied() {
+        let a = config::Config::load().expect("config loads");
+        let mut b = config::Config::load().expect("config loads");
+        assert!(restart_only_keys(&a, &b).is_empty());
+
+        b.port = a.port.wrapping_add(1);
+        b.db_path = format!("{}.other", a.db_path);
+        b.image_max_bytes = a.image_max_bytes + 1;
+        let changed = restart_only_keys(&a, &b);
+        assert!(changed.contains(&"host/port"), "{changed:?}");
+        assert!(changed.contains(&"db_path"), "{changed:?}");
+        assert!(changed.contains(&"image_max_bytes"), "{changed:?}");
+
+        // A live key is not in the list: it is applied, not reported.
+        b.request_timeout_secs = a.request_timeout_secs + 5.0;
+        assert!(!restart_only_keys(&a, &b).contains(&"request_timeout_secs"));
     }
 
     #[test]

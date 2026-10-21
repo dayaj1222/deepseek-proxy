@@ -9,7 +9,7 @@ mod support;
 use serde_json::json;
 use support::{
     complete, complete_with_key, hello_turn, spawn_app, spawn_app_with_env, spawn_app_with_keys,
-    sse_reply, start_mock, MockScript, Step, PLAIN_SSE,
+    sse_reply, start_mock, stats_until, MockScript, Step, PLAIN_SSE,
 };
 
 /// Concatenate every delta content string in an SSE body.
@@ -586,6 +586,66 @@ async fn unsupported_endpoints_answer_501_not_404() {
         assert_eq!(body["error"]["code"], json!("not_supported"), "{path}: {body}");
         assert_eq!(body["error"]["type"], json!("server_error"));
     }
+}
+
+/// A SIGHUP re-reads `config.toml` and installs it, without restarting and
+/// without dropping a turn. `/stats.config.generation` is the proof it took.
+#[tokio::test]
+async fn a_sighup_reloads_the_config() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let before = stats_until(&app, "the boot config", |s| {
+        s["config"]["generation"].as_u64() == Some(1)
+    })
+    .await;
+    assert_eq!(before["config"]["generation"], json!(1));
+    assert!(before["config"]["last_error"].is_null());
+
+    // A live key, changed the way an operator would.
+    app.write_config("[limits]\nrequest_timeout_secs = 42.0\n");
+    app.sighup();
+
+    let after = stats_until(&app, "generation 2", |s| {
+        s["config"]["generation"].as_u64() == Some(2)
+    })
+    .await;
+    assert!(after["config"]["last_error"].is_null(), "{after}");
+
+    // The proxy still serves after the reload: a config swap must not disturb
+    // the listener or the pool.
+    let resp = complete(&app, streamed(hello_turn())).await;
+    assert_eq!(resp.status(), 200);
+}
+
+/// A config that does not parse must leave the running one alone: refusing a
+/// reload is correct, bricking a serving process is not.
+#[tokio::test]
+async fn an_invalid_config_keeps_the_running_one_and_reports_the_error() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    stats_until(&app, "the boot config", |s| {
+        s["config"]["generation"].as_u64() == Some(1)
+    })
+    .await;
+
+    app.write_config("this is not toml = = =\n");
+    app.sighup();
+
+    let after = stats_until(&app, "a recorded reload error", |s| {
+        !s["config"]["last_error"].is_null()
+    })
+    .await;
+    assert_eq!(
+        after["config"]["generation"],
+        json!(1),
+        "a failed reload must not bump the generation: {after}"
+    );
+
+    // Still serving on the old config.
+    let resp = complete(&app, streamed(hello_turn())).await;
+    assert_eq!(resp.status(), 200);
 }
 
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");

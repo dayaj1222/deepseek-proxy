@@ -183,6 +183,24 @@ pub struct App {
     pub base: String,
     child: std::process::Child,
     dir: std::path::PathBuf,
+    config: std::path::PathBuf,
+}
+
+impl App {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Send SIGHUP, which the server treats as "re-read the config".
+    pub fn sighup(&self) {
+        let rc = unsafe { libc::kill(self.pid() as i32, libc::SIGHUP) };
+        assert_eq!(rc, 0, "kill(SIGHUP) failed");
+    }
+
+    /// Rewrite the running config, the way an operator would before a SIGHUP.
+    pub fn write_config(&self, body: &str) {
+        std::fs::write(&self.config, body).expect("write config.toml");
+    }
 }
 
 impl Drop for App {
@@ -202,6 +220,30 @@ fn free_port() -> u16 {
 /// pairs configured through the environment.
 pub async fn spawn_app(upstream: &str, accounts: &[(&str, &str)]) -> App {
     spawn_app_with_keys(upstream, accounts, &[]).await
+}
+
+/// Poll `/stats` until `pred` accepts it, or fail after ~5s.
+///
+/// A reload is asynchronous by design — the signal is delivered, then the
+/// config is re-read — so tests must wait for the effect rather than sleep a
+/// guessed amount and hope.
+pub async fn stats_until(
+    app: &App,
+    what: &str,
+    mut pred: impl FnMut(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..100 {
+        let resp = reqwest::get(format!("{}/stats", app.base))
+            .await
+            .expect("GET /stats");
+        last = resp.json().await.expect("stats json");
+        if pred(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}; last stats: {last}");
 }
 
 /// `spawn_app` with extra environment overrides, for config that is read once
@@ -237,6 +279,12 @@ async fn spawn_with(
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
+    // Every spawned proxy gets its own config file, and `CONFIG_PATH` points at
+    // it. Without this a test would inherit the repo's real `config.toml`, and
+    // the hot-reload tests would have nothing safe to rewrite.
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, "").expect("seed config.toml");
+
     for (name, secret) in keys {
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"))
             .arg("keys")
@@ -257,6 +305,7 @@ async fn spawn_with(
         .env("PROXY_HOST", "127.0.0.1")
         .env("PROXY_PORT", port.to_string())
         .env("DB_PATH", dir.join("test.db"))
+        .env("CONFIG_PATH", &config_path)
         .env("DEEPSEEK_RUNTIME_DIR", &dir)
         // Never inherit the developer's real accounts from `../deepseek/.env`:
         // a test's account list must be exactly what the test declared.
@@ -285,7 +334,12 @@ async fn spawn_with(
             .map(|r| r.status().is_success())
             .unwrap_or(false)
         {
-            return App { base, child, dir };
+            return App {
+                base,
+                child,
+                dir,
+                config: config_path,
+            };
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
