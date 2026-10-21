@@ -25,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("1. login");
     let client = Client::login(&email, &password, client::get_device_id()).await?;
-    println!("   token: {}...", &client.token()[..12.min(client.token().len())]);
+    println!(
+        "   token: {}...",
+        &client.token()[..12.min(client.token().len())]
+    );
 
     println!("2. create_chat_session");
     let session = client.create_chat_session().await?;
@@ -38,7 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ch.salt, ch.expire_at, ch.difficulty, ch.algorithm
     );
     let header = client.pow_header(COMPLETION_PATH).await?;
-    println!("   header: {}... ({} b64 chars)", &header[..24.min(header.len())], header.len());
+    println!(
+        "   header: {}... ({} b64 chars)",
+        &header[..24.min(header.len())],
+        header.len()
+    );
 
     println!("4. stream completion (thinking on, search off)");
     let mut body = CompletionBody::new(&session, "What is 17*23? Answer in one short line.");
@@ -62,8 +69,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|e| e.text.as_str())
         .collect();
     println!("   events={}", events.len());
-    println!("   reasoning ({} chars): {}", reasoning.len(), truncate(&reasoning, 160));
-    println!("   answer    ({} chars): {}", answer.len(), truncate(&answer, 160));
+    println!(
+        "   reasoning ({} chars): {}",
+        reasoning.len(),
+        truncate(&reasoning, 160)
+    );
+    println!(
+        "   answer    ({} chars): {}",
+        answer.len(),
+        truncate(&answer, 160)
+    );
 
     if answer.is_empty() {
         return Err("no answer text produced".into());

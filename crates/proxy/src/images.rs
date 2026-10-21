@@ -155,9 +155,10 @@ async fn fetch_remote(url: &str, max_bytes: usize) -> Result<Vec<u8>, ImageError
             return Err(err("Invalid or unavailable image"));
         }
     } else {
-        let addrs = tokio::net::lookup_host((host.as_str(), parsed.port_or_known_default().unwrap_or(80)))
-            .await
-            .map_err(|_| err("Invalid or unavailable image"))?;
+        let addrs =
+            tokio::net::lookup_host((host.as_str(), parsed.port_or_known_default().unwrap_or(80)))
+                .await
+                .map_err(|_| err("Invalid or unavailable image"))?;
         let mut seen = false;
         for addr in addrs {
             seen = true;

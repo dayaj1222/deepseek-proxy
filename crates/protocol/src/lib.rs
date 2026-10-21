@@ -8,6 +8,5 @@ pub mod fragment;
 
 pub use fragment::{
     classify_line, is_context_limit, is_invalid_message_id, route_event, route_stream, Channel,
-    FragmentRouter, LineKind,
-    RerouteEvent,
+    FragmentRouter, LineKind, RerouteEvent,
 };

@@ -8,7 +8,10 @@ fn main() {
         (Some("hash"), 4) => {
             let nonce: u64 = args[3].parse().expect("nonce must be u64");
             let d = pow::deepseek_hash(&args[2], nonce);
-            println!("{}", d.iter().map(|b| format!("{b:02x}")).collect::<String>());
+            println!(
+                "{}",
+                d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
         }
         (Some("solve"), 5) => {
             let difficulty: u64 = args[4].parse().expect("difficulty must be u64");

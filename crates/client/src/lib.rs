@@ -376,9 +376,8 @@ impl Client {
             headers.insert(
                 reqwest::header::HeaderName::from_bytes(name.as_bytes())
                     .expect("static header name"),
-                reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
-                    ClientError::Shape(format!("header {name}: {e}"))
-                })?,
+                reqwest::header::HeaderValue::from_str(&value)
+                    .map_err(|e| ClientError::Shape(format!("header {name}: {e}")))?,
             );
         }
 

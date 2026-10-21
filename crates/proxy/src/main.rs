@@ -103,10 +103,7 @@ impl AppState {
     /// The guard is held from before the parent id is read until the whole turn
     /// (including every correction turn) is finished, which is what keeps two
     /// overlapping requests on one thread from forking the conversation.
-    async fn turn_guard(
-        &self,
-        key: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    async fn turn_guard(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut map = self.turns.lock().await;
             map.entry(key.to_string())
@@ -1245,7 +1242,12 @@ async fn chat_completions(
     // told what it lost. Failing the turn with a 400 instead would wedge the
     // thread: the client retries the very same delta, so the rejection repeats
     // forever and the session never advances.
-    let loaded = match images::load(delta_messages(&req.messages), state.settings.image_max_bytes).await {
+    let loaded = match images::load(
+        delta_messages(&req.messages),
+        state.settings.image_max_bytes,
+    )
+    .await
+    {
         Ok(l) => l,
         Err(e) => {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -1269,7 +1271,12 @@ async fn chat_completions(
         );
     }
 
-    let (prompt, replay) = build_prompts(&req, existing.as_ref(), &system_extra, image_note.as_deref());
+    let (prompt, replay) = build_prompts(
+        &req,
+        existing.as_ref(),
+        &system_extra,
+        image_note.as_deref(),
+    );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
         return bad_request("no user message or tool result in continuation turn");
@@ -1811,37 +1818,36 @@ async fn stream_response(
             // A stalled upstream becomes a visible error instead of a hang.
             let budget = std::time::Duration::from_secs_f64(state.settings.request_timeout_secs)
                 .saturating_sub(started.elapsed());
-            let pumped =
-                match tokio::time::timeout(
-                    budget,
-                    pump(resp, &tx, &id, &model, created, idle, include_usage),
-                )
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(_) => {
-                        state.stats.errors.fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(
-                            thread = %key,
-                            timeout_s = state.settings.request_timeout_secs,
-                            "turn timed out waiting for upstream"
-                        );
-                        fail_turn(
-                            &state,
-                            &key,
-                            &session_id,
-                            cursor,
-                            &tx,
-                            ProxyError::new(
-                                "Request processing timed out",
-                                axum::http::StatusCode::GATEWAY_TIMEOUT,
-                                "request_timeout",
-                            ),
-                        )
-                        .await;
-                        return;
-                    }
-                };
+            let pumped = match tokio::time::timeout(
+                budget,
+                pump(resp, &tx, &id, &model, created, idle, include_usage),
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(_) => {
+                    state.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        thread = %key,
+                        timeout_s = state.settings.request_timeout_secs,
+                        "turn timed out waiting for upstream"
+                    );
+                    fail_turn(
+                        &state,
+                        &key,
+                        &session_id,
+                        cursor,
+                        &tx,
+                        ProxyError::new(
+                            "Request processing timed out",
+                            axum::http::StatusCode::GATEWAY_TIMEOUT,
+                            "request_timeout",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            };
             drop(slot);
 
             // Advance the cursor only on a turn that actually succeeded.
@@ -1951,7 +1957,8 @@ async fn stream_response(
                     Ok(fresh) => {
                         let thinking = body.thinking_enabled;
                         let search = body.search_enabled;
-                        body = completion_body(&fresh, &replay, thinking, search, &body.ref_file_ids);
+                        body =
+                            completion_body(&fresh, &replay, thinking, search, &body.ref_file_ids);
                         // The rebuilt session is a different conversation: point
                         // the cursor at it, or the next turn parents into the
                         // session we just abandoned.
@@ -2026,16 +2033,30 @@ async fn stream_response(
                 } else {
                     CompletionError::Other(hint.clone())
                 };
-                fail_turn(&state, &key, &session_id, cursor, &tx, error_for(&state, &key, err).await)
-                    .await;
+                fail_turn(
+                    &state,
+                    &key,
+                    &session_id,
+                    cursor,
+                    &tx,
+                    error_for(&state, &key, err).await,
+                )
+                .await;
                 return;
             }
 
             match completion_with_retry(&state, &key, &body).await {
                 Ok(v) => next = Some(v),
                 Err(e) => {
-                    fail_turn(&state, &key, &session_id, cursor, &tx, error_for(&state, &key, e).await)
-                        .await;
+                    fail_turn(
+                        &state,
+                        &key,
+                        &session_id,
+                        cursor,
+                        &tx,
+                        error_for(&state, &key, e).await,
+                    )
+                    .await;
                     return;
                 }
             }
@@ -2328,7 +2349,10 @@ fn validate_request(req: &ChatRequest) -> Result<(), ProxyError> {
             _ => false,
         };
         if !ok {
-            return Err(invalid("tool_choice", "Input should be a valid tool choice"));
+            return Err(invalid(
+                "tool_choice",
+                "Input should be a valid tool choice",
+            ));
         }
     }
     for (i, m) in req.messages.iter().enumerate() {
@@ -2379,14 +2403,14 @@ fn validate_request(req: &ChatRequest) -> Result<(), ProxyError> {
         let Some(func) = tool.get("function") else {
             return Err(invalid("tools", "Invalid or unsupported tool schema"));
         };
-        let name = func.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+        let name = func
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
         if name.is_empty() || name.chars().count() > 128 {
             return Err(invalid("tools", "Invalid or unsupported tool schema"));
         }
-        let parameters = func
-            .get("parameters")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let parameters = func.get("parameters").cloned().unwrap_or_else(|| json!({}));
         if !parameters.is_object() {
             return Err(invalid("tools", "Invalid or unsupported tool schema"));
         }
@@ -2400,8 +2424,12 @@ fn validate_request(req: &ChatRequest) -> Result<(), ProxyError> {
 }
 
 fn invalid(param: &str, message: &str) -> ProxyError {
-    ProxyError::new(message, axum::http::StatusCode::BAD_REQUEST, "invalid_request")
-        .with_param(param)
+    ProxyError::new(
+        message,
+        axum::http::StatusCode::BAD_REQUEST,
+        "invalid_request",
+    )
+    .with_param(param)
 }
 
 /// True when the schema contains a `$ref`/`$dynamicRef` that points outside the
@@ -2562,8 +2590,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // anything over 2 MiB by default. A single 10 MiB image is ~13.3 MiB of
     // base64, so the default rejects perfectly valid turns with
     // "Failed to buffer the request body: length limit exceeded". The cap is
-    // derived from IMAGE_MAX_BYTES, not a magic number.
-    let body_limit = state.settings.image_max_bytes.saturating_mul(2).max(32 << 20);
+    // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
+    // large multi-image turns and big tool transcripts get through.
+    let body_limit = state
+        .settings
+        .image_max_bytes
+        .saturating_mul(2)
+        .max(128 << 20);
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -2927,9 +2960,18 @@ mod tests {
         ));
         let prompt = recovery.begin_repair();
         assert!(prompt.contains("Schema(s) for the tool call(s) that failed:"));
-        assert!(prompt.contains("\"command\""), "schema must survive the dump");
-        assert!(prompt.contains("required"), "required must survive the dump");
-        assert!(!prompt.contains("\"search\""), "unfailed tools must not be dumped");
+        assert!(
+            prompt.contains("\"command\""),
+            "schema must survive the dump"
+        );
+        assert!(
+            prompt.contains("required"),
+            "required must survive the dump"
+        );
+        assert!(
+            !prompt.contains("\"search\""),
+            "unfailed tools must not be dumped"
+        );
     }
 
     #[test]
@@ -2942,9 +2984,11 @@ mod tests {
             (Some("bash".to_string()), "unterminated_block"),
         ] {
             let mut recovery = Recovery::new(specs.clone(), false, true);
-            recovery
-                .pending
-                .push(dialect::MalformedCall::new(name.clone(), String::new(), reason));
+            recovery.pending.push(dialect::MalformedCall::new(
+                name.clone(),
+                String::new(),
+                reason,
+            ));
             let prompt = recovery.begin_repair();
             assert!(
                 !prompt.contains("Schema(s) for the tool call(s) that failed:"),
@@ -2978,7 +3022,10 @@ mod tests {
                 prompt.contains("Schema(s) for the tool call(s) that failed:"),
                 "{text} must carry a schema"
             );
-            assert!(prompt.contains("\"command\""), "{text}: schema body missing");
+            assert!(
+                prompt.contains("\"command\""),
+                "{text}: schema body missing"
+            );
         }
     }
 
@@ -3014,17 +3061,11 @@ mod tests {
         );
 
         persist_cursor(&threads, &store, "t1", "s1", Some(101));
-        assert_eq!(
-            threads.lock().unwrap()["t1"].parent_message_id,
-            Some(101)
-        );
+        assert_eq!(threads.lock().unwrap()["t1"].parent_message_id, Some(101));
 
         // A later correction advances it again.
         persist_cursor(&threads, &store, "t1", "s1", Some(102));
-        assert_eq!(
-            threads.lock().unwrap()["t1"].parent_message_id,
-            Some(102)
-        );
+        assert_eq!(threads.lock().unwrap()["t1"].parent_message_id, Some(102));
         assert_eq!(
             store
                 .get_thread("t1")

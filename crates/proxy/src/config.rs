@@ -185,8 +185,7 @@ impl Config {
             heartbeat_interval_secs: env_num("HEARTBEAT_INTERVAL")
                 .unwrap_or(file.limits.heartbeat_interval_secs)
                 .max(1.0),
-            image_max_bytes: env_num("IMAGE_MAX_BYTES")
-                .unwrap_or(file.limits.image_max_bytes),
+            image_max_bytes: env_num("IMAGE_MAX_BYTES").unwrap_or(file.limits.image_max_bytes),
         })
     }
 

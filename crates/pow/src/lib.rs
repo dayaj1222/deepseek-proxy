@@ -77,8 +77,7 @@ fn keccak_f1600_23(a: &mut [u64; 25]) {
         // chi
         for y in 0..5 {
             for x in 0..5 {
-                a[x + 5 * y] = b[x + 5 * y]
-                    ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
+                a[x + 5 * y] = b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
             }
         }
 
@@ -210,10 +209,9 @@ mod tests {
     #[test]
     fn solve_live_challenge() {
         let base = "747c1cf9ebc7d7af2b86_1792333031301_";
-        let challenge = parse_hex32(
-            "fbd2c71422fe87057a4ec493107525561d0142457c7e75055396d6fb7a7bda81",
-        )
-        .unwrap();
+        let challenge =
+            parse_hex32("fbd2c71422fe87057a4ec493107525561d0142457c7e75055396d6fb7a7bda81")
+                .unwrap();
         assert_eq!(solve(base, challenge, 144_000), 55217);
     }
 

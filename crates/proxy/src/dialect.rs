@@ -164,6 +164,7 @@ pub fn inject_tool_descriptions(system_prompt: &str, tools: &[serde_json::Value]
 ///
 /// Returns calls in order. A block whose body is not a JSON object is skipped
 /// rather than mis-parsed — better to lose one call than send garbage args.
+#[allow(dead_code)]
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
     let normalized = normalize_dsml(text);
     let mut out = Vec::new();
@@ -529,10 +530,7 @@ pub fn build_repair_prompt(malformed: &[MalformedCall], specs: &[ToolSpec]) -> S
 ///
 /// The name comes from the model, so an unknown name matches no spec and adds
 /// nothing. Same tool failing twice contributes one schema.
-pub fn repair_schemas(
-    malformed: &[MalformedCall],
-    specs: &[ToolSpec],
-) -> Vec<serde_json::Value> {
+pub fn repair_schemas(malformed: &[MalformedCall], specs: &[ToolSpec]) -> Vec<serde_json::Value> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
     for m in malformed {
@@ -1138,9 +1136,11 @@ mod tests {
 /// precedes an opening tag is released immediately; a trailing partial tag
 /// (e.g. `...<inv`) is held back so it is never emitted half-formed.
 pub struct StreamToolFilter {
-    pending: String,
+    parser: Parser,
     /// Completed calls, in discovery order.
     pub calls: Vec<ToolCall>,
+    /// Blocks that failed to parse, in discovery order.
+    pub malformed: Vec<MalformedCall>,
 }
 
 impl Default for StreamToolFilter {
@@ -1152,61 +1152,188 @@ impl Default for StreamToolFilter {
 impl StreamToolFilter {
     pub fn new() -> Self {
         Self {
-            pending: String::new(),
+            parser: Parser::new(),
             calls: Vec::new(),
+            malformed: Vec::new(),
         }
     }
 
     /// Feed a text chunk; returns prose that is safe to emit as content now.
     pub fn feed(&mut self, text: &str) -> String {
+        let events = self.parser.feed(text);
+        self.collect(events)
+    }
+
+    /// Flush at end of stream. A trailing partial tag is prose; an unterminated
+    /// block is malformed, so it reaches repair instead of the client.
+    pub fn finish(&mut self) -> String {
+        let events = self.parser.finish();
+        self.collect(events)
+    }
+
+    fn collect(&mut self, events: Vec<ScanEvent>) -> String {
+        let mut prose = String::new();
+        for event in events {
+            match event {
+                ScanEvent::Text(text) => prose.push_str(&text),
+                ScanEvent::Tool(call) => self.calls.push(call),
+                ScanEvent::Malformed(bad) => self.malformed.push(bad),
+            }
+        }
+        prose
+    }
+}
+
+/// One step of the grammar, computed without mutating the buffer so the borrow
+/// of `pending` ends before anything is drained.
+enum Step {
+    /// Emit `pending[..n]` as text, drop it, keep scanning.
+    DrainText(usize),
+    /// Emit `pending[..n]` as text and stop: the rest is incomplete.
+    Hold(usize),
+    /// Emit `pending[..text_len]` as text, emit `event`, drop the block.
+    Consume {
+        text_len: usize,
+        consumed: usize,
+        event: Option<ScanEvent>,
+    },
+}
+
+/// Incremental driver over the same grammar [`scan`] implements whole.
+///
+/// `scan` stays the reference for a complete reply; this is that grammar driven
+/// chunk by chunk, and the two agree on every case — including the one they
+/// used to disagree on. An unterminated block is **malformed**, not prose: it
+/// is a call that failed, so it routes to repair rather than to the client.
+pub struct Parser {
+    pending: String,
+}
+
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Parser {
+    pub fn new() -> Self {
+        Self {
+            pending: String::new(),
+        }
+    }
+
+    /// Feed one chunk; returns every event that is now final.
+    pub fn feed(&mut self, text: &str) -> Vec<ScanEvent> {
         self.pending.push_str(text);
         let normalized = normalize_dsml(&self.pending);
         if normalized != self.pending {
             self.pending = normalized;
         }
-        let mut out = String::new();
-
+        let mut out = Vec::new();
         loop {
-            match self.pending.find(INVOKE_OPEN) {
-                None => {
-                    // Hold back a trailing incomplete tag like "<inv" or a
-                    // half-arrived marker spelling, so it is never emitted
-                    // half-formed.
-                    let keep = partial_tag_suffix(&self.pending);
-                    let split = self.pending.len() - keep;
-                    out.push_str(&self.pending[..split]);
-                    self.pending.drain(..split);
+            match step(&self.pending) {
+                Step::Hold(n) => {
+                    if n > 0 {
+                        out.push(ScanEvent::Text(self.pending[..n].to_string()));
+                        self.pending.drain(..n);
+                    }
                     break;
                 }
-                Some(start) => {
-                    let after = &self.pending[start..];
-                    match after.find(INVOKE_CLOSE) {
-                        Some(close) => {
-                            // Complete block: parse and consume it.
-                            out.push_str(&self.pending[..start]);
-                            let block = after[..close + INVOKE_CLOSE.len()].to_string();
-                            self.calls.extend(extract_tool_calls(&block));
-                            self.pending.drain(..start + close + INVOKE_CLOSE.len());
-                        }
-                        None => {
-                            // Incomplete block: emit everything before it.
-                            out.push_str(&self.pending[..start]);
-                            self.pending.drain(..start);
-                            break;
-                        }
+                Step::DrainText(n) => {
+                    out.push(ScanEvent::Text(self.pending[..n].to_string()));
+                    self.pending.drain(..n);
+                }
+                Step::Consume {
+                    text_len,
+                    consumed,
+                    event,
+                } => {
+                    if text_len > 0 {
+                        out.push(ScanEvent::Text(self.pending[..text_len].to_string()));
                     }
+                    out.extend(event);
+                    self.pending.drain(..consumed);
                 }
             }
         }
-
         out
     }
 
-    /// Flush at end of stream. An unterminated block degrades to text.
-    pub fn finish(&mut self) -> String {
+    /// End of input. A trailing partial tag is prose; an unterminated block is
+    /// malformed, matching [`scan`]'s rule for the same bytes.
+    pub fn finish(&mut self) -> Vec<ScanEvent> {
         let rest = std::mem::take(&mut self.pending);
-        // Only a *complete* block would have been parsed; anything left is prose.
-        rest
+        if rest.is_empty() {
+            return Vec::new();
+        }
+        let Some(start) = rest.find(INVOKE_OPEN) else {
+            return vec![ScanEvent::Text(rest)];
+        };
+        let after = &rest[start + INVOKE_OPEN.len()..];
+        let not_a_call = match after.chars().next() {
+            None => true,
+            Some(first) if !first.is_whitespace() => true,
+            Some(_) => !after.contains('>'),
+        };
+        if not_a_call {
+            return vec![ScanEvent::Text(rest)];
+        }
+        let tag_end = after.find('>').expect("checked just above");
+        let name = attr_value(&after[..tag_end], "name").filter(|n| !n.is_empty());
+        let body = &after[tag_end + 1..];
+        let reason = classify_body(name.as_deref(), body).unwrap_or("unterminated_block");
+        let mut out = Vec::new();
+        if start > 0 {
+            out.push(ScanEvent::Text(rest[..start].to_string()));
+        }
+        out.push(ScanEvent::Malformed(MalformedCall::new(
+            name,
+            body.to_string(),
+            reason,
+        )));
+        out
+    }
+}
+
+/// Classify the head of `pending` without mutating it.
+fn step(pending: &str) -> Step {
+    let Some(start) = pending.find(INVOKE_OPEN) else {
+        return Step::Hold(pending.len() - partial_tag_suffix(pending));
+    };
+    let after = &pending[start + INVOKE_OPEN.len()..];
+    let Some(first) = after.chars().next() else {
+        return Step::Hold(start);
+    };
+    if !first.is_whitespace() {
+        // `<invokex` is prose, not an opening tag.
+        return Step::DrainText(start + INVOKE_OPEN.len());
+    }
+    let Some(tag_end) = after.find('>') else {
+        return Step::Hold(start);
+    };
+    let body_and_rest = &after[tag_end + 1..];
+    let Some(close_rel) = body_and_rest.find(INVOKE_CLOSE) else {
+        return Step::Hold(start);
+    };
+    let name = attr_value(&after[..tag_end], "name").filter(|n| !n.is_empty());
+    let body = &body_and_rest[..close_rel];
+    let event = match classify_body(name.as_deref(), body) {
+        None => name.map(|name| {
+            ScanEvent::Tool(ToolCall {
+                name,
+                arguments: body.trim().to_string(),
+            })
+        }),
+        Some(reason) => Some(ScanEvent::Malformed(MalformedCall::new(
+            name,
+            body.to_string(),
+            reason,
+        ))),
+    };
+    Step::Consume {
+        text_len: start,
+        consumed: start + INVOKE_OPEN.len() + tag_end + 1 + close_rel + INVOKE_CLOSE.len(),
+        event,
     }
 }
 
@@ -1265,11 +1392,13 @@ mod stream_tests {
     }
 
     #[test]
-    fn unterminated_block_becomes_text_at_finish() {
+    fn unterminated_block_is_malformed_at_finish() {
         let mut f = StreamToolFilter::new();
         assert_eq!(f.feed("a <invoke name=\"x\">{"), "a ");
-        assert_eq!(f.finish(), "<invoke name=\"x\">{");
+        assert_eq!(f.finish(), "");
         assert!(f.calls.is_empty());
+        assert_eq!(f.malformed.len(), 1);
+        assert_eq!(f.malformed[0].name.as_deref(), Some("x"));
     }
 
     #[test]
