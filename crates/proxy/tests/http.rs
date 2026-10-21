@@ -13,6 +13,16 @@ use support::{
 };
 
 /// Concatenate every delta content string in an SSE body.
+/// `hello_turn()` with `stream: true`.
+///
+/// Most tests want the SSE transport because it is what they assert on; the
+/// non-streaming path has its own tests. Defaulting the helper keeps every
+/// existing body assertion meaningful.
+fn streamed(mut body: serde_json::Value) -> serde_json::Value {
+    body["stream"] = json!(true);
+    body
+}
+
 fn body_text(body: &str) -> String {
     let mut out = String::new();
     for line in body.lines() {
@@ -78,17 +88,75 @@ async fn streaming_completion_replays_the_upstream_answer() {
 
 #[tokio::test]
 async fn a_non_streaming_request_still_gets_a_complete_answer() {
-    // The proxy answers `stream: false` with a single SSE stream today (a known
-    // gap tracked in PLAN.md T-08..T-11, not this task). What must hold is that
-    // the whole answer arrives and the stream terminates.
+    // `stream: false` must be a single `chat.completion` JSON object. It used
+    // to be an SSE body, which no OpenAI SDK can parse — the client got a 200
+    // and then failed to deserialize it.
     let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
     let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
 
     let resp = complete(&app, hello_turn()).await;
     assert_eq!(resp.status(), 200);
-    let text = resp.text().await.unwrap();
-    assert!(text.contains("[DONE]"), "{text}");
-    assert!(body_text(&text).contains("391"), "{text}");
+    assert!(
+        header(&resp, "content-type").starts_with("application/json"),
+        "non-streaming responses must be JSON, got {}",
+        header(&resp, "content-type")
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("a JSON body, not SSE");
+    assert_eq!(body["object"], json!("chat.completion"));
+    assert!(
+        body.pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("391"),
+        "the answer must be in choices[0].message.content: {body}"
+    );
+    assert_eq!(body["choices"][0]["finish_reason"], json!("stop"));
+    // The collector asks the pump for usage, so a non-streaming client still
+    // gets exact token counts rather than none.
+    assert!(
+        body.pointer("/usage/completion_tokens")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|n| n > 0),
+        "usage must be reported: {body}"
+    );
+}
+
+/// A non-streaming request that produces a tool call must return it in
+/// `message.tool_calls`, the shape every SDK expects, not as SSE deltas.
+#[tokio::test]
+async fn a_non_streaming_tool_call_is_in_the_message() {
+    let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
+    let script = MockScript::new(vec![Step::Sse(sse_reply(3, 2, &[good.as_str()]))]);
+    let (upstream, _script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let mut body = hello_turn();
+    body["tools"] = json!([{
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }
+        }
+    }]);
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 200);
+    let value: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(value["choices"][0]["finish_reason"], json!("tool_calls"));
+    let call = &value["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["type"], json!("function"));
+    assert_eq!(call["function"]["name"], json!("bash"));
+    assert!(
+        call["function"]["arguments"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ls"),
+        "arguments must be the JSON string: {value}"
+    );
 }
 
 #[tokio::test]
@@ -125,7 +193,7 @@ async fn a_dead_login_fails_over_to_a_healthy_account() {
     )
     .await;
 
-    let resp = complete(&app, hello_turn()).await;
+    let resp = complete(&app, streamed(hello_turn())).await;
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
     assert!(body_text(&text).contains("391"), "{text}");
@@ -440,7 +508,7 @@ async fn a_failing_account_opens_its_breaker_and_the_thread_moves_on() {
     assert!(!resp.status().is_success(), "the 500 must reach the client");
 
     // Second turn: the thread must not go back to the broken account.
-    let resp = complete(&app, hello_turn()).await;
+    let resp = complete(&app, streamed(hello_turn())).await;
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
     assert!(body_text(&text).contains("391"), "{text}");
@@ -465,6 +533,59 @@ async fn a_failing_account_opens_its_breaker_and_the_thread_moves_on() {
             .any(|a| a["breaker"] == json!("closed") && a["healthy"] == json!(true)),
         "the other account must stay usable: {stats}"
     );
+}
+
+/// A browser preflight must succeed and carry CORS headers, and a real
+/// response must expose `x-request-id` so a UI can report it.
+#[tokio::test]
+async fn cors_preflight_succeeds_and_responses_are_readable_by_browsers() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+    let client = reqwest::Client::new();
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{}/v1/chat/completions", app.base))
+        .header("origin", "http://localhost:3000")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "authorization,content-type")
+        .send()
+        .await
+        .unwrap();
+    assert!(preflight.status().is_success(), "preflight must not 405");
+    assert_eq!(header(&preflight, "access-control-allow-origin"), "*");
+    assert!(
+        header(&preflight, "access-control-allow-headers").contains("authorization"),
+        "the preflight must allow the bearer header"
+    );
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(header(&resp, "access-control-allow-origin"), "*");
+    assert!(
+        header(&resp, "access-control-expose-headers").contains("x-request-id"),
+        "a browser client must be able to read the request id"
+    );
+}
+
+/// Endpoints this proxy does not implement answer 501 in the OpenAI envelope
+/// rather than 404, so a capability probe learns the difference.
+#[tokio::test]
+async fn unsupported_endpoints_answer_501_not_404() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    for path in ["/v1/embeddings", "/v1/completions", "/v1/audio/speech"] {
+        let resp = reqwest::Client::new()
+            .post(format!("{}{path}", app.base))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 501, "{path} must be 501");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], json!("not_supported"), "{path}: {body}");
+        assert_eq!(body["error"]["type"], json!("server_error"));
+    }
 }
 
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");

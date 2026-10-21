@@ -38,7 +38,7 @@ use axum::{
     extract::State,
     http::HeaderMap,
     response::{
-        sse::{Event, Sse},
+        sse::Sse,
         IntoResponse, Response,
     },
     routing::{get, post},
@@ -50,12 +50,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sse::{pump, route_all, unix_secs, usage_block, uuid_like, Pumped};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use threads::ThreadState;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
 #[derive(Clone)]
@@ -100,6 +98,8 @@ struct Stats {
     tool_calls: AtomicU64,
     /// Images dropped because a turn carried more than DeepSeek accepts.
     images_dropped: AtomicU64,
+    /// Set when SIGTERM/SIGINT arrives; `/readyz` reports 503 from then on.
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl Stats {
@@ -538,8 +538,17 @@ async fn healthz() -> Json<Value> {
 }
 
 /// Python's `/readyz`: login is lazy, so being up is being ready.
-async fn readyz() -> Json<Value> {
-    Json(json!({"status": "ready", "backend": "lazy_login"}))
+async fn readyz(State(state): State<AppState>) -> Response {
+    // Flip to 503 the moment shutdown starts, so a load balancer or the CLI's
+    // `start` health probe stops sending new turns while the old ones drain.
+    if state.stats.shutting_down.load(Ordering::Relaxed) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "draining", "backend": "lazy_login"})),
+        )
+            .into_response();
+    }
+    Json(json!({"status": "ready", "backend": "lazy_login"})).into_response()
 }
 
 /// Unknown route: `404` in the OpenAI error envelope, so SDK clients parse it
@@ -559,6 +568,50 @@ async fn fallback() -> Response {
 /// turn's own events inherit `req=...` without every call site learning a new
 /// argument. An inbound id is honoured only when it is short and printable: it
 /// ends up in logs, so arbitrary client bytes must not get there.
+/// Browser clients: answer the preflight and let any origin call the API.
+///
+/// The proxy is authenticated by its own bearer keys, not by the browser's
+/// origin, so an allowlist here would add a failure mode without adding a
+/// guarantee. A local UI (Open WebUI, a static page) otherwise cannot reach
+/// the API at all: its preflight gets a 405.
+async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut resp = if req.method() == axum::http::Method::OPTIONS {
+        axum::http::StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let headers = resp.headers_mut();
+    let mut allow = |name: &'static str, value: &'static str| {
+        if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+            headers.insert(name, v);
+        }
+    };
+    // `*` is fine because credentials are a header, never a cookie.
+    allow("access-control-allow-origin", "*");
+    allow(
+        "access-control-allow-headers",
+        "authorization, content-type, x-request-id, x-session-id, x-thread-id, x-session-affinity",
+    );
+    allow("access-control-allow-methods", "GET, POST, OPTIONS");
+    // Lets a browser client read the id it must quote in a bug report.
+    allow("access-control-expose-headers", "x-request-id, retry-after");
+    allow("access-control-max-age", "86400");
+    resp
+}
+
+/// `501` in the OpenAI envelope for endpoints this proxy does not implement.
+async fn not_supported(req: axum::extract::Request) -> Response {
+    ProxyError::new(
+        format!(
+            "{} is not supported by deepseek-rs; see the README for what is",
+            req.uri().path()
+        ),
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "not_supported",
+    )
+    .into_response()
+}
+
 async fn request_id(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     const HEADER: &str = "x-request-id";
     let inbound = req
@@ -1172,11 +1225,14 @@ async fn chat_completions(
         created,
         replay,
         can_recover,
-        include_usage: turn::include_usage(req.stream_options.as_ref()),
+        // A non-streaming client still gets exact token counts: ask the pump
+        // for the trailing usage chunk and let the collector fold it in.
+        include_usage: !req.stream || turn::include_usage(req.stream_options.as_ref()),
         started,
         specs,
         required,
         parallel: req.parallel_tool_calls,
+        stream: req.stream,
     })
     .await
 }
@@ -1191,14 +1247,11 @@ async fn chat_completions(
 /// Python's `stream()` does exactly this: `yield sse(event.payload())` followed
 /// by `data: [DONE]`, so a mid-stream failure is still an error the client can
 /// see rather than a clean `finish_reason: stop`.
-async fn send_stream_error(
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-    err: ProxyError,
-) {
-    let _ = tx
-        .send(Ok(Event::default().data(err.payload().to_string())))
-        .await;
-    let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+async fn send_stream_error(tx: &sse::ChunkSender, err: ProxyError) {
+    // The status only means something before the first byte; the SSE transport
+    // sends the envelope, the JSON collector turns it into a status code.
+    let _ = tx.send(sse::Chunk::Error(err.status, err.payload())).await;
+    let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 }
 
 /// Fail a turn without losing the cursor.
@@ -1212,7 +1265,7 @@ async fn fail_turn(
     key: &str,
     session_id: &str,
     cursor: Option<i64>,
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    tx: &sse::ChunkSender,
     err: ProxyError,
 ) {
     state.threads.commit(key, session_id, cursor);
@@ -1251,6 +1304,8 @@ struct LiveTurn {
     specs: Vec<dialect::ToolSpec>,
     required: bool,
     parallel: bool,
+    /// `false` collects the same chunks into one `chat.completion` body.
+    stream: bool,
 }
 
 async fn stream_response(live: LiveTurn) -> Response {
@@ -1271,8 +1326,9 @@ async fn stream_response(live: LiveTurn) -> Response {
         specs,
         required,
         parallel,
+        stream,
     } = live;
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<sse::Chunk>(32);
 
     tokio::spawn(async move {
         // Held for the whole turn, including every correction turn, so another
@@ -1303,7 +1359,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
         });
         if tx
-            .send(Ok(Event::default().data(opening.to_string())))
+            .send(sse::Chunk::Data(opening.to_string()))
             .await
             .is_err()
         {
@@ -1749,7 +1805,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": null}]
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
         }
 
         let finish_reason = if filter.calls.is_empty() {
@@ -1773,7 +1829,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {"tool_calls": calls}, "finish_reason": null}]
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
             "tool_calls"
         };
 
@@ -1806,7 +1862,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
         });
-        let _ = tx.send(Ok(Event::default().data(done.to_string()))).await;
+        let _ = tx.send(sse::Chunk::Data(done.to_string())).await;
         // With `include_usage`, OpenAI sends one last chunk with no choices and
         // the token counts, immediately before `[DONE]`.
         if include_usage {
@@ -1819,14 +1875,102 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "choices": [],
                 "usage": usage
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
         }
-        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+        let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 
         state.threads.commit(&key, &session_id, cursor);
     });
 
-    Sse::new(ReceiverStream::new(rx)).into_response()
+    if stream {
+        return Sse::new(sse::sse_stream(rx)).into_response();
+    }
+    collect_completion(rx).await
+}
+
+/// Drain a turn into one `chat.completion` body.
+///
+/// The turn itself is identical to the streaming one — same retries, same
+/// tool repair, same cursor handling — so the only difference is transport:
+/// concatenate the deltas instead of forwarding them. `stream: false` used to
+/// get an SSE body, which no OpenAI SDK can parse.
+async fn collect_completion(mut rx: sse::ChunkReceiver) -> Response {
+    let mut id = String::new();
+    let mut model = String::new();
+    let mut created = 0u64;
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut calls: Vec<Value> = Vec::new();
+    let mut finish_reason = "stop";
+    let mut usage: Option<Value> = None;
+
+    while let Some(chunk) = rx.recv().await {
+        let sse::Chunk::Data(data) = chunk else {
+            if let sse::Chunk::Error(status, payload) = chunk {
+                return (status, Json(payload)).into_response();
+            }
+            continue;
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if let Some(v) = value.get("id").and_then(Value::as_str) {
+            id = v.to_string();
+        }
+        if let Some(v) = value.get("model").and_then(Value::as_str) {
+            model = v.to_string();
+        }
+        if let Some(v) = value.get("created").and_then(Value::as_u64) {
+            created = v;
+        }
+        // The trailing usage chunk carries no choices.
+        if let Some(v) = value.get("usage").filter(|v| !v.is_null()) {
+            usage = Some(v.clone());
+        }
+        let Some(choice) = value.pointer("/choices/0") else {
+            continue;
+        };
+        if let Some(delta) = choice.get("delta") {
+            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                content.push_str(text);
+            }
+            if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+                reasoning.push_str(text);
+            }
+            if let Some(list) = delta.get("tool_calls").and_then(Value::as_array) {
+                calls.extend(list.iter().cloned());
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            finish_reason = match reason {
+                "tool_calls" => "tool_calls",
+                "length" => "length",
+                _ => "stop",
+            };
+        }
+    }
+
+    let mut message = json!({"role": "assistant", "content": content});
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    if !calls.is_empty() {
+        message["tool_calls"] = json!(calls);
+    }
+    let mut body = json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    });
+    if let Some(usage) = usage {
+        body["usage"] = usage;
+    }
+    Json(body).into_response()
 }
 
 /// Port of `ChatService.validate()`'s request-shape checks (the pydantic model
@@ -2024,6 +2168,16 @@ fn build_router(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        // Honest refusals instead of 404: a client probing capabilities should
+        // learn that this proxy does not do embeddings, not that the route is
+        // missing. One handler, one envelope.
+        .route("/v1/completions", post(not_supported))
+        .route("/v1/embeddings", post(not_supported))
+        .route("/v1/images/generations", post(not_supported))
+        .route("/v1/images/edits", post(not_supported))
+        .route("/v1/audio/speech", post(not_supported))
+        .route("/v1/audio/transcriptions", post(not_supported))
+        .route("/v1/audio/translations", post(not_supported))
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
@@ -2033,6 +2187,8 @@ fn build_router(state: AppState) -> Router {
         // Outermost: every response, including the 404/405 fallbacks, carries
         // the id, and every event logged while handling the request has it.
         .layer(axum::middleware::from_fn(request_id))
+        // Before `request_id` runs, so even a preflight gets both headers.
+        .layer(axum::middleware::from_fn(cors))
 }
 
 #[tokio::main]
@@ -2129,16 +2285,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "Failed to buffer the request body: length limit exceeded". The cap is
     // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
     // large multi-image turns and big tool transcripts get through.
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
 
-    // Graceful shutdown: finish in-flight requests, drop the pidfile.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Graceful shutdown with a deadline. axum's own graceful shutdown waits
+    // for in-flight requests forever, so one stalled SSE stream used to keep
+    // the process alive until the CLI gave up and sent SIGKILL. Readiness flips
+    // first (new turns go elsewhere), then the drain is bounded: whatever is
+    // still running when the grace period ends is abandoned, because holding
+    // the process hostage is worse than truncating one stream.
+    let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
+    let stats_for_signal = state.stats.clone();
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        stats_for_signal
+            .shutting_down
+            .store(true, Ordering::Relaxed);
+    });
+    match tokio::time::timeout(grace, serve).await {
+        Ok(r) => r?,
+        Err(_) => {
+            tracing::warn!(
+                grace_s = cfg.shutdown_grace_secs,
+                "grace period elapsed with requests still in flight; exiting"
+            );
+        }
+    }
     tracing::info!("stopped");
     Ok(())
 }

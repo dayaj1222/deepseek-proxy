@@ -583,7 +583,13 @@ async fn stop() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(1);
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // The server abandons in-flight turns after its own grace period, so wait
+    // a little longer than that before resorting to SIGKILL. Reading the same
+    // config keeps the two in step instead of hard-coding 15s in both places.
+    let grace = config::Config::load()
+        .map(|c| c.shutdown_grace_secs)
+        .unwrap_or(20);
+    let deadline = std::time::Instant::now() + Duration::from_secs(grace + 5);
     while std::time::Instant::now() < deadline {
         if !pid_alive(pid) {
             rt.clear_pid();
@@ -996,7 +1002,7 @@ SERVER
   serve                       run in the foreground (Ctrl-C to stop)
   start [-b|--bg]             foreground by default (pretty logs, Ctrl-C stops);
                               -b/--bg detaches and waits until healthy
-  stop                        SIGTERM the server (SIGKILL after 15s)
+  stop                        SIGTERM the server (SIGKILL after grace + 5s)
   restart [-b]                stop, then start (same flags as start)
   status                      pid, url, uptime, account count
   health                      one-shot health check (exit 1 when down)

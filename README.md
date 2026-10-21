@@ -82,6 +82,7 @@ queue_timeout_secs = 120     # how long one may wait for a slot
 account_fail_threshold = 3   # consecutive failures that open a breaker; 0 off
 account_cooldown_max_secs = 600  # cap for the exponential breaker cooldown
 request_timeout_secs = 300   # per-turn wall clock
+shutdown_grace_secs = 20     # in-flight turns may finish this long after SIGTERM
 heartbeat_interval_secs = 10 # SSE keep-alive
 rate_limit_max_retries = 5   # retries for a throttled turn
 rate_limit_backoff_secs = 10.0
@@ -94,7 +95,8 @@ Frequently used environment overrides: `PROXY_HOST`, `PROXY_PORT`, `DB_PATH`,
 `SEARCH_ENABLED`, `REQUEST_DELAY`, `QUEUE_LIMIT`, `QUEUE_TIMEOUT`,
 `REQUEST_TIMEOUT`, `HEARTBEAT_INTERVAL`, `IMAGE_MAX_BYTES`,
 `RATE_LIMIT_MAX_RETRIES`, `RATE_LIMIT_BACKOFF_S`, `TOOL_REPAIR_MAX_RETRIES`,
-`LOGIN_COOLDOWN`, `ACCOUNT_FAIL_THRESHOLD`, `ACCOUNT_COOLDOWN_MAX`.
+`LOGIN_COOLDOWN`, `ACCOUNT_FAIL_THRESHOLD`, `ACCOUNT_COOLDOWN_MAX`,
+`SHUTDOWN_GRACE`.
 
 Credentials never go in `config.toml`.
 
@@ -146,11 +148,24 @@ both in the same envelope (`not_found`, `method_not_allowed`).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/chat/completions` | Completions, streaming or not |
+| `POST` | `/v1/chat/completions` | Completions, streaming (`stream: true`, SSE) or not (one JSON `chat.completion`) |
 | `GET` | `/v1/models` | Advertised model ids |
 | `GET` | `/healthz` | Liveness |
-| `GET` | `/readyz` | Readiness |
+| `GET` | `/readyz` | Readiness (`503` while draining after SIGTERM) |
 | `GET` | `/stats` | Counters, per-account state, database counts |
+
+`stream: false` (the OpenAI default) returns a single `chat.completion` object
+with `choices[0].message` — including `reasoning_content` and `tool_calls` when
+the turn produced them — and a `usage` block. `stream: true` returns SSE.
+
+Endpoints this proxy does not implement — `/v1/embeddings`, the legacy
+`/v1/completions`, `/v1/images/*`, `/v1/audio/*` — answer `501` with
+`code: "not_supported"` rather than `404`, so a capability probe can tell
+"this proxy won't do it" from "no such route".
+
+CORS is fully open (`Access-Control-Allow-Origin: *`, preflight answered) so a
+local browser UI can call the API directly. Authorization is the bearer key, not
+the origin, so no allowlist is needed.
 
 `/stats` is what `deepseek-rs stats` and `status` read:
 
@@ -230,6 +245,8 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   bounded correction turn instead of an error to the client.
 - **Rate limits retry before the first byte**, so streaming clients can still be
   served; what cannot be retried fails with a typed error.
+- **Shutdown is bounded.** On SIGTERM `/readyz` immediately reports `503`, then
+  in-flight turns get `shutdown_grace_secs` to finish before the process exits.
 - **A flapping account is taken out of rotation.** After
   `account_fail_threshold` consecutive failures its breaker opens for
   `login_cooldown_secs * 2^k` (capped by `account_cooldown_max_secs`), its

@@ -102,6 +102,10 @@ pub struct LimitsSection {
     /// whole turn. Without it a stalled upstream socket hangs the request
     /// forever and nothing is ever logged.
     pub request_timeout_secs: f64,
+    /// How long in-flight turns may finish after SIGTERM, in seconds. Without
+    /// a deadline a single stalled stream blocks shutdown until the CLI's
+    /// SIGKILL.
+    pub shutdown_grace_secs: u64,
     /// SSE keep-alive interval in seconds. Python: `HEARTBEAT_INTERVAL`
     /// (default 10). Clients and proxies drop an idle stream otherwise.
     pub heartbeat_interval_secs: f64,
@@ -124,6 +128,7 @@ impl Default for LimitsSection {
             rate_limit_backoff_secs: 10.0,
             tool_repair_max_retries: 3,
             request_timeout_secs: 300.0,
+            shutdown_grace_secs: 20,
             heartbeat_interval_secs: 10.0,
             image_max_bytes: 10 * 1024 * 1024,
         }
@@ -149,6 +154,7 @@ pub struct Config {
     pub rate_limit_backoff_secs: f64,
     pub tool_repair_max_retries: u32,
     pub request_timeout_secs: f64,
+    pub shutdown_grace_secs: u64,
     pub heartbeat_interval_secs: f64,
     pub image_max_bytes: usize,
 }
@@ -196,6 +202,9 @@ impl Config {
             request_timeout_secs: env_num("REQUEST_TIMEOUT")
                 .unwrap_or(file.limits.request_timeout_secs)
                 .max(1.0),
+            shutdown_grace_secs: env_num("SHUTDOWN_GRACE")
+                .unwrap_or(file.limits.shutdown_grace_secs)
+                .max(1),
             heartbeat_interval_secs: env_num("HEARTBEAT_INTERVAL")
                 .unwrap_or(file.limits.heartbeat_interval_secs)
                 .max(1.0),

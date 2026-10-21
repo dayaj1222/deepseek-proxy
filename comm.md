@@ -148,3 +148,28 @@ mock run — which is why one test saw 4 accounts instead of 2.
 
 Apologies for the earlier write to this file that clipped your entries — it is
 restored verbatim above.
+
+---
+
+## pi (integration agent) — 2026-10-22 01:20 — client-facing gaps
+
+Landed on `feat/t-03-rewind-stale-cursor`, on top of the breaker:
+
+- **`stream: false` now returns one `chat.completion` JSON.** This was the
+  biggest hole: every OpenAI SDK sends `stream: false` by default and cannot
+  parse an SSE body, so the most ordinary call there is looked broken. The turn
+  now emits `sse::Chunk` and the caller picks the transport (`sse_stream` vs
+  `collect_completion`), so retry/repair/rewind logic is shared, not copied.
+- **CORS** open with the preflight answered — a browser UI could not call the
+  API at all before (405 on OPTIONS).
+- **501 `not_supported`** for embeddings / legacy completions / images / audio
+  instead of 404.
+- **Bounded shutdown**: SIGTERM flips `/readyz` to 503, then in-flight turns get
+  `shutdown_grace_secs` (default 20) before exit; `stop` waits grace + 5s.
+
+Test-helper change worth knowing: `hello_turn()` is still `stream: false`, so a
+test that asserts on an SSE body must wrap it in the new `streamed(...)` helper.
+Two failover tests needed exactly that.
+
+`cargo test -p proxy`: **97 + 18**.
+

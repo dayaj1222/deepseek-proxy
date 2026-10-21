@@ -67,6 +67,11 @@ queue_timeout_secs = 120
 # A stalled upstream becomes a 504 request_timeout instead of a hang.
 request_timeout_secs = 300
 
+# How long in-flight turns may finish after SIGTERM before they are abandoned,
+# in seconds. /readyz starts reporting 503 as soon as the signal arrives, and
+# `stop` waits grace + 5s before SIGKILL.
+shutdown_grace_secs = 20
+
 # SSE keep-alive interval in seconds (Python: HEARTBEAT_INTERVAL). Emits
 # `: keep-alive` while the upstream is quiet; it does not abort the turn.
 heartbeat_interval_secs = 10
