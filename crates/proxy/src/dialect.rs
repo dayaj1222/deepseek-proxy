@@ -116,10 +116,12 @@ pub fn periodic_reminder() -> String {
     s.push_str(TEMPLATE);
     s.push_str("\n!!IMPORTANT!!\n");
     s.push_str(
-        "1. Never emit </｜DSML｜｜ invoke> or related tags those are useless and will be shown to the user.\n",
+        "1. Never emit </｜｜DSML｜｜ invoke> or related tags those are useless and will be shown to the user.\n",
     );
-    s.push_str("2. Never emit the </invoke> ending tag twice.\n");
-    s.push_str("Get the format wrong and your tool call silently does nothing.");
+    s.push_str("2. Never emit the </invoke> ending tag more than once per tool call.\n");
+    s.push_str(
+        "Get the format wrong and your tool call silently does nothing and the loop might break.",
+    );
     s
 }
 

@@ -1,0 +1,176 @@
+//! HTTP-level tests over the real router against a mock upstream.
+//!
+//! Every test boots the actual `deepseek-rs` binary, points it at a local mock
+//! DeepSeek, and drives `/v1/chat/completions`. Nothing reaches the network and
+//! no account is required, which is what T-19 exists for.
+
+mod support;
+
+use serde_json::json;
+use support::{
+    complete, hello_turn, spawn_app, sse_reply, start_mock, MockScript, Step, PLAIN_SSE,
+};
+
+/// Concatenate every delta content string in an SSE body.
+fn body_text(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        let Some(payload) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        if let Some(text) = value
+            .pointer("/choices/0/delta/content")
+            .and_then(|v| v.as_str())
+        {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn health_and_models_are_served() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let client = reqwest::Client::new();
+    let health = client
+        .get(format!("{}/healthz", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
+
+    let models = client
+        .get(format!("{}/v1/models", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert!(models.status().is_success());
+}
+
+#[tokio::test]
+async fn streaming_completion_replays_the_upstream_answer() {
+    let (upstream, script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let mut body = hello_turn();
+    body["stream"] = json!(true);
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+
+    assert!(text.contains("[DONE]"), "stream must terminate: {text}");
+    assert!(
+        body_text(&text).contains("391"),
+        "expected the fixture answer, got: {text}"
+    );
+    assert_eq!(script.completions(), 1);
+}
+
+#[tokio::test]
+async fn a_non_streaming_request_still_gets_a_complete_answer() {
+    // The proxy answers `stream: false` with a single SSE stream today (a known
+    // gap tracked in PLAN.md T-08..T-11, not this task). What must hold is that
+    // the whole answer arrives and the stream terminates.
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("[DONE]"), "{text}");
+    assert!(body_text(&text).contains("391"), "{text}");
+}
+
+#[tokio::test]
+async fn a_throttled_turn_is_retried_then_succeeds() {
+    let script = MockScript::new(vec![
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::Sse(PLAIN_SSE.to_string()),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let mut body = hello_turn();
+    body["stream"] = json!(true);
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(body_text(&text).contains("391"), "{text}");
+    assert_eq!(
+        script.completions(),
+        2,
+        "one throttle plus one successful retry"
+    );
+}
+
+#[tokio::test]
+async fn a_dead_login_fails_over_to_a_healthy_account() {
+    // The dead account cannot log in at all, so boot must still succeed and the
+    // turn must land on the healthy one.
+    let (upstream, script) =
+        start_mock(MockScript::with_dead_logins(vec![], &["dead@example.com"])).await;
+    let app = spawn_app(
+        &upstream,
+        &[("live@example.com", "pw"), ("dead@example.com", "pw")],
+    )
+    .await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(body_text(&text).contains("391"), "{text}");
+    assert_eq!(script.completions(), 1);
+}
+
+#[tokio::test]
+async fn an_unknown_model_is_rejected_before_any_upstream_call() {
+    let (upstream, script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let mut body = hello_turn();
+    body["model"] = json!("gpt-4");
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 400);
+    let value: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        value.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("model_not_found")
+    );
+    assert_eq!(script.completions(), 0);
+}
+#[tokio::test]
+async fn malformed_tool_call_is_repaired_and_delivered() {
+    let bad = format!("{TOOL_OPEN}{{oops}}{TOOL_CLOSE}");
+    let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
+    let malformed = sse_reply(3, 2, &[bad.as_str()]);
+    let repaired = sse_reply(4, 3, &[good.as_str()]);
+    let script = MockScript::new(vec![Step::Sse(malformed), Step::Sse(repaired)]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+    let body = json!({
+        "model": "deepseek-chat",
+        "stream": true,
+        "messages": [{"role": "user", "content": "list files"}],
+        "tools": [{"type": "function", "function": {
+            "name": "bash", "description": "run a command",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+        }}]
+    });
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("tool_calls"), "repaired call missing: {text}");
+    assert_eq!(script.completions(), 2, "one repair turn expected");
+}
+
+const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");
+const TOOL_CLOSE: &str = concat!("</inv", "oke>");

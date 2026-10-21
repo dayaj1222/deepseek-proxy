@@ -281,12 +281,19 @@ impl Pool {
                 config.queue_timeout,
                 store.clone(),
             );
-            let client = conn
-                .initial_login()
-                .await
-                .map_err(|e| format!("login {}: {e}", conn.email))?;
-            *conn.client.write().await = client;
-            conns.push(Arc::new(conn));
+            // A dead account must not take the whole server down: skip it and
+            // keep the healthy ones, so one bad credential cannot prevent the
+            // proxy from booting with the accounts that still work.
+            match conn.initial_login().await {
+                Ok(client) => {
+                    *conn.client.write().await = client;
+                    conns.push(Arc::new(conn));
+                }
+                Err(e) => tracing::warn!("skipping account {}: {e}", conn.email),
+            }
+        }
+        if conns.is_empty() {
+            return Err("no DeepSeek account could log in".into());
         }
         Ok(Self {
             conns,

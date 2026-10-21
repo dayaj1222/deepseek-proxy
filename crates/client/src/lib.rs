@@ -252,7 +252,7 @@ impl Client {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ClientError::Shape(format!("login: {data}")))?
             .to_string();
-        Ok(Self::new(token))
+        Ok(Self::with_base_url(token, base))
     }
 
     /// `POST /api/v0/chat_session/create` -> session id.
