@@ -163,6 +163,11 @@ both in the same envelope (`not_found`, `method_not_allowed`).
 With the server down, `stats` falls back to database counts and says so on
 stderr.
 
+Every response, including errors, carries an `x-request-id` header. Send your
+own to have it echoed back; otherwise the proxy mints one. The same id is on
+every log line written while handling that request (`req=<id>`), so one id from
+a bug report locates the whole turn.
+
 ## CLI
 
 ```

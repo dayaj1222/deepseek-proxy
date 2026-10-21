@@ -108,7 +108,10 @@ impl Connection {
             }
         }
 
-        Ok(RateTicket { guard: Some(guard) })
+        Ok(RateTicket {
+            guard: Some(guard),
+            account: self.email.clone(),
+        })
     }
 
     /// Hold this account out of service for `cooldown` without moving threads.
@@ -215,6 +218,9 @@ pub struct ConnectionSnapshot {
 /// Holds an account's rate slot; release is implicit on drop.
 pub struct RateTicket {
     guard: Option<OwnedMutexGuard<GateState>>,
+    /// Account that served this turn. The caller logs it once per completed
+    /// turn; the ticket is the only place that knows which one won the route.
+    pub account: String,
 }
 
 impl Drop for RateTicket {

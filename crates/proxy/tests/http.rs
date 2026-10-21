@@ -261,5 +261,76 @@ async fn a_wrong_method_on_a_known_path_is_json_405() {
     );
 }
 
+#[tokio::test]
+async fn every_response_carries_an_x_request_id() {
+    // Success, stream, 401, 404 and 405 all go through the same middleware; a
+    // client must be able to quote one id for any of them when reporting a bug.
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app_with_keys(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("main", "sk-test-secret")],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let ok = complete_with_key(&app, hello_turn(), "sk-test-secret").await;
+    assert_eq!(ok.status(), 200);
+    let ok_id = header(&ok, "x-request-id");
+
+    let mut stream_body = hello_turn();
+    stream_body["stream"] = json!(true);
+    let streamed = complete_with_key(&app, stream_body, "sk-test-secret").await;
+    assert_eq!(streamed.status(), 200);
+    assert!(!header(&streamed, "x-request-id").is_empty());
+
+    let unauthorized = complete(&app, hello_turn()).await;
+    assert_eq!(unauthorized.status(), 401);
+    assert!(!header(&unauthorized, "x-request-id").is_empty());
+
+    let missing = client
+        .get(format!("{}/v1/nope", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    assert!(!header(&missing, "x-request-id").is_empty());
+
+    let wrong_method = client
+        .get(format!("{}/v1/chat/completions", app.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), 405);
+    assert!(!header(&wrong_method, "x-request-id").is_empty());
+
+    // Distinct requests get distinct ids, or the id is worthless for tracing.
+    assert_ne!(ok_id, header(&streamed, "x-request-id"));
+}
+
+#[tokio::test]
+async fn an_inbound_request_id_is_echoed_back() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .header("x-request-id", "trace-abc-123")
+        .json(&hello_turn())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(header(&resp, "x-request-id"), "trace-abc-123");
+}
+
+fn header(resp: &reqwest::Response, name: &str) -> String {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");
 const TOOL_CLOSE: &str = concat!("</inv", "oke>");

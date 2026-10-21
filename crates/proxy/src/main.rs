@@ -56,6 +56,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use threads::ThreadState;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::Instrument;
 
 #[derive(Clone)]
 struct Settings {
@@ -538,6 +539,31 @@ async fn fallback() -> Response {
         "not_found",
     )
     .into_response()
+}
+
+/// Echo `x-request-id`, or mint one, and carry it in every log line.
+///
+/// The id lives in a tracing span rather than in a handler parameter, so the
+/// turn's own events inherit `req=...` without every call site learning a new
+/// argument. An inbound id is honoured only when it is short and printable: it
+/// ends up in logs, so arbitrary client bytes must not get there.
+async fn request_id(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    const HEADER: &str = "x-request-id";
+    let inbound = req
+        .headers()
+        .get(HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.chars().all(|c| c.is_ascii_graphic()))
+        .map(str::to_string);
+    let id = inbound.unwrap_or_else(uuid_like);
+
+    let span = tracing::info_span!("turn", req = %id);
+    let mut resp = next.run(req).instrument(span).await;
+    if let Ok(v) = axum::http::HeaderValue::from_str(&id) {
+        resp.headers_mut().insert(HEADER, v);
+    }
+    resp
 }
 
 /// Known path, wrong method: same envelope, `405`.
@@ -1176,6 +1202,12 @@ async fn fail_turn(
     err: ProxyError,
 ) {
     state.threads.commit(key, session_id, cursor);
+    tracing::info!(
+        thread = %key,
+        status = err.status.as_u16(),
+        code = err.code,
+        "turn failed"
+    );
     send_stream_error(tx, err).await;
 }
 
@@ -1266,8 +1298,12 @@ async fn stream_response(live: LiveTurn) -> Response {
         // A fatal hint arrives BEFORE any content (aiodeepseek raises it out of
         // the stream iterator), so retrying the whole turn cannot duplicate
         // output the client already has.
-        let pumped = loop {
+        // The account is carried out of the loop, not read before it: only the
+        // attempt that produced the final reply knows which one served it, and
+        // a failover or retry in between must not be attributed to the first.
+        let (pumped, account) = loop {
             let (resp, slot) = next.take().expect("attempt in flight");
+            let account = slot.account.clone();
             // Hold the account's rate slot until the upstream body is drained.
             let idle = std::time::Duration::from_secs_f64(state.settings.heartbeat_interval_secs);
             // The whole turn is bounded, like `asyncio.timeout(REQUEST_TIMEOUT)`.
@@ -1322,7 +1358,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 if let Some(mid) = pumped.parent {
                     cursor = Some(mid);
                 }
-                break pumped;
+                break (pumped, account);
             };
 
             // Failed turn: keep the cursor we came in with.
@@ -1704,13 +1740,21 @@ async fn stream_response(live: LiveTurn) -> Response {
             .tool_calls
             .fetch_add(filter.calls.len() as u64, Ordering::Relaxed);
         state.stats.ok.fetch_add(1, Ordering::Relaxed);
+        // One line per completed turn, with everything the PLAN asks for. The
+        // request id arrives through the `turn` span, so it is not repeated
+        // here; `account` comes from the rate ticket that served the turn.
+        let turn_usage = usage_block(prompt_tokens, &prose, &filter.calls);
         tracing::info!(
             thread = %key,
+            account = %account,
+            status = 200,
             finish_reason,
             tool_calls = filter.calls.len(),
+            ms = started.elapsed().as_millis() as u64,
+            prompt_tokens = turn_usage["prompt_tokens"].as_u64().unwrap_or(0),
+            completion_tokens = turn_usage["completion_tokens"].as_u64().unwrap_or(0),
             parent = ?parent,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "stream done"
+            "turn done"
         );
 
         let done = json!({
@@ -1942,6 +1986,9 @@ fn build_router(state: AppState) -> Router {
         // Must come AFTER the routes: `Router::layer` only wraps routes that
         // already exist, so placing it earlier silently does nothing.
         .layer(axum::extract::DefaultBodyLimit::max(body_limit))
+        // Outermost: every response, including the 404/405 fallbacks, carries
+        // the id, and every event logged while handling the request has it.
+        .layer(axum::middleware::from_fn(request_id))
 }
 
 #[tokio::main]

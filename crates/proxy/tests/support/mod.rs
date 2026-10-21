@@ -39,6 +39,10 @@ pub struct MockScript {
     completions: Arc<Mutex<u32>>,
     /// Accounts whose login must fail (failover tests).
     dead_logins: Arc<Mutex<Vec<String>>>,
+    /// `parent_message_id` of every completion request, in order. This is how a
+    /// test proves the proxy resent on a *previous* cursor after the backend
+    /// rejected the newest one.
+    parents: Arc<Mutex<Vec<Option<i64>>>>,
 }
 
 impl MockScript {
@@ -47,6 +51,7 @@ impl MockScript {
             steps: Arc::new(Mutex::new(steps.into())),
             completions: Arc::new(Mutex::new(0)),
             dead_logins: Arc::new(Mutex::new(Vec::new())),
+            parents: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
