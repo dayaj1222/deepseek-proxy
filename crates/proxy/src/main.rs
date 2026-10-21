@@ -78,11 +78,39 @@ struct Settings {
 #[derive(Clone)]
 struct AppState {
     pool: Arc<pool::Pool>,
-    settings: Settings,
+    /// Live knobs. Behind a handle so a SIGHUP can swap them without a restart
+    /// or a lock held across an await.
+    settings: Arc<SettingsHandle>,
     /// Cache, turn lock and persistence for conversation threads.
     threads: Arc<threads::Threads>,
     store: store::Store,
     stats: Arc<Stats>,
+}
+
+/// The current `Settings`, swappable at runtime.
+///
+/// A turn takes one [`get`](Self::get) snapshot at its start and uses it for its
+/// whole life: changing a turn's deadline halfway through a stream would be a
+/// bug, not a feature. New turns see new values; running turns finish on the
+/// values they started with.
+struct SettingsHandle {
+    current: std::sync::RwLock<Arc<Settings>>,
+}
+
+impl SettingsHandle {
+    fn new(settings: Settings) -> Self {
+        Self {
+            current: std::sync::RwLock::new(Arc::new(settings)),
+        }
+    }
+
+    /// Cheap: one Arc clone under a read lock, never held across an await.
+    fn get(&self) -> Arc<Settings> {
+        self.current
+            .read()
+            .expect("settings lock poisoned")
+            .clone()
+    }
 }
 
 /// Process counters reported by `GET /stats`. Cheap atomics only; anything
@@ -668,9 +696,9 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "pid": std::process::id(),
         "uptime_secs": s.uptime_secs(),
-        "model": state.settings.model_name,
-        "thinking": state.settings.thinking_default,
-        "search": state.settings.search_enabled,
+        "model": state.settings.get().model_name,
+        "thinking": state.settings.get().thinking_default,
+        "search": state.settings.get().search_enabled,
         "requests": {
             "total": s.total.load(Ordering::Relaxed),
             "ok": s.ok.load(Ordering::Relaxed),
@@ -903,8 +931,8 @@ async fn completion_with_retry(
         .complete(
             thread_id,
             body,
-            state.settings.rate_limit_max_retries,
-            state.settings.rate_limit_backoff_secs,
+            state.settings.get().rate_limit_max_retries,
+            state.settings.get().rate_limit_backoff_secs,
             |attempt, wait| {
                 state.stats.retries.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(
@@ -1111,9 +1139,9 @@ fn resolve_tools(req: &ChatRequest) -> (Vec<dialect::ToolSpec>, bool) {
 ///
 /// Python: `backoff * min(attempt + 1, max(1, max_retries))`, with the base
 /// floored at 0.5s by `Backend.generate()`.
-fn backoff_delay(state: &AppState, attempt: u32) -> f64 {
-    let max = state.settings.rate_limit_max_retries.max(1);
-    state.settings.rate_limit_backoff_secs.max(0.5) * f64::from((attempt + 1).min(max))
+fn backoff_delay(settings: &Settings, attempt: u32) -> f64 {
+    let max = settings.rate_limit_max_retries.max(1);
+    settings.rate_limit_backoff_secs.max(0.5) * f64::from((attempt + 1).min(max))
 }
 
 /// HTTP 429 with a `retry-after` header, mirroring `BackendRateLimited`.
@@ -1159,7 +1187,7 @@ async fn chat_completions(
     let model = req
         .model
         .clone()
-        .unwrap_or_else(|| state.settings.model_name.clone());
+        .unwrap_or_else(|| state.settings.get().model_name.clone());
 
     // `ChatService.validate()`: hermes sends the public OpenAI id, the backend
     // uses internal names. Keep explicit expert/vision selection and fold the
@@ -1335,6 +1363,10 @@ async fn stream_response(live: LiveTurn) -> Response {
         // request on this thread cannot start until this one has committed its
         // parent id. Dropped automatically when the task ends.
         let _turn = turn;
+        // One snapshot for the whole turn: a SIGHUP mid-stream must not move
+        // this turn's deadline or change its retry budget underneath it. New
+        // turns pick up the new values; this one finishes on these.
+        let turn_settings = state.settings.get();
         let mut attempt: u32 = 0;
         let mut context_recovered = false;
         let mut cursor_recovered = false;
@@ -1378,10 +1410,11 @@ async fn stream_response(live: LiveTurn) -> Response {
             let (resp, slot) = next.take().expect("attempt in flight");
             let account = slot.account.clone();
             // Hold the account's rate slot until the upstream body is drained.
-            let idle = std::time::Duration::from_secs_f64(state.settings.heartbeat_interval_secs);
+            let idle =
+                std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
             // The whole turn is bounded, like `asyncio.timeout(REQUEST_TIMEOUT)`.
             // A stalled upstream becomes a visible error instead of a hang.
-            let budget = std::time::Duration::from_secs_f64(state.settings.request_timeout_secs)
+            let budget = std::time::Duration::from_secs_f64(turn_settings.request_timeout_secs)
                 .saturating_sub(started.elapsed());
             let pumped = match tokio::time::timeout(
                 budget,
@@ -1394,7 +1427,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         thread = %key,
-                        timeout_s = state.settings.request_timeout_secs,
+                        timeout_s = turn_settings.request_timeout_secs,
                         "turn timed out waiting for upstream"
                     );
                     fail_turn(
@@ -1572,8 +1605,8 @@ async fn stream_response(live: LiveTurn) -> Response {
                     }
                 }
             } else if pool::is_rate_limit(&hint) && !pumped.emitted {
-                let wait = backoff_delay(&state, attempt);
-                if attempt >= state.settings.rate_limit_max_retries {
+                let wait = backoff_delay(&turn_settings, attempt);
+                if attempt >= turn_settings.rate_limit_max_retries {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         thread = %key,
@@ -1719,7 +1752,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         // of branching off the pre-turn message (DeepSeek renders siblings as
         // edited/alternate messages).
 
-        let max = state.settings.tool_repair_max_retries;
+        let max = turn_settings.tool_repair_max_retries;
         for attempt in 1..=max {
             if !recovery.has_pending() {
                 break;
@@ -2156,8 +2189,12 @@ fn build_router(state: AppState) -> Router {
     // "Failed to buffer the request body: length limit exceeded". The cap is
     // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
     // large multi-image turns and big tool transcripts get through.
+    // Read once, at router build time: `DefaultBodyLimit` is baked into the
+    // layer, so changing IMAGE_MAX_BYTES needs a restart. The reload path logs
+    // that, like host/port.
     let body_limit = state
         .settings
+        .get()
         .image_max_bytes
         .saturating_mul(2)
         .max(128 << 20);
@@ -2271,7 +2308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         pool,
-        settings,
+        settings: Arc::new(SettingsHandle::new(settings)),
         threads: Arc::new(threads::Threads::new(Arc::new(
             threads::SqlitePersist::new(store.clone()),
         ))),

@@ -173,3 +173,22 @@ Two failover tests needed exactly that.
 
 `cargo test -p proxy`: **97 + 18**.
 
+---
+
+## pi (integration agent) — 2026-10-22 02:10 — T-15 hot reload, commit 1/5
+
+Starting SIGHUP reload. Plan is in `docs/hot-reload-plan.md`; c1 is the
+refactor-only commit:
+
+- `AppState.settings` is now `Arc<SettingsHandle>`; call sites read
+  `state.settings.get().field`.
+- **A turn snapshots settings once at the top of `stream_response`** and uses
+  that snapshot for its whole life. If you add a `settings` read inside a turn
+  loop, read it from `turn_settings`, not `state.settings` — otherwise a reload
+  can move a deadline underneath a running stream.
+- `backoff_delay` now takes `&Settings`, not `&AppState`.
+- `IMAGE_MAX_BYTES` is restart-only (`DefaultBodyLimit` is baked into the
+  router layer at build time).
+
+No behaviour change; 138 workspace tests still green.
+

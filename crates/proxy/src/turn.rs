@@ -58,7 +58,7 @@ pub async fn prepare(
     // thread: the client retries the same delta forever.
     let loaded = images::load(
         delta_messages(&req.messages),
-        state.settings.image_max_bytes,
+        state.settings.get().image_max_bytes,
     )
     .await
     .map_err(|e| {
@@ -163,12 +163,12 @@ pub async fn prepare(
         }
     };
 
-    let thinking = want_thinking(req, state.settings.thinking_default);
+    let thinking = want_thinking(req, state.settings.get().thinking_default);
     let body = completion_body(
         &thread,
         &prompt,
         thinking,
-        state.settings.search_enabled,
+        state.settings.get().search_enabled,
         &ref_file_ids,
     );
 
