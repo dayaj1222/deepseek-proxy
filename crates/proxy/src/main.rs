@@ -31,6 +31,7 @@ mod pool;
 mod prompt;
 mod store;
 mod threads;
+mod turn;
 
 use axum::{
     extract::State,
@@ -1040,7 +1041,7 @@ async fn chat_completions(
     // `ChatService.validate()`: hermes sends the public OpenAI id, the backend
     // uses internal names. Keep explicit expert/vision selection and fold the
     // common chat ids onto the default model; reject anything else.
-    if !is_supported_model(&model) {
+    if !turn::accepts_model(&model) {
         state.stats.errors.fetch_add(1, Ordering::Relaxed);
         return ProxyError::new(
             "Unknown model; see /v1/models",
@@ -1060,143 +1061,24 @@ async fn chat_completions(
     );
     state.stats.total.fetch_add(1, Ordering::Relaxed);
 
-    // In-memory cache first, then SQLite (survives restarts) — the rule lives
-    // in the thread module now, not at every call site.
-    let existing = state.threads.resume(&key);
-
-    // Tool definitions are taught once, on the first turn of a thread. Later
-    // turns ride on the server-side conversation, like the Python proxy.
-    let system_extra = dialect::inject_tool_descriptions("", &req.tools);
-
-    // `tool_choice` / `parallel_tool_calls` are part of the request contract:
-    // "none" drops every tool, a named choice narrows to one function and
-    // implies required, "required" keeps all tools and implies required.
-    let (specs, required) = resolve_tools(&req);
-
-    // Attach at most one image for this turn, exactly like Python's
-    // `load_image(messages, IMAGE_MAX_BYTES)` + `upload_image()` pair: the
-    // bytes are uploaded once and the completion references the resulting
-    // file id through `ref_file_ids`. Only the delta is inspected, so an image
-    // from an earlier turn is not uploaded again.
-    //
-    // This runs before the prompt is built because a turn carrying several
-    // images now degrades (first sent, rest dropped) and the model has to be
-    // told what it lost. Failing the turn with a 400 instead would wedge the
-    // thread: the client retries the very same delta, so the rejection repeats
-    // forever and the session never advances.
-    let loaded = match images::load(
-        delta_messages(&req.messages),
-        state.settings.image_max_bytes,
-    )
-    .await
-    {
-        Ok(l) => l,
+    // Everything up to the upstream call is preparation, and it lives in one
+    // module: resume, prompts, session create, image upload, body.
+    let prepared = match turn::prepare(&state, &key, &req, &model).await {
+        Ok(p) => p,
         Err(e) => {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(thread = %key, error = %e, "rejected image");
-            return ProxyError::new(e.0, axum::http::StatusCode::BAD_REQUEST, "invalid_image")
-                .with_param("messages")
-                .into_response();
+            return e.into_response();
         }
     };
-    let image_note = loaded.note();
-    if image_note.is_some() {
-        state
-            .stats
-            .images_dropped
-            .fetch_add(loaded.dropped as u64, Ordering::Relaxed);
-        tracing::warn!(
-            thread = %key,
-            total = loaded.total,
-            dropped = loaded.dropped,
-            "dropped extra images; sending the first only"
-        );
-    }
-
-    let (prompt, replay) = build_prompts(
-        &req,
-        existing.as_ref(),
-        &system_extra,
-        image_note.as_deref(),
-    );
-    if prompt.is_empty() {
-        tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
-        return bad_request("no user message or tool result in continuation turn");
-    }
-    tracing::debug!(
-        thread = %key,
-        fresh = existing.is_none(),
-        prompt_chars = prompt.len(),
-        replay_chars = replay.len(),
-        "turn built"
-    );
-    // A brand-new thread has nothing to replay into, so a limit hit is final.
-    let can_recover = existing.is_some() && !replay.is_empty();
-
-    // Create the remote session lazily, on the first turn for this thread.
-    let thread = match existing {
-        Some(t) => t,
-        None => {
-            let conn = state.pool.route(&key).await;
-            let session_id = {
-                let _slot = match conn.acquire().await {
-                    Ok(s) => s,
-                    Err(e) => return queue_error(&format!("rate slot: {e}")),
-                };
-                let client = conn.client().await;
-                match client.create_chat_session().await {
-                    Ok(s) => s,
-                    Err(e) => return backend_error(&format!("create_session: {e}")),
-                }
-            };
-            let t = ThreadState {
-                session_id,
-                parent_message_id: None,
-                exchanges: 0,
-            };
-            tracing::info!(thread = %key, session = %t.session_id, "new remote session");
-            state.threads.remember(&key, t.clone());
-            t
-        }
-    };
-
-    let ref_file_ids = match loaded.data {
-        None => Vec::new(),
-        Some(bytes) => {
-            let conn = state.pool.route(&key).await;
-            let _slot = match conn.acquire().await {
-                Ok(s) => s,
-                Err(e) => return queue_error(&format!("rate slot: {e}")),
-            };
-            match conn.client().await.upload_image(&bytes, &model).await {
-                Ok(uploaded) => {
-                    tracing::info!(
-                        thread = %key,
-                        file_id = %uploaded.file_id,
-                        bytes = uploaded.size_bytes,
-                        width = uploaded.width,
-                        height = uploaded.height,
-                        "image uploaded"
-                    );
-                    vec![uploaded.file_id]
-                }
-                // Python degrades to text-only rather than failing the turn.
-                Err(e) => {
-                    tracing::warn!(thread = %key, error = %e, "image upload failed; continuing text-only");
-                    Vec::new()
-                }
-            }
-        }
-    };
-
-    let thinking = want_thinking(&req, state.settings.thinking_default);
-    let body = completion_body(
-        &thread,
-        &prompt,
+    let turn::Prepared {
+        thread,
+        body,
+        replay,
+        can_recover,
         thinking,
-        state.settings.search_enabled,
-        &ref_file_ids,
-    );
+        specs,
+        required,
+    } = prepared;
 
     let id = format!("chatcmpl-{}", uuid_like());
     let created = unix_secs();
@@ -1220,11 +1102,7 @@ async fn chat_completions(
         created,
         replay,
         can_recover,
-        req.stream_options
-            .as_ref()
-            .and_then(|o| o.get("include_usage"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        turn::include_usage(req.stream_options.as_ref()),
         started,
         specs,
         required,
@@ -2274,10 +2152,6 @@ fn is_supported_model(model: &str) -> bool {
     )
 }
 
-fn bad_request(msg: &str) -> Response {
-    ProxyError::new(msg, axum::http::StatusCode::BAD_REQUEST, "invalid_request").into_response()
-}
-
 /// Backend failure. Port of `error_for()`'s fallback: the detail is logged and
 /// the client gets the generic OpenAI envelope, never the raw message.
 fn backend_error(msg: &str) -> Response {
@@ -2517,7 +2391,6 @@ mod tests {
         })
     }
 
-    #[test]
     /// One delta feeds both the prompt and the image intake, so they can never
     /// disagree about which turn they are describing (Python: `get_new_messages`).
     #[test]
