@@ -226,8 +226,11 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   bounded correction turn instead of an error to the client.
 - **Rate limits retry before the first byte**, so streaming clients can still be
   served; what cannot be retried fails with a typed error.
-- **Stale cursors rebuild the session** from the transcript once rather than
-  failing the turn.
+- **Stale cursors are rewound, not replayed.** When the backend rejects the
+  saved parent id, the proxy steps back one commit (keeping the last three) and
+  resends the same delta, so the live session and its context survive. Only when
+  there is nothing left to step back to does it rebuild the session from the
+  transcript.
 
 ## Architecture
 

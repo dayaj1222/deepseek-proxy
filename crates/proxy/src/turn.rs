@@ -125,6 +125,7 @@ pub async fn prepare(
             let t = ThreadState {
                 session_id,
                 parent_message_id: None,
+                prev_parents: Vec::new(),
                 exchanges: 0,
             };
             tracing::info!(thread = %key, session = %t.session_id, "new remote session");

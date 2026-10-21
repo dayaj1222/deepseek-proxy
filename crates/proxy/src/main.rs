@@ -251,6 +251,9 @@ async fn rebuild_session(
     let fresh = threads::ThreadState {
         session_id,
         parent_message_id: None,
+        // A rebuilt session has new message ids, so nothing from the old one is
+        // worth rewinding into.
+        prev_parents: Vec::new(),
         // A rebuilt session replays the whole transcript, so the counters
         // restart with it.
         exchanges: 0,
@@ -465,6 +468,15 @@ fn render_message(m: &Msg) -> Option<String> {
 
 /// Python's `CONTINUE_AFTER_TOOL`, appended when a turn ends on a tool result.
 const CONTINUE_AFTER_TOOL: &str = "Now continue with the task based on the tool result above.";
+
+/// Told to the model when the backend lost the reply we were parented to.
+///
+/// The turn is resent on top of the previous cursor, so the model already has
+/// everything up to that point. Without this line it sees a prompt that appears
+/// to repeat the conversation and answers as if the last exchange never
+/// happened; with it, it picks up where the lost reply would have been.
+const LOST_REPLY_NOTE: &str = "[proxy] The previous assistant reply was lost on the server side. \
+     Continue the conversation from the message above; do not repeat it.";
 
 /// Fresh thread: flatten the whole conversation, then the continuation line
 /// when the last message is a tool result (Python's `last_role == "tool"`).
@@ -1268,6 +1280,9 @@ async fn stream_response(live: LiveTurn) -> Response {
         let mut attempt: u32 = 0;
         let mut context_recovered = false;
         let mut cursor_recovered = false;
+        // One rewind per turn: if the previous cursor is stale too, the session
+        // itself is gone and only a rebuild can help.
+        let mut rewound = false;
         let mut body = body;
         // The conversation cursor, ported from aiodeepseek's
         // `Conversation._parent_message_id`: the id of the NEWEST upstream
@@ -1376,7 +1391,31 @@ async fn stream_response(live: LiveTurn) -> Response {
                 cursor_recovered = true;
                 attempt += 1;
                 state.stats.retries.fetch_add(1, Ordering::Relaxed);
-                if can_recover {
+
+                // Cheapest recovery first: step the cursor back one commit and
+                // resend the same delta, telling the model a reply was lost.
+                //
+                // This keeps the live remote session and the whole transcript
+                // behind it, so it costs one turn instead of a full replay — and
+                // a replay of a long thread is itself what trips the upstream
+                // throttle, turning a recoverable turn into a 429 loop.
+                let previous = if rewound {
+                    None
+                } else {
+                    state.threads.rewind(&key)
+                };
+                if let Some(prev) = previous {
+                    rewound = true;
+                    tracing::warn!(
+                        thread = %key,
+                        prev,
+                        hint = %hint,
+                        "stale parent message id; rewinding one commit and continuing"
+                    );
+                    body.parent_message_id = Some(prev);
+                    body.prompt = format!("{LOST_REPLY_NOTE}\n\n{}", body.prompt);
+                    cursor = Some(prev);
+                } else if can_recover {
                     tracing::warn!(
                         thread = %key,
                         hint = %hint,
@@ -1636,6 +1675,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             let turn_state = ThreadState {
                 session_id: session_id.clone(),
                 parent_message_id: cursor,
+                prev_parents: Vec::new(),
                 exchanges: 0,
             };
             let body = completion_body(&turn_state, &prompt, false, false, &[]);
@@ -2133,6 +2173,7 @@ mod tests {
         ThreadState {
             session_id: "s".into(),
             parent_message_id: None,
+            prev_parents: Vec::new(),
             exchanges,
         }
     }

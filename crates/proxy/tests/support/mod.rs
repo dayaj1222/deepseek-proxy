@@ -30,6 +30,9 @@ pub enum Step {
     HintError(&'static str),
     /// 401, so the client classifies it as a dead login.
     Unauthorized,
+    /// 200 with a raw JSON body and no SSE frames, as the backend answers when
+    /// it refuses the request outright (`{"code":26,...}` for a stale parent).
+    NonSse(String),
 }
 
 /// The scenario the mock plays, one step per completion request.
@@ -64,6 +67,11 @@ impl MockScript {
     /// How many completion requests the proxy actually made.
     pub fn completions(&self) -> u32 {
         *self.completions.lock().unwrap()
+    }
+
+    /// `parent_message_id` sent with each completion request, in order.
+    pub fn parents(&self) -> Vec<Option<i64>> {
+        self.parents.lock().unwrap().clone()
     }
 }
 
@@ -138,12 +146,21 @@ async fn pow_challenge() -> Response {
     .into_response()
 }
 
-async fn completion(State(script): State<MockScript>) -> Response {
+async fn completion(State(script): State<MockScript>, body: String) -> Response {
     *script.completions.lock().unwrap() += 1;
+    script.parents.lock().unwrap().push(
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("parent_message_id").and_then(Value::as_i64)),
+    );
     let step = script.steps.lock().unwrap().pop_front();
     let sse = [(axum::http::header::CONTENT_TYPE, "text/event-stream")];
     match step {
         Some(Step::Sse(body)) => (StatusCode::OK, sse, body).into_response(),
+        Some(Step::NonSse(body)) => {
+            let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+            (StatusCode::OK, json, body).into_response()
+        }
         Some(Step::HintError(message)) => {
             let body = format!(
                 "event: hint\ndata: {}\n\n",
@@ -274,6 +291,15 @@ pub async fn complete_with_key(app: &App, body: Value, key: &str) -> reqwest::Re
 /// where hand-written SSE fixtures usually go wrong.
 pub fn sse_reply(message_id: i64, parent_id: i64, fragments: &[&str]) -> String {
     let mut out = String::new();
+    // The `ready` event is where the proxy learns the cursor: it reads the
+    // top-level `response_message_id`, not `v.response.message_id`. Without this
+    // line a scripted reply commits no parent id at all.
+    let ready = json!({
+        "request_message_id": parent_id,
+        "response_message_id": message_id,
+        "model_type": "default"
+    });
+    out.push_str(&format!("event: ready\ndata: {ready}\n\n"));
     let response = json!({
         "v": {"response": {
             "message_id": message_id,

@@ -173,6 +173,89 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     assert_eq!(script.completions(), 2, "one repair turn expected");
 }
 
+/// The poisoned-cursor regression: DeepSeek answers `{"code":26}` when the
+/// saved parent no longer exists. The proxy must step back one commit and resend
+/// on the previous cursor rather than abandoning the session and replaying the
+/// whole transcript (which is what tripped the upstream throttle in production).
+#[tokio::test]
+async fn a_rejected_parent_id_rewinds_to_the_previous_cursor() {
+    let stale = json!({
+        "code": 0, "msg": "",
+        "data": {"biz_code": 26, "biz_msg": "invalid message id", "biz_data": null}
+    })
+    .to_string();
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &["391"])),
+        Step::Sse(sse_reply(3, 2, &["782"])),
+        Step::NonSse(stale),
+        Step::Sse(sse_reply(4, 2, &["1173"])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    // `thread_id` pins every request to one conversation, so the transcript
+    // shape does not change the thread key between turns.
+    let turn = |messages: serde_json::Value| {
+        json!({
+            "model": "deepseek-chat",
+            "stream": true,
+            "thread_id": "rewind-test",
+            "messages": messages
+        })
+    };
+
+    // Two successful turns, so the thread has a cursor to walk back to. Each
+    // request must END on the user message: the continuation prompt is built
+    // from the messages after the last assistant one, so a transcript that ends
+    // on an assistant reply has nothing to send.
+    let resp = complete(&app, turn(json!([{"role": "user", "content": "17*23"}]))).await;
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+
+    let resp = complete(
+        &app,
+        turn(json!([
+            {"role": "user", "content": "17*23"},
+            {"role": "assistant", "content": "391"},
+            {"role": "user", "content": "34*23"}
+        ])),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+
+    // Third turn: parent id 3 no longer exists upstream, so the reply is
+    // rejected and the retry must go out on cursor 2.
+    let resp = complete(
+        &app,
+        turn(json!([
+            {"role": "user", "content": "17*23"},
+            {"role": "assistant", "content": "391"},
+            {"role": "user", "content": "34*23"},
+            {"role": "assistant", "content": "782"},
+            {"role": "user", "content": "51*23"}
+        ])),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(
+        body_text(&text).contains("1173"),
+        "rewound retry should deliver the answer: {text}"
+    );
+
+    assert_eq!(
+        script.parents(),
+        vec![None, Some(2), Some(3), Some(2)],
+        "the retry must resend on the previous cursor, not the rejected one"
+    );
+    assert_eq!(
+        script.completions(),
+        4,
+        "two turns, one rejection, one rewound retry"
+    );
+}
+
 #[tokio::test]
 async fn a_missing_key_is_a_401_in_the_openai_envelope() {
     let (upstream, script) = start_mock(MockScript::new(vec![])).await;
