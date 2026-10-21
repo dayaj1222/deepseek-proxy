@@ -29,6 +29,7 @@ mod images;
 mod log;
 mod pool;
 mod store;
+mod threads;
 
 use axum::{
     extract::State,
@@ -49,8 +50,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
+use threads::ThreadState;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
@@ -72,46 +74,14 @@ struct Settings {
     heartbeat_interval_secs: f64,
 }
 
-#[derive(Debug, Clone)]
-struct ThreadState {
-    session_id: String,
-    parent_message_id: Option<i64>,
-    /// User/tool messages exchanged so far on this thread. Drives the periodic
-    /// tool-format reminder; kept for resume state and diagnostics.
-    #[allow(dead_code)]
-    exchanges: usize,
-}
-
 #[derive(Clone)]
 struct AppState {
     pool: Arc<pool::Pool>,
     settings: Settings,
-    threads: Arc<Mutex<HashMap<String, ThreadState>>>,
-    /// One mutex per thread id, ported from `turn_locks` in
-    /// `deepseek_proxy/backend.py`. A turn and all of its correction turns must
-    /// not interleave with another turn on the same thread: both would read the
-    /// same parent id, and whichever finished last would orphan the other's
-    /// message, which DeepSeek renders as an edit.
-    turns: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Cache, turn lock and persistence for conversation threads.
+    threads: Arc<threads::Threads>,
     store: store::Store,
     stats: Arc<Stats>,
-}
-
-impl AppState {
-    /// Take the turn lock for `key`, creating it on first use.
-    ///
-    /// The guard is held from before the parent id is read until the whole turn
-    /// (including every correction turn) is finished, which is what keeps two
-    /// overlapping requests on one thread from forking the conversation.
-    async fn turn_guard(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut map = self.turns.lock().await;
-            map.entry(key.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        lock.lock_owned().await
-    }
 }
 
 /// Process counters reported by `GET /stats`. Cheap atomics only; anything
@@ -337,25 +307,14 @@ async fn rebuild_session(
     };
     tracing::warn!("thread {key}: {reason}; rebuilding in a new remote session");
 
-    let fresh = ThreadState {
+    let fresh = threads::ThreadState {
         session_id,
         parent_message_id: None,
         // A rebuilt session replays the whole transcript, so the counters
         // restart with it.
         exchanges: 0,
     };
-    state
-        .threads
-        .lock()
-        .unwrap()
-        .insert(key.to_string(), fresh.clone());
-    let _ = state.store.save_thread(
-        key,
-        &store::ThreadResume {
-            session_id: fresh.session_id.clone(),
-            parent_message_id: None,
-        },
-    );
+    state.threads.replace(key, fresh.clone());
     Ok(fresh)
 }
 
@@ -634,7 +593,7 @@ async fn readyz() -> Json<Value> {
 async fn stats(State(state): State<AppState>) -> Json<Value> {
     let s = &state.stats;
     let counts = state.store.counts().unwrap_or_default();
-    let threads_in_memory = state.threads.lock().unwrap().len();
+    let threads_in_memory = state.threads.cached_len();
 
     let accounts: Vec<Value> = state
         .pool
@@ -1173,7 +1132,7 @@ async fn chat_completions(
     // Serialize turns on this thread. Taken BEFORE the parent id is read and
     // held until the turn (plus its correction turns) is finished, so a second
     // request on the same thread waits instead of forking the conversation.
-    let turn = state.turn_guard(&key).await;
+    let turn = state.threads.lock(&key).await;
     let model = req
         .model
         .clone()
@@ -1202,25 +1161,9 @@ async fn chat_completions(
     );
     state.stats.total.fetch_add(1, Ordering::Relaxed);
 
-    // In-memory cache first, then SQLite (survives restarts).
-    let existing = state
-        .threads
-        .lock()
-        .unwrap()
-        .get(&key)
-        .cloned()
-        .or_else(|| {
-            state
-                .store
-                .get_thread(&key)
-                .ok()
-                .flatten()
-                .map(|r| ThreadState {
-                    session_id: r.session_id,
-                    parent_message_id: r.parent_message_id.and_then(|p| p.parse().ok()),
-                    exchanges: 0,
-                })
-        });
+    // In-memory cache first, then SQLite (survives restarts) — the rule lives
+    // in the thread module now, not at every call site.
+    let existing = state.threads.resume(&key);
 
     // Tool definitions are taught once, on the first turn of a thread. Later
     // turns ride on the server-side conversation, like the Python proxy.
@@ -1313,7 +1256,7 @@ async fn chat_completions(
                 exchanges: 0,
             };
             tracing::info!(thread = %key, session = %t.session_id, "new remote session");
-            state.threads.lock().unwrap().insert(key.clone(), t.clone());
+            state.threads.remember(&key, t.clone());
             t
         }
     };
@@ -1710,29 +1653,6 @@ async fn send_stream_error(
     let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
 }
 
-/// Save the conversation cursor so the next turn appends below the newest
-/// message instead of branching off an older one.
-fn persist_cursor(
-    threads: &Mutex<HashMap<String, ThreadState>>,
-    store: &store::Store,
-    key: &str,
-    session_id: &str,
-    cursor: Option<i64>,
-) {
-    let Some(mid) = cursor else { return };
-    if let Some(t) = threads.lock().unwrap().get_mut(key) {
-        t.parent_message_id = Some(mid);
-        t.session_id = session_id.to_string();
-    }
-    let _ = store.save_thread(
-        key,
-        &store::ThreadResume {
-            session_id: session_id.to_string(),
-            parent_message_id: Some(mid.to_string()),
-        },
-    );
-}
-
 /// Fail a turn without losing the cursor.
 ///
 /// Every upstream turn leaves messages in the session, even when it errors. If
@@ -1747,7 +1667,7 @@ async fn fail_turn(
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     err: ProxyError,
 ) {
-    persist_cursor(&state.threads, &state.store, key, session_id, cursor);
+    state.threads.commit(key, session_id, cursor);
     send_stream_error(tx, err).await;
 }
 
@@ -2281,7 +2201,7 @@ async fn stream_response(
         }
         let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
 
-        persist_cursor(&state.threads, &state.store, &key, &session_id, cursor);
+        state.threads.commit(&key, &session_id, cursor);
     });
 
     Sse::new(ReceiverStream::new(rx)).into_response()
@@ -2580,8 +2500,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         pool,
         settings,
-        threads: Arc::new(Mutex::new(HashMap::new())),
-        turns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        threads: Arc::new(threads::Threads::new(Arc::new(
+            threads::SqlitePersist::new(store.clone()),
+        ))),
         store,
         stats: Arc::new(Stats::new()),
     };
@@ -3041,76 +2962,6 @@ mod tests {
         };
         let schemas = dialect::repair_schemas(&[bad("bash"), bad("bash")], &specs);
         assert_eq!(schemas.len(), 1);
-    }
-
-    #[test]
-    fn cursor_saves_the_newest_message_not_the_first() {
-        // The regression this guards: after a correction turn, DeepSeek must
-        // see the client's next message as a child of the CORRECTED answer.
-        // Saving the malformed reply's id made it a sibling, which the UI
-        // draws as an edited message.
-        let store = store::Store::open_memory().unwrap();
-        let threads = Mutex::new(HashMap::new());
-        threads.lock().unwrap().insert(
-            "t1".to_string(),
-            ThreadState {
-                session_id: "s1".into(),
-                parent_message_id: Some(100),
-                exchanges: 0,
-            },
-        );
-
-        persist_cursor(&threads, &store, "t1", "s1", Some(101));
-        assert_eq!(threads.lock().unwrap()["t1"].parent_message_id, Some(101));
-
-        // A later correction advances it again.
-        persist_cursor(&threads, &store, "t1", "s1", Some(102));
-        assert_eq!(threads.lock().unwrap()["t1"].parent_message_id, Some(102));
-        assert_eq!(
-            store
-                .get_thread("t1")
-                .unwrap()
-                .unwrap()
-                .parent_message_id
-                .as_deref(),
-            Some("102")
-        );
-    }
-
-    #[test]
-    fn cursor_follows_a_rebuilt_session() {
-        // After a context-limit rebuild the cursor must point into the NEW
-        // session, or the next turn parents into the abandoned one.
-        let store = store::Store::open_memory().unwrap();
-        let threads = Mutex::new(HashMap::new());
-        threads.lock().unwrap().insert(
-            "t1".to_string(),
-            ThreadState {
-                session_id: "old".into(),
-                parent_message_id: Some(50),
-                exchanges: 0,
-            },
-        );
-        persist_cursor(&threads, &store, "t1", "fresh", Some(51));
-        let t = threads.lock().unwrap();
-        assert_eq!(t["t1"].session_id, "fresh");
-        assert_eq!(t["t1"].parent_message_id, Some(51));
-    }
-
-    #[test]
-    fn no_cursor_leaves_resume_state_untouched() {
-        let store = store::Store::open_memory().unwrap();
-        let threads = Mutex::new(HashMap::new());
-        threads.lock().unwrap().insert(
-            "t1".to_string(),
-            ThreadState {
-                session_id: "s1".into(),
-                parent_message_id: Some(7),
-                exchanges: 0,
-            },
-        );
-        persist_cursor(&threads, &store, "t1", "s1", None);
-        assert_eq!(threads.lock().unwrap()["t1"].parent_message_id, Some(7));
     }
 
     #[test]
