@@ -606,6 +606,8 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
                 "bound_threads": a.bound_threads,
                 "waiting": a.waiting,
                 "cooldown_ms": a.cooldown_ms,
+                "breaker": a.breaker.as_str(),
+                "retry_in_secs": a.retry_in_secs,
             })
         })
         .collect();
@@ -1994,6 +1996,8 @@ pub(crate) async fn connect_pool(
         queue_limit: cfg.queue_limit,
         queue_timeout: std::time::Duration::from_secs_f64(cfg.queue_timeout_secs),
         login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
+        account_fail_threshold: cfg.account_fail_threshold,
+        account_cooldown_max: std::time::Duration::from_secs(cfg.account_cooldown_max_secs),
     };
     let p = pool::Pool::connect(accounts, pool_config, store.clone()).await?;
     Ok(Arc::new(p))

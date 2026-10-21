@@ -83,6 +83,11 @@ pub struct LimitsSection {
     pub queue_timeout_secs: f64,
     /// Cooldown for an account that fails to log in, in seconds.
     pub login_cooldown_secs: u64,
+    /// Consecutive account failures that open its circuit breaker; `0`
+    /// disables the breaker.
+    pub account_fail_threshold: u32,
+    /// Ceiling for the breaker's exponential cooldown, in seconds.
+    pub account_cooldown_max_secs: u64,
     /// Retries for a throttled turn, before the first byte. Python:
     /// `RATE_LIMIT_MAX_RETRIES`.
     pub rate_limit_max_retries: u32,
@@ -113,6 +118,8 @@ impl Default for LimitsSection {
             queue_limit: 64,
             queue_timeout_secs: 120.0,
             login_cooldown_secs: 300,
+            account_fail_threshold: 3,
+            account_cooldown_max_secs: 600,
             rate_limit_max_retries: 3,
             rate_limit_backoff_secs: 10.0,
             tool_repair_max_retries: 3,
@@ -136,6 +143,8 @@ pub struct Config {
     pub queue_limit: usize,
     pub queue_timeout_secs: f64,
     pub login_cooldown_secs: u64,
+    pub account_fail_threshold: u32,
+    pub account_cooldown_max_secs: u64,
     pub rate_limit_max_retries: u32,
     pub rate_limit_backoff_secs: f64,
     pub tool_repair_max_retries: u32,
@@ -172,6 +181,11 @@ impl Config {
                 .max(1.0),
             login_cooldown_secs: env_num("LOGIN_COOLDOWN")
                 .unwrap_or(file.limits.login_cooldown_secs),
+            account_fail_threshold: env_num("ACCOUNT_FAIL_THRESHOLD")
+                .unwrap_or(file.limits.account_fail_threshold),
+            account_cooldown_max_secs: env_num("ACCOUNT_COOLDOWN_MAX")
+                .unwrap_or(file.limits.account_cooldown_max_secs)
+                .max(1),
             rate_limit_max_retries: env_num("RATE_LIMIT_MAX_RETRIES")
                 .unwrap_or(file.limits.rate_limit_max_retries),
             rate_limit_backoff_secs: env_num("RATE_LIMIT_BACKOFF_S")

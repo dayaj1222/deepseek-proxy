@@ -79,6 +79,8 @@ search   = false             # web search (heavily throttled upstream)
 request_delay_secs = 2       # pause between requests on one account
 queue_limit        = 64      # requests allowed to queue behind a busy account
 queue_timeout_secs = 120     # how long one may wait for a slot
+account_fail_threshold = 3   # consecutive failures that open a breaker; 0 off
+account_cooldown_max_secs = 600  # cap for the exponential breaker cooldown
 request_timeout_secs = 300   # per-turn wall clock
 heartbeat_interval_secs = 10 # SSE keep-alive
 rate_limit_max_retries = 5   # retries for a throttled turn
@@ -91,7 +93,8 @@ Frequently used environment overrides: `PROXY_HOST`, `PROXY_PORT`, `DB_PATH`,
 `CONFIG_PATH`, `DEEPSEEK_RUNTIME_DIR`, `MODEL_NAME`, `THINKING_ENABLED`,
 `SEARCH_ENABLED`, `REQUEST_DELAY`, `QUEUE_LIMIT`, `QUEUE_TIMEOUT`,
 `REQUEST_TIMEOUT`, `HEARTBEAT_INTERVAL`, `IMAGE_MAX_BYTES`,
-`RATE_LIMIT_MAX_RETRIES`, `RATE_LIMIT_BACKOFF_S`, `TOOL_REPAIR_MAX_RETRIES`.
+`RATE_LIMIT_MAX_RETRIES`, `RATE_LIMIT_BACKOFF_S`, `TOOL_REPAIR_MAX_RETRIES`,
+`LOGIN_COOLDOWN`, `ACCOUNT_FAIL_THRESHOLD`, `ACCOUNT_COOLDOWN_MAX`.
 
 Credentials never go in `config.toml`.
 
@@ -157,7 +160,8 @@ both in the same envelope (`not_found`, `method_not_allowed`).
              "tool_calls":0,"images_dropped":0},
  "threads":{"in_memory":0},
  "db":{"threads":0,"bindings":0,"api_keys":0,"accounts":0,"cached_tokens":0},
- "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null}]}
+ "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null,
+              "breaker":"closed","retry_in_secs":null}]}
 ```
 
 With the server down, `stats` falls back to database counts and says so on
@@ -226,6 +230,11 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   bounded correction turn instead of an error to the client.
 - **Rate limits retry before the first byte**, so streaming clients can still be
   served; what cannot be retried fails with a typed error.
+- **A flapping account is taken out of rotation.** After
+  `account_fail_threshold` consecutive failures its breaker opens for
+  `login_cooldown_secs * 2^k` (capped by `account_cooldown_max_secs`), its
+  threads move to a healthy account, and one probe request tests it when the
+  window elapses. `/stats` shows `breaker` and `retry_in_secs` per account.
 - **Stale cursors are rewound, not replayed.** When the backend rejects the
   saved parent id, the proxy steps back one commit (keeping the last three) and
   resends the same delta, so the live session and its context survive. Only when

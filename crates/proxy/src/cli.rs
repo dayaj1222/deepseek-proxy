@@ -136,6 +136,11 @@ fn send_signal(pid: i32, sig: i32) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn env_from_dotenv(key: &str) -> Option<String> {
+    // Tests must be hermetic: without this the fallback file on a developer's
+    // machine silently adds real accounts to a mock-upstream run.
+    if std::env::var("DEEPSEEK_NO_DOTENV").is_ok() {
+        return None;
+    }
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()

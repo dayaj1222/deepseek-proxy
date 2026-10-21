@@ -33,6 +33,9 @@ pub enum Step {
     /// 200 with a raw JSON body and no SSE frames, as the backend answers when
     /// it refuses the request outright (`{"code":26,...}` for a stale parent).
     NonSse(String),
+    /// 500 with no body: a failure that is neither a throttle nor a dead login,
+    /// which is what counts against an account's circuit breaker.
+    ServerError,
 }
 
 /// The scenario the mock plays, one step per completion request.
@@ -161,6 +164,7 @@ async fn completion(State(script): State<MockScript>, body: String) -> Response 
             let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
             (StatusCode::OK, json, body).into_response()
         }
+        Some(Step::ServerError) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Some(Step::HintError(message)) => {
             let body = format!(
                 "event: hint\ndata: {}\n\n",
@@ -200,6 +204,16 @@ pub async fn spawn_app(upstream: &str, accounts: &[(&str, &str)]) -> App {
     spawn_app_with_keys(upstream, accounts, &[]).await
 }
 
+/// `spawn_app` with extra environment overrides, for config that is read once
+/// at boot (the breaker thresholds, for instance).
+pub async fn spawn_app_with_env(
+    upstream: &str,
+    accounts: &[(&str, &str)],
+    envs: &[(&str, &str)],
+) -> App {
+    spawn_with(upstream, accounts, &[], envs).await
+}
+
 /// Same as `spawn_app`, but registers `keys` (name, secret) first, so the proxy
 /// requires a bearer token. Registering goes through the real `keys add` CLI,
 /// which is the only public way to seed the key table.
@@ -207,6 +221,15 @@ pub async fn spawn_app_with_keys(
     upstream: &str,
     accounts: &[(&str, &str)],
     keys: &[(&str, &str)],
+) -> App {
+    spawn_with(upstream, accounts, keys, &[]).await
+}
+
+async fn spawn_with(
+    upstream: &str,
+    accounts: &[(&str, &str)],
+    keys: &[(&str, &str)],
+    envs: &[(&str, &str)],
 ) -> App {
     let port = free_port();
     let dir =
@@ -235,11 +258,17 @@ pub async fn spawn_app_with_keys(
         .env("PROXY_PORT", port.to_string())
         .env("DB_PATH", dir.join("test.db"))
         .env("DEEPSEEK_RUNTIME_DIR", &dir)
+        // Never inherit the developer's real accounts from `../deepseek/.env`:
+        // a test's account list must be exactly what the test declared.
+        .env("DEEPSEEK_NO_DOTENV", "1")
         .env("RUST_LOG", "warn")
         // Keep the scenario fast: no sleep between requests, no retry backoff.
         .env("REQUEST_DELAY", "0")
         .env("RATE_LIMIT_BACKOFF_S", "0")
         .env("TOOL_REPAIR_MAX_RETRIES", "1");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     for (i, (email, password)) in accounts.iter().enumerate() {
         cmd.env(format!("DEEPSEEK_EMAIL_{i}"), email)
             .env(format!("DEEPSEEK_PASSWORD_{i}"), password);

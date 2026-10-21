@@ -8,8 +8,8 @@ mod support;
 
 use serde_json::json;
 use support::{
-    complete, complete_with_key, hello_turn, spawn_app, spawn_app_with_keys, sse_reply, start_mock,
-    MockScript, Step, PLAIN_SSE,
+    complete, complete_with_key, hello_turn, spawn_app, spawn_app_with_env, spawn_app_with_keys,
+    sse_reply, start_mock, MockScript, Step, PLAIN_SSE,
 };
 
 /// Concatenate every delta content string in an SSE body.
@@ -413,6 +413,58 @@ fn header(resp: &reqwest::Response, name: &str) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string()
+}
+
+/// After `account_fail_threshold` failures the account's breaker opens, the
+/// failing thread moves to a healthy account, and `/stats` says so. Without
+/// this, a flapping account is retried on every turn forever.
+#[tokio::test]
+async fn a_failing_account_opens_its_breaker_and_the_thread_moves_on() {
+    let script = MockScript::new(vec![
+        Step::ServerError,
+        Step::Sse(sse_reply(2, 1, &["391"])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw"), ("b@example.com", "pw")],
+        // One failure is enough to open it, so the test does not need three
+        // upstream calls to reach the interesting state.
+        &[("ACCOUNT_FAIL_THRESHOLD", "1")],
+    )
+    .await;
+
+    // First turn hits the 500. It is neither a throttle nor a dead login, so it
+    // counts against the account and is reported to the client.
+    let resp = complete(&app, hello_turn()).await;
+    assert!(!resp.status().is_success(), "the 500 must reach the client");
+
+    // Second turn: the thread must not go back to the broken account.
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(body_text(&text).contains("391"), "{text}");
+    assert_eq!(script.completions(), 2);
+
+    let stats: serde_json::Value = reqwest::get(format!("{}/stats", app.base))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let accounts = stats["accounts"].as_array().expect("accounts array");
+    assert_eq!(accounts.len(), 2);
+    let open = accounts
+        .iter()
+        .filter(|a| a["breaker"] == json!("open"))
+        .count();
+    assert_eq!(open, 1, "exactly one breaker should be open: {stats}");
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a["breaker"] == json!("closed") && a["healthy"] == json!(true)),
+        "the other account must stay usable: {stats}"
+    );
 }
 
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");

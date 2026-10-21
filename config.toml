@@ -48,6 +48,15 @@ queue_limit = 64
 # How long an account is skipped after a failed login, in seconds.
 login_cooldown_secs = 300
 
+# Consecutive failures (login-dead, 5xx, timeouts) that open an account's
+# circuit breaker; 0 disables the breaker. While open the account is skipped by
+# routing and its threads move to a healthy one.
+account_fail_threshold = 3
+
+# Ceiling for the breaker's exponential cooldown, in seconds. The wait doubles
+# with each consecutive failure up to this cap.
+account_cooldown_max_secs = 600
+
 # How long a request may wait for a busy account's rate slot, in seconds.
 # Python: QUEUE_TIMEOUT. Without this a leaked slot blocks every later request
 # on that account forever, silently — nothing is logged because no upstream
