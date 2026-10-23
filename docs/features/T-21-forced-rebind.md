@@ -85,17 +85,50 @@ deepseek-rs rebind <thread_key> [--account EMAIL]
 Writes the pin so the **next** turn rebuilds. For rescue from a terminal when
 the client cannot send headers.
 
-### Trigger 3 - automatic (off by default)
+### Trigger 3 - automatic, inside the existing rate-limit branch
 
 ```toml
 [limits]
-rate_limit_rebind_after = 0   # 0 = off; N = after N failed retries, rebuild elsewhere
-rebind_max_accounts     = 2   # hard stop against ping-pong
+rate_limit_rebind       = true      # after the retry budget is spent, try another account
+rebind_max_accounts     = 1         # hard stop against ping-pong
+rebind_skip_replay_over = 200000    # replay bytes above which we do not migrate
 ```
 
-Default **off**. Silent account-hopping makes rate-limit debugging harder, and
-the replay itself is what trips throttles (ADR-0008). Turn it on per deployment
-when availability matters more than predictability.
+Runs when the rate-limit branch (`main.rs:1723`) exhausts
+`rate_limit_max_retries` **and** `!pumped.emitted`:
+
+1. backoff retries exactly as today, unchanged
+2. on exhaustion, if a healthy account exists that this turn has not used:
+   rebind, then rebuild the session and resend on `replay`
+3. only if that also fails: 429 with `Retry-After`
+
+There is deliberately **no** `rate_limit_rebind_after = N` counter. `attempt`
+is local to `stream_response` (`main.rs:1486`) and resets per request, so a
+counter spanning two requests would need new per-thread persisted state and a
+way to tell an operator retry from a new turn. `rate_limit_max_retries` already
+is the threshold.
+
+Default **on**, with `rebind_max_accounts = 1`: it fires only after the proxy has
+spent its own retry budget, so it is a last resort rather than silent hopping.
+
+### Why this is not "treat a 429 as a stale parent id"
+
+Use the **mechanism**, not the **trigger**. `is_invalid_message_id` means the
+backend rejected the cursor; a 429 means too fast. Conflating them makes the log
+lie ("stale parent message id; rebuilding" for a throttle) and would run a
+pointless cursor rewind, since a throttle has no cursor problem.
+
+Instead factor the shared tail into one function with three callers and three
+reasons:
+
+```
+rebuild_and_resend_on(state, key, reason, target_account, body, replay)
+  <- is_invalid_message_id : "stale parent message id"
+  <- is_context_limit      : "context overflow"
+  <- rate limit exhausted  : "throttled; continuing on account B"
+```
+
+One replay implementation, honest log lines.
 
 ## Design notes
 
@@ -124,6 +157,11 @@ when availability matters more than predictability.
 - auto mode with `rate_limit_rebind_after = 1` moves once, then stops at
   `rebind_max_accounts`
 - every account throttled - 429 with `Retry-After`, no hang
+- backoff retries still run first: with `rate_limit_max_retries = 2`, two
+  upstream 429s are seen before any rebind
+- a throttle that lands after the first byte does not rebind
+- `rebind_skip_replay_over` exceeded - no migration, plain 429
+- the log line for a throttle rebind names the throttle, not a stale cursor
 
 ## Not in scope
 
