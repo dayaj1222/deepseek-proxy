@@ -38,7 +38,7 @@ use axum::{
     extract::State,
     http::HeaderMap,
     response::{
-        sse::{Event, Sse},
+        sse::Sse,
         IntoResponse, Response,
     },
     routing::{get, post},
@@ -50,12 +50,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sse::{pump, route_all, unix_secs, usage_block, uuid_like, Pumped};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use threads::ThreadState;
-use tokio_stream::wrappers::ReceiverStream;
+use tracing::Instrument;
 
 #[derive(Clone)]
 struct Settings {
@@ -76,14 +75,149 @@ struct Settings {
     heartbeat_interval_secs: f64,
 }
 
+impl Settings {
+    /// Project the reloadable subset of the resolved config.
+    ///
+    /// Restart-only keys (`host`, `port`, `db_path`, `image_max_bytes`) are
+    /// still copied here because a running process reads them from somewhere,
+    /// but a reload cannot change them; see [`restart_only_keys`].
+    fn from_config(cfg: &config::Config) -> Self {
+        Self {
+            thinking_default: cfg.thinking,
+            search_enabled: cfg.search,
+            model_name: cfg.model.clone(),
+            rate_limit_max_retries: cfg.rate_limit_max_retries,
+            rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
+            tool_repair_max_retries: cfg.tool_repair_max_retries,
+            request_timeout_secs: cfg.request_timeout_secs,
+            image_max_bytes: cfg.image_max_bytes,
+            heartbeat_interval_secs: cfg.heartbeat_interval_secs,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
-    pool: Arc<pool::Pool>,
-    settings: Settings,
+    /// Live knobs. Behind a handle so a SIGHUP can swap them without a restart
+    /// or a lock held across an await.
+    settings: Arc<SettingsHandle>,
+    /// Account pool. Swappable so a reload can add or remove an account without
+    /// restarting; callers go through [`AppState::pool`] and never hold the lock
+    /// across an await, so an in-flight turn finishes on the pool it started on.
+    pool: Arc<std::sync::RwLock<Arc<pool::Pool>>>,
     /// Cache, turn lock and persistence for conversation threads.
     threads: Arc<threads::Threads>,
     store: store::Store,
     stats: Arc<Stats>,
+}
+
+impl AppState {
+    /// Snapshot the current pool. One Arc clone; safe to hold for a whole turn.
+    fn pool(&self) -> Arc<pool::Pool> {
+        self.pool
+            .read()
+            .expect("pool lock poisoned")
+            .clone()
+    }
+
+    /// Install a rebuilt pool. Turns already running keep their snapshot.
+    fn set_pool(&self, fresh: Arc<pool::Pool>) {
+        *self.pool.write().expect("pool lock poisoned") = fresh;
+    }
+}
+
+/// The current `Settings`, swappable at runtime.
+///
+/// A turn takes one [`get`](Self::get) snapshot at its start and uses it for its
+/// whole life: changing a turn's deadline halfway through a stream would be a
+/// bug, not a feature. New turns see new values; running turns finish on the
+/// values they started with.
+struct SettingsHandle {
+    current: std::sync::RwLock<Arc<Settings>>,
+    /// The resolved config behind `current`, kept so a reload can tell a
+    /// restart-only key apart from a live one.
+    config: std::sync::Mutex<config::Config>,
+    /// Bumped on every successful reload; 1 means "as loaded at boot".
+    generation: AtomicU64,
+    /// When the running config was installed.
+    loaded_at: std::sync::Mutex<Instant>,
+    /// Last reload failure. `None` means the running config is the last good
+    /// one and nothing has failed since.
+    last_error: std::sync::Mutex<Option<String>>,
+}
+
+/// Keys that cannot change while the process is running.
+///
+/// `host`/`port` are already bound, `db_path` is an open SQLite handle, and
+/// `image_max_bytes` is baked into `DefaultBodyLimit` when the router is built.
+/// A reload reports these instead of pretending to apply them.
+fn restart_only_keys(old: &config::Config, new: &config::Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if old.host != new.host || old.port != new.port {
+        changed.push("host/port");
+    }
+    if old.db_path != new.db_path {
+        changed.push("db_path");
+    }
+    if old.image_max_bytes != new.image_max_bytes {
+        changed.push("image_max_bytes");
+    }
+    changed
+}
+
+impl SettingsHandle {
+    fn new(config: config::Config) -> Self {
+        Self {
+            current: std::sync::RwLock::new(Arc::new(Settings::from_config(&config))),
+            config: std::sync::Mutex::new(config),
+            generation: AtomicU64::new(1),
+            loaded_at: std::sync::Mutex::new(Instant::now()),
+            last_error: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Install a new config. Running turns keep the snapshot they took.
+    fn replace(&self, config: config::Config) -> u64 {
+        let settings = Settings::from_config(&config);
+        *self.current.write().expect("settings lock poisoned") = Arc::new(settings);
+        *self.config.lock().expect("settings lock poisoned") = config;
+        *self.loaded_at.lock().expect("settings lock poisoned") = Instant::now();
+        *self.last_error.lock().expect("settings lock poisoned") = None;
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Record a failed reload. The running config stays untouched.
+    fn note_error(&self, error: String) {
+        *self.last_error.lock().expect("settings lock poisoned") = Some(error);
+    }
+
+    /// `(generation, seconds_since_last_successful_load, last_error)`.
+    fn snapshot(&self) -> (u64, u64, Option<String>) {
+        let last_error = self.last_error.lock().expect("settings lock poisoned").clone();
+        (
+            self.generation.load(Ordering::Relaxed),
+            self.loaded_at
+                .lock()
+                .expect("settings lock poisoned")
+                .elapsed()
+                .as_secs(),
+            last_error,
+        )
+    }
+
+    /// Restart-only keys that changed since the running config was loaded.
+    fn restart_only_changes(&self, new: &config::Config) -> Vec<&'static str> {
+        let old = self.config.lock().expect("settings lock poisoned");
+        restart_only_keys(&old, new)
+    }
+
+    /// Cheap: one Arc clone under a read lock, never held across an await.
+    fn get(&self) -> Arc<Settings> {
+        self.current
+            .read()
+            .expect("settings lock poisoned")
+            .clone()
+    }
 }
 
 /// Process counters reported by `GET /stats`. Cheap atomics only; anything
@@ -99,6 +233,8 @@ struct Stats {
     tool_calls: AtomicU64,
     /// Images dropped because a turn carried more than DeepSeek accepts.
     images_dropped: AtomicU64,
+    /// Set when SIGTERM/SIGINT arrives; `/readyz` reports 503 from then on.
+    shutting_down: std::sync::atomic::AtomicBool,
 }
 
 impl Stats {
@@ -233,7 +369,7 @@ async fn rebuild_session(
     key: &str,
     reason: &str,
 ) -> Result<ThreadState, Response> {
-    let conn = state.pool.route(key).await;
+    let conn = state.pool().route(key).await;
     let session_id = {
         let _slot = conn
             .acquire()
@@ -250,6 +386,9 @@ async fn rebuild_session(
     let fresh = threads::ThreadState {
         session_id,
         parent_message_id: None,
+        // A rebuilt session has new message ids, so nothing from the old one is
+        // worth rewinding into.
+        prev_parents: Vec::new(),
         // A rebuilt session replays the whole transcript, so the counters
         // restart with it.
         exchanges: 0,
@@ -465,6 +604,15 @@ fn render_message(m: &Msg) -> Option<String> {
 /// Python's `CONTINUE_AFTER_TOOL`, appended when a turn ends on a tool result.
 const CONTINUE_AFTER_TOOL: &str = "Now continue with the task based on the tool result above.";
 
+/// Told to the model when the backend lost the reply we were parented to.
+///
+/// The turn is resent on top of the previous cursor, so the model already has
+/// everything up to that point. Without this line it sees a prompt that appears
+/// to repeat the conversation and answers as if the last exchange never
+/// happened; with it, it picks up where the lost reply would have been.
+const LOST_REPLY_NOTE: &str = "[proxy] The previous assistant reply was lost on the server side. \
+     Continue the conversation from the message above; do not repeat it.";
+
 /// Fresh thread: flatten the whole conversation, then the continuation line
 /// when the last message is a tool result (Python's `last_role == "tool"`).
 fn flatten_transcript(messages: &[Msg]) -> String {
@@ -525,8 +673,17 @@ async fn healthz() -> Json<Value> {
 }
 
 /// Python's `/readyz`: login is lazy, so being up is being ready.
-async fn readyz() -> Json<Value> {
-    Json(json!({"status": "ready", "backend": "lazy_login"}))
+async fn readyz(State(state): State<AppState>) -> Response {
+    // Flip to 503 the moment shutdown starts, so a load balancer or the CLI's
+    // `start` health probe stops sending new turns while the old ones drain.
+    if state.stats.shutting_down.load(Ordering::Relaxed) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "draining", "backend": "lazy_login"})),
+        )
+            .into_response();
+    }
+    Json(json!({"status": "ready", "backend": "lazy_login"})).into_response()
 }
 
 /// Unknown route: `404` in the OpenAI error envelope, so SDK clients parse it
@@ -538,6 +695,75 @@ async fn fallback() -> Response {
         "not_found",
     )
     .into_response()
+}
+
+/// Echo `x-request-id`, or mint one, and carry it in every log line.
+///
+/// The id lives in a tracing span rather than in a handler parameter, so the
+/// turn's own events inherit `req=...` without every call site learning a new
+/// argument. An inbound id is honoured only when it is short and printable: it
+/// ends up in logs, so arbitrary client bytes must not get there.
+/// Browser clients: answer the preflight and let any origin call the API.
+///
+/// The proxy is authenticated by its own bearer keys, not by the browser's
+/// origin, so an allowlist here would add a failure mode without adding a
+/// guarantee. A local UI (Open WebUI, a static page) otherwise cannot reach
+/// the API at all: its preflight gets a 405.
+async fn cors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut resp = if req.method() == axum::http::Method::OPTIONS {
+        axum::http::StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let headers = resp.headers_mut();
+    let mut allow = |name: &'static str, value: &'static str| {
+        if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+            headers.insert(name, v);
+        }
+    };
+    // `*` is fine because credentials are a header, never a cookie.
+    allow("access-control-allow-origin", "*");
+    allow(
+        "access-control-allow-headers",
+        "authorization, content-type, x-request-id, x-session-id, x-thread-id, x-session-affinity",
+    );
+    allow("access-control-allow-methods", "GET, POST, OPTIONS");
+    // Lets a browser client read the id it must quote in a bug report.
+    allow("access-control-expose-headers", "x-request-id, retry-after");
+    allow("access-control-max-age", "86400");
+    resp
+}
+
+/// `501` in the OpenAI envelope for endpoints this proxy does not implement.
+async fn not_supported(req: axum::extract::Request) -> Response {
+    ProxyError::new(
+        format!(
+            "{} is not supported by deepseek-rs; see the README for what is",
+            req.uri().path()
+        ),
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "not_supported",
+    )
+    .into_response()
+}
+
+async fn request_id(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    const HEADER: &str = "x-request-id";
+    let inbound = req
+        .headers()
+        .get(HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 128 && v.chars().all(|c| c.is_ascii_graphic()))
+        .map(str::to_string);
+    let id = inbound.unwrap_or_else(uuid_like);
+
+    let span = tracing::info_span!("turn", req = %id);
+    let mut resp = next.run(req).instrument(span).await;
+    if let Ok(v) = axum::http::HeaderValue::from_str(&id) {
+        resp.headers_mut().insert(HEADER, v);
+    }
+    resp
 }
 
 /// Known path, wrong method: same envelope, `405`.
@@ -557,7 +783,7 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
     let threads_in_memory = state.threads.cached_len();
 
     let accounts: Vec<Value> = state
-        .pool
+        .pool()
         .snapshot()
         .await
         .into_iter()
@@ -568,16 +794,27 @@ async fn stats(State(state): State<AppState>) -> Json<Value> {
                 "bound_threads": a.bound_threads,
                 "waiting": a.waiting,
                 "cooldown_ms": a.cooldown_ms,
+                "breaker": a.breaker.as_str(),
+                "retry_in_secs": a.retry_in_secs,
             })
         })
         .collect();
 
+    let (config_generation, config_age_secs, config_last_error) = state.settings.snapshot();
+
     Json(json!({
         "pid": std::process::id(),
         "uptime_secs": s.uptime_secs(),
-        "model": state.settings.model_name,
-        "thinking": state.settings.thinking_default,
-        "search": state.settings.search_enabled,
+        "model": state.settings.get().model_name,
+        "thinking": state.settings.get().thinking_default,
+        "search": state.settings.get().search_enabled,
+        // Reload state, so `deepseek-rs stats` answers "did my SIGHUP take?"
+        // and "is the running config the last good one?" without reading logs.
+        "config": {
+            "generation": config_generation,
+            "loaded_at_secs_ago": config_age_secs,
+            "last_error": config_last_error,
+        },
         "requests": {
             "total": s.total.load(Ordering::Relaxed),
             "ok": s.ok.load(Ordering::Relaxed),
@@ -761,7 +998,7 @@ async fn error_for(state: &AppState, key: &str, err: CompletionError) -> ProxyEr
         }
         CompletionError::LoginDead(msg) => {
             tracing::error!(thread = %key, error = %msg, "backend login failed");
-            let _ = state.pool.failover(key).await;
+            let _ = state.pool().failover(key).await;
             ProxyError::new(
                 "Backend login failed; disabled account, retry with a fresh thread",
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -806,12 +1043,12 @@ async fn completion_with_retry(
     body: &CompletionBody,
 ) -> Result<(reqwest::Response, pool::RateTicket), CompletionError> {
     state
-        .pool
+        .pool()
         .complete(
             thread_id,
             body,
-            state.settings.rate_limit_max_retries,
-            state.settings.rate_limit_backoff_secs,
+            state.settings.get().rate_limit_max_retries,
+            state.settings.get().rate_limit_backoff_secs,
             |attempt, wait| {
                 state.stats.retries.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(
@@ -1018,9 +1255,9 @@ fn resolve_tools(req: &ChatRequest) -> (Vec<dialect::ToolSpec>, bool) {
 ///
 /// Python: `backoff * min(attempt + 1, max(1, max_retries))`, with the base
 /// floored at 0.5s by `Backend.generate()`.
-fn backoff_delay(state: &AppState, attempt: u32) -> f64 {
-    let max = state.settings.rate_limit_max_retries.max(1);
-    state.settings.rate_limit_backoff_secs.max(0.5) * f64::from((attempt + 1).min(max))
+fn backoff_delay(settings: &Settings, attempt: u32) -> f64 {
+    let max = settings.rate_limit_max_retries.max(1);
+    settings.rate_limit_backoff_secs.max(0.5) * f64::from((attempt + 1).min(max))
 }
 
 /// HTTP 429 with a `retry-after` header, mirroring `BackendRateLimited`.
@@ -1066,7 +1303,7 @@ async fn chat_completions(
     let model = req
         .model
         .clone()
-        .unwrap_or_else(|| state.settings.model_name.clone());
+        .unwrap_or_else(|| state.settings.get().model_name.clone());
 
     // `ChatService.validate()`: hermes sends the public OpenAI id, the backend
     // uses internal names. Keep explicit expert/vision selection and fold the
@@ -1132,11 +1369,14 @@ async fn chat_completions(
         created,
         replay,
         can_recover,
-        include_usage: turn::include_usage(req.stream_options.as_ref()),
+        // A non-streaming client still gets exact token counts: ask the pump
+        // for the trailing usage chunk and let the collector fold it in.
+        include_usage: !req.stream || turn::include_usage(req.stream_options.as_ref()),
         started,
         specs,
         required,
         parallel: req.parallel_tool_calls,
+        stream: req.stream,
     })
     .await
 }
@@ -1151,14 +1391,11 @@ async fn chat_completions(
 /// Python's `stream()` does exactly this: `yield sse(event.payload())` followed
 /// by `data: [DONE]`, so a mid-stream failure is still an error the client can
 /// see rather than a clean `finish_reason: stop`.
-async fn send_stream_error(
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-    err: ProxyError,
-) {
-    let _ = tx
-        .send(Ok(Event::default().data(err.payload().to_string())))
-        .await;
-    let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+async fn send_stream_error(tx: &sse::ChunkSender, err: ProxyError) {
+    // The status only means something before the first byte; the SSE transport
+    // sends the envelope, the JSON collector turns it into a status code.
+    let _ = tx.send(sse::Chunk::Error(err.status, err.payload())).await;
+    let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 }
 
 /// Fail a turn without losing the cursor.
@@ -1172,10 +1409,16 @@ async fn fail_turn(
     key: &str,
     session_id: &str,
     cursor: Option<i64>,
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    tx: &sse::ChunkSender,
     err: ProxyError,
 ) {
     state.threads.commit(key, session_id, cursor);
+    tracing::info!(
+        thread = %key,
+        status = err.status.as_u16(),
+        code = err.code,
+        "turn failed"
+    );
     send_stream_error(tx, err).await;
 }
 
@@ -1205,6 +1448,8 @@ struct LiveTurn {
     specs: Vec<dialect::ToolSpec>,
     required: bool,
     parallel: bool,
+    /// `false` collects the same chunks into one `chat.completion` body.
+    stream: bool,
 }
 
 async fn stream_response(live: LiveTurn) -> Response {
@@ -1225,17 +1470,25 @@ async fn stream_response(live: LiveTurn) -> Response {
         specs,
         required,
         parallel,
+        stream,
     } = live;
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<sse::Chunk>(32);
 
     tokio::spawn(async move {
         // Held for the whole turn, including every correction turn, so another
         // request on this thread cannot start until this one has committed its
         // parent id. Dropped automatically when the task ends.
         let _turn = turn;
+        // One snapshot for the whole turn: a SIGHUP mid-stream must not move
+        // this turn's deadline or change its retry budget underneath it. New
+        // turns pick up the new values; this one finishes on these.
+        let turn_settings = state.settings.get();
         let mut attempt: u32 = 0;
         let mut context_recovered = false;
         let mut cursor_recovered = false;
+        // One rewind per turn: if the previous cursor is stale too, the session
+        // itself is gone and only a rebuild can help.
+        let mut rewound = false;
         let mut body = body;
         // The conversation cursor, ported from aiodeepseek's
         // `Conversation._parent_message_id`: the id of the NEWEST upstream
@@ -1254,7 +1507,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
         });
         if tx
-            .send(Ok(Event::default().data(opening.to_string())))
+            .send(sse::Chunk::Data(opening.to_string()))
             .await
             .is_err()
         {
@@ -1266,13 +1519,18 @@ async fn stream_response(live: LiveTurn) -> Response {
         // A fatal hint arrives BEFORE any content (aiodeepseek raises it out of
         // the stream iterator), so retrying the whole turn cannot duplicate
         // output the client already has.
-        let pumped = loop {
+        // The account is carried out of the loop, not read before it: only the
+        // attempt that produced the final reply knows which one served it, and
+        // a failover or retry in between must not be attributed to the first.
+        let (pumped, account) = loop {
             let (resp, slot) = next.take().expect("attempt in flight");
+            let account = slot.account.clone();
             // Hold the account's rate slot until the upstream body is drained.
-            let idle = std::time::Duration::from_secs_f64(state.settings.heartbeat_interval_secs);
+            let idle =
+                std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
             // The whole turn is bounded, like `asyncio.timeout(REQUEST_TIMEOUT)`.
             // A stalled upstream becomes a visible error instead of a hang.
-            let budget = std::time::Duration::from_secs_f64(state.settings.request_timeout_secs)
+            let budget = std::time::Duration::from_secs_f64(turn_settings.request_timeout_secs)
                 .saturating_sub(started.elapsed());
             let pumped = match tokio::time::timeout(
                 budget,
@@ -1285,7 +1543,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         thread = %key,
-                        timeout_s = state.settings.request_timeout_secs,
+                        timeout_s = turn_settings.request_timeout_secs,
                         "turn timed out waiting for upstream"
                     );
                     fail_turn(
@@ -1322,7 +1580,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 if let Some(mid) = pumped.parent {
                     cursor = Some(mid);
                 }
-                break pumped;
+                break (pumped, account);
             };
 
             // Failed turn: keep the cursor we came in with.
@@ -1340,7 +1598,31 @@ async fn stream_response(live: LiveTurn) -> Response {
                 cursor_recovered = true;
                 attempt += 1;
                 state.stats.retries.fetch_add(1, Ordering::Relaxed);
-                if can_recover {
+
+                // Cheapest recovery first: step the cursor back one commit and
+                // resend the same delta, telling the model a reply was lost.
+                //
+                // This keeps the live remote session and the whole transcript
+                // behind it, so it costs one turn instead of a full replay — and
+                // a replay of a long thread is itself what trips the upstream
+                // throttle, turning a recoverable turn into a 429 loop.
+                let previous = if rewound {
+                    None
+                } else {
+                    state.threads.rewind(&key)
+                };
+                if let Some(prev) = previous {
+                    rewound = true;
+                    tracing::warn!(
+                        thread = %key,
+                        prev,
+                        hint = %hint,
+                        "stale parent message id; rewinding one commit and continuing"
+                    );
+                    body.parent_message_id = Some(prev);
+                    body.prompt = format!("{LOST_REPLY_NOTE}\n\n{}", body.prompt);
+                    cursor = Some(prev);
+                } else if can_recover {
                     tracing::warn!(
                         thread = %key,
                         hint = %hint,
@@ -1439,8 +1721,8 @@ async fn stream_response(live: LiveTurn) -> Response {
                     }
                 }
             } else if pool::is_rate_limit(&hint) && !pumped.emitted {
-                let wait = backoff_delay(&state, attempt);
-                if attempt >= state.settings.rate_limit_max_retries {
+                let wait = backoff_delay(&turn_settings, attempt);
+                if attempt >= turn_settings.rate_limit_max_retries {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
                         thread = %key,
@@ -1475,7 +1757,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                     "retrying after backend throttle"
                 );
                 state
-                    .pool
+                    .pool()
                     .route(&key)
                     .await
                     .cool_down(std::time::Duration::from_secs_f64(wait))
@@ -1586,7 +1868,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         // of branching off the pre-turn message (DeepSeek renders siblings as
         // edited/alternate messages).
 
-        let max = state.settings.tool_repair_max_retries;
+        let max = turn_settings.tool_repair_max_retries;
         for attempt in 1..=max {
             if !recovery.has_pending() {
                 break;
@@ -1600,6 +1882,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             let turn_state = ThreadState {
                 session_id: session_id.clone(),
                 parent_message_id: cursor,
+                prev_parents: Vec::new(),
                 exchanges: 0,
             };
             let body = completion_body(&turn_state, &prompt, false, false, &[]);
@@ -1671,7 +1954,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {"content": tail}, "finish_reason": null}]
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
         }
 
         let finish_reason = if filter.calls.is_empty() {
@@ -1695,7 +1978,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": {"tool_calls": calls}, "finish_reason": null}]
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
             "tool_calls"
         };
 
@@ -1704,13 +1987,21 @@ async fn stream_response(live: LiveTurn) -> Response {
             .tool_calls
             .fetch_add(filter.calls.len() as u64, Ordering::Relaxed);
         state.stats.ok.fetch_add(1, Ordering::Relaxed);
+        // One line per completed turn, with everything the PLAN asks for. The
+        // request id arrives through the `turn` span, so it is not repeated
+        // here; `account` comes from the rate ticket that served the turn.
+        let turn_usage = usage_block(prompt_tokens, &prose, &filter.calls);
         tracing::info!(
             thread = %key,
+            account = %account,
+            status = 200,
             finish_reason,
             tool_calls = filter.calls.len(),
+            ms = started.elapsed().as_millis() as u64,
+            prompt_tokens = turn_usage["prompt_tokens"].as_u64().unwrap_or(0),
+            completion_tokens = turn_usage["completion_tokens"].as_u64().unwrap_or(0),
             parent = ?parent,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "stream done"
+            "turn done"
         );
 
         let done = json!({
@@ -1720,7 +2011,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
         });
-        let _ = tx.send(Ok(Event::default().data(done.to_string()))).await;
+        let _ = tx.send(sse::Chunk::Data(done.to_string())).await;
         // With `include_usage`, OpenAI sends one last chunk with no choices and
         // the token counts, immediately before `[DONE]`.
         if include_usage {
@@ -1733,14 +2024,102 @@ async fn stream_response(live: LiveTurn) -> Response {
                 "choices": [],
                 "usage": usage
             });
-            let _ = tx.send(Ok(Event::default().data(chunk.to_string()))).await;
+            let _ = tx.send(sse::Chunk::Data(chunk.to_string())).await;
         }
-        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+        let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 
         state.threads.commit(&key, &session_id, cursor);
     });
 
-    Sse::new(ReceiverStream::new(rx)).into_response()
+    if stream {
+        return Sse::new(sse::sse_stream(rx)).into_response();
+    }
+    collect_completion(rx).await
+}
+
+/// Drain a turn into one `chat.completion` body.
+///
+/// The turn itself is identical to the streaming one — same retries, same
+/// tool repair, same cursor handling — so the only difference is transport:
+/// concatenate the deltas instead of forwarding them. `stream: false` used to
+/// get an SSE body, which no OpenAI SDK can parse.
+async fn collect_completion(mut rx: sse::ChunkReceiver) -> Response {
+    let mut id = String::new();
+    let mut model = String::new();
+    let mut created = 0u64;
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut calls: Vec<Value> = Vec::new();
+    let mut finish_reason = "stop";
+    let mut usage: Option<Value> = None;
+
+    while let Some(chunk) = rx.recv().await {
+        let sse::Chunk::Data(data) = chunk else {
+            if let sse::Chunk::Error(status, payload) = chunk {
+                return (status, Json(payload)).into_response();
+            }
+            continue;
+        };
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        if let Some(v) = value.get("id").and_then(Value::as_str) {
+            id = v.to_string();
+        }
+        if let Some(v) = value.get("model").and_then(Value::as_str) {
+            model = v.to_string();
+        }
+        if let Some(v) = value.get("created").and_then(Value::as_u64) {
+            created = v;
+        }
+        // The trailing usage chunk carries no choices.
+        if let Some(v) = value.get("usage").filter(|v| !v.is_null()) {
+            usage = Some(v.clone());
+        }
+        let Some(choice) = value.pointer("/choices/0") else {
+            continue;
+        };
+        if let Some(delta) = choice.get("delta") {
+            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                content.push_str(text);
+            }
+            if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str) {
+                reasoning.push_str(text);
+            }
+            if let Some(list) = delta.get("tool_calls").and_then(Value::as_array) {
+                calls.extend(list.iter().cloned());
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            finish_reason = match reason {
+                "tool_calls" => "tool_calls",
+                "length" => "length",
+                _ => "stop",
+            };
+        }
+    }
+
+    let mut message = json!({"role": "assistant", "content": content});
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+    if !calls.is_empty() {
+        message["tool_calls"] = json!(calls);
+    }
+    let mut body = json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    });
+    if let Some(usage) = usage {
+        body["usage"] = usage;
+    }
+    Json(body).into_response()
 }
 
 /// Port of `ChatService.validate()`'s request-shape checks (the pydantic model
@@ -1905,12 +2284,7 @@ pub(crate) async fn connect_pool(
     store: &store::Store,
     accounts: Vec<pool::AccountSpec>,
 ) -> Result<Arc<pool::Pool>, Box<dyn std::error::Error>> {
-    let pool_config = pool::PoolConfig {
-        request_delay: std::time::Duration::from_secs_f64(cfg.request_delay_secs),
-        queue_limit: cfg.queue_limit,
-        queue_timeout: std::time::Duration::from_secs_f64(cfg.queue_timeout_secs),
-        login_cooldown: std::time::Duration::from_secs(cfg.login_cooldown_secs),
-    };
+    let pool_config = pool::PoolConfig::from_config(cfg);
     let p = pool::Pool::connect(accounts, pool_config, store.clone()).await?;
     Ok(Arc::new(p))
 }
@@ -1924,8 +2298,12 @@ fn build_router(state: AppState) -> Router {
     // "Failed to buffer the request body: length limit exceeded". The cap is
     // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
     // large multi-image turns and big tool transcripts get through.
+    // Read once, at router build time: `DefaultBodyLimit` is baked into the
+    // layer, so changing IMAGE_MAX_BYTES needs a restart. The reload path logs
+    // that, like host/port.
     let body_limit = state
         .settings
+        .get()
         .image_max_bytes
         .saturating_mul(2)
         .max(128 << 20);
@@ -1936,12 +2314,27 @@ fn build_router(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        // Honest refusals instead of 404: a client probing capabilities should
+        // learn that this proxy does not do embeddings, not that the route is
+        // missing. One handler, one envelope.
+        .route("/v1/completions", post(not_supported))
+        .route("/v1/embeddings", post(not_supported))
+        .route("/v1/images/generations", post(not_supported))
+        .route("/v1/images/edits", post(not_supported))
+        .route("/v1/audio/speech", post(not_supported))
+        .route("/v1/audio/transcriptions", post(not_supported))
+        .route("/v1/audio/translations", post(not_supported))
         .fallback(fallback)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
         // Must come AFTER the routes: `Router::layer` only wraps routes that
         // already exist, so placing it earlier silently does nothing.
         .layer(axum::extract::DefaultBodyLimit::max(body_limit))
+        // Outermost: every response, including the 404/405 fallbacks, carries
+        // the id, and every event logged while handling the request has it.
+        .layer(axum::middleware::from_fn(request_id))
+        // Before `request_id` runs, so even a preflight gets both headers.
+        .layer(axum::middleware::from_fn(cors))
 }
 
 #[tokio::main]
@@ -2003,17 +2396,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("pow challenge ok (account {})", conn.email);
     }
 
-    let settings = Settings {
-        thinking_default: cfg.thinking,
-        search_enabled: cfg.search,
-        model_name: cfg.model.clone(),
-        rate_limit_max_retries: cfg.rate_limit_max_retries,
-        rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
-        tool_repair_max_retries: cfg.tool_repair_max_retries,
-        request_timeout_secs: cfg.request_timeout_secs,
-        image_max_bytes: cfg.image_max_bytes,
-        heartbeat_interval_secs: cfg.heartbeat_interval_secs,
-    };
+    let settings = Settings::from_config(&cfg);
     tracing::info!(
         db_path = %cfg.db_path,
         model = %settings.model_name,
@@ -2023,8 +2406,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let state = AppState {
-        pool,
-        settings,
+        pool: Arc::new(std::sync::RwLock::new(pool)),
+        settings: Arc::new(SettingsHandle::new(cfg.clone())),
         threads: Arc::new(threads::Threads::new(Arc::new(
             threads::SqlitePersist::new(store.clone()),
         ))),
@@ -2038,18 +2421,137 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "Failed to buffer the request body: length limit exceeded". The cap is
     // derived from IMAGE_MAX_BYTES, not a magic number. Floor is 128 MiB so
     // large multi-image turns and big tool transcripts get through.
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
 
-    // Graceful shutdown: finish in-flight requests, drop the pidfile.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Graceful shutdown with a deadline. axum's own graceful shutdown waits
+    // for in-flight requests forever, so one stalled SSE stream used to keep
+    // the process alive until the CLI gave up and sent SIGKILL. Readiness flips
+    // first (new turns go elsewhere), then the drain is bounded: whatever is
+    // still running when the grace period ends is abandoned, because holding
+    // the process hostage is worse than truncating one stream.
+    // Hot reload: SIGHUP re-reads the config. Spawned, never awaited here.
+    tokio::spawn(reload_loop(state.clone()));
+
+    let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
+    let stats_for_signal = state.stats.clone();
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        stats_for_signal
+            .shutting_down
+            .store(true, Ordering::Relaxed);
+    });
+    match tokio::time::timeout(grace, serve).await {
+        Ok(r) => r?,
+        Err(_) => {
+            tracing::warn!(
+                grace_s = cfg.shutdown_grace_secs,
+                "grace period elapsed with requests still in flight; exiting"
+            );
+        }
+    }
     tracing::info!("stopped");
     Ok(())
+}
+
+/// Serializes reloads: two SIGHUPs close together must not interleave.
+static RELOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Re-read `config.toml` and install it, without dropping a running turn.
+///
+/// A turn already in flight keeps the snapshot it took, so nothing here can
+/// move a deadline mid-stream. Two failure modes are handled explicitly: a
+/// config that does not parse leaves the running one untouched (and says so in
+/// `/stats`), and a key that cannot change while bound is reported rather than
+/// silently ignored.
+async fn reload(state: &AppState) {
+    let _guard = RELOAD_LOCK.lock().await;
+    if state.stats.shutting_down.load(Ordering::Relaxed) {
+        tracing::info!("SIGHUP ignored: shutting down");
+        return;
+    }
+    tracing::info!("reloading config");
+
+    let fresh = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "config reload failed; keeping the running config");
+            state.settings.note_error(e);
+            return;
+        }
+    };
+
+    // Reported before the swap, because `replace` moves `fresh`.
+    for key in state.settings.restart_only_changes(&fresh) {
+        tracing::warn!(key, "not reloadable; restart required");
+    }
+
+    // Accounts and pool tunables are not part of `Settings`: they live in the
+    // pool, which can only be changed by rebuilding it. Decide that here, while
+    // both the old pool and the new config are in hand.
+    let old_pool = state.pool();
+    let pool_changed = old_pool.config() != &pool::PoolConfig::from_config(&fresh);
+    let wanted: Vec<String> = cli::load_accounts(&state.store)
+        .into_iter()
+        .map(|a| a.email)
+        .collect();
+    let accounts_changed = wanted != old_pool.configured_emails();
+
+    let generation = state.settings.replace(fresh.clone());
+    tracing::info!(generation, "config reloaded");
+
+    if pool_changed || accounts_changed {
+        rebuild_pool(state, fresh, old_pool).await;
+    }
+}
+
+/// Rebuild the pool off the request path.
+///
+/// Account changes require a login, which is network I/O and must never delay
+/// the settings swap that already happened. `AppState::set_pool` is the only
+/// mutation, so a turn that is already running finishes on the old pool while
+/// new turns get the new one. Thread bindings live in SQLite and are re-read by
+/// `Pool::route`, so no conversation is stranded by the swap.
+async fn rebuild_pool(state: &AppState, cfg: config::Config, old: Arc<pool::Pool>) {
+    let accounts = cli::load_accounts(&state.store);
+    tracing::info!(accounts = accounts.len(), "reloading account pool");
+    match connect_pool(&cfg, &state.store, accounts).await {
+        Ok(fresh) => {
+            let before = old.configured_emails().to_vec();
+            let after = fresh.configured_emails().to_vec();
+            for email in after.iter().filter(|e| !before.contains(e)) {
+                tracing::info!(account = %email, "account added by reload");
+            }
+            for email in before.iter().filter(|e| !after.contains(e)) {
+                tracing::warn!(account = %email, "account removed by reload");
+            }
+            state.set_pool(fresh);
+            tracing::info!("account pool reloaded");
+        }
+        Err(e) => {
+            // The running pool stays: an unbuildable pool must not take the
+            // proxy down, exactly like an unparseable config.
+            tracing::error!(error = %e, "pool reload failed; keeping the running pool");
+            state.settings.note_error(e.to_string());
+        }
+    }
+}
+
+/// Apply SIGHUP forever. Separate from [`shutdown_signal`] so the two never
+/// compete for the same signal.
+async fn reload_loop(state: AppState) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let Ok(mut hup) = signal(SignalKind::hangup()) else {
+        tracing::warn!("SIGHUP unavailable; hot reload is disabled");
+        return;
+    };
+    loop {
+        hup.recv().await;
+        reload(&state).await;
+    }
 }
 
 async fn shutdown_signal() {
@@ -2086,6 +2588,7 @@ mod tests {
         ThreadState {
             session_id: "s".into(),
             parent_message_id: None,
+            prev_parents: Vec::new(),
             exchanges,
         }
     }
@@ -2174,6 +2677,56 @@ mod tests {
         assert_eq!(e.status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(e.code, "invalid_request");
         assert_eq!(e.param.as_deref(), Some("messages.0.tool_call_id"));
+    }
+
+    #[test]
+    fn settings_handle_swaps_and_reports_generation() {
+        let mut cfg = config::Config::load().expect("config loads");
+        cfg.heartbeat_interval_secs = 10.0;
+        let handle = SettingsHandle::new(cfg.clone());
+
+        assert_eq!(handle.get().heartbeat_interval_secs, 10.0);
+        assert_eq!(handle.snapshot().0, 1);
+
+        cfg.heartbeat_interval_secs = 3.0;
+        assert_eq!(handle.replace(cfg), 2);
+        assert_eq!(handle.get().heartbeat_interval_secs, 3.0);
+        assert_eq!(handle.snapshot().0, 2);
+        assert_eq!(handle.snapshot().2, None);
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_running_config_and_records_the_error() {
+        let cfg = config::Config::load().expect("config loads");
+        let before = cfg.model.clone();
+        let handle = SettingsHandle::new(cfg);
+
+        handle.note_error("bad toml".into());
+
+        // The running config is untouched: a parse error must not brick a
+        // server that is already serving.
+        assert_eq!(handle.get().model_name, before);
+        assert_eq!(handle.snapshot().0, 1);
+        assert_eq!(handle.snapshot().2.as_deref(), Some("bad toml"));
+    }
+
+    #[test]
+    fn restart_only_keys_are_reported_not_applied() {
+        let a = config::Config::load().expect("config loads");
+        let mut b = config::Config::load().expect("config loads");
+        assert!(restart_only_keys(&a, &b).is_empty());
+
+        b.port = a.port.wrapping_add(1);
+        b.db_path = format!("{}.other", a.db_path);
+        b.image_max_bytes = a.image_max_bytes + 1;
+        let changed = restart_only_keys(&a, &b);
+        assert!(changed.contains(&"host/port"), "{changed:?}");
+        assert!(changed.contains(&"db_path"), "{changed:?}");
+        assert!(changed.contains(&"image_max_bytes"), "{changed:?}");
+
+        // A live key is not in the list: it is applied, not reported.
+        b.request_timeout_secs = a.request_timeout_secs + 5.0;
+        assert!(!restart_only_keys(&a, &b).contains(&"request_timeout_secs"));
     }
 
     #[test]

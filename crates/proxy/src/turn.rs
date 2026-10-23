@@ -58,7 +58,7 @@ pub async fn prepare(
     // thread: the client retries the same delta forever.
     let loaded = images::load(
         delta_messages(&req.messages),
-        state.settings.image_max_bytes,
+        state.settings.get().image_max_bytes,
     )
     .await
     .map_err(|e| {
@@ -104,7 +104,7 @@ pub async fn prepare(
     let thread = match existing {
         Some(t) => t,
         None => {
-            let conn = state.pool.route(key).await;
+            let conn = state.pool().route(key).await;
             let session_id = {
                 let _slot = conn
                     .acquire()
@@ -125,6 +125,7 @@ pub async fn prepare(
             let t = ThreadState {
                 session_id,
                 parent_message_id: None,
+                prev_parents: Vec::new(),
                 exchanges: 0,
             };
             tracing::info!(thread = %key, session = %t.session_id, "new remote session");
@@ -136,7 +137,7 @@ pub async fn prepare(
     let ref_file_ids = match loaded.data {
         None => Vec::new(),
         Some(bytes) => {
-            let conn = state.pool.route(key).await;
+            let conn = state.pool().route(key).await;
             let _slot = conn
                 .acquire()
                 .await
@@ -162,12 +163,12 @@ pub async fn prepare(
         }
     };
 
-    let thinking = want_thinking(req, state.settings.thinking_default);
+    let thinking = want_thinking(req, state.settings.get().thinking_default);
     let body = completion_body(
         &thread,
         &prompt,
         thinking,
-        state.settings.search_enabled,
+        state.settings.get().search_enabled,
         &ref_file_ids,
     );
 

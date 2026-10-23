@@ -1,4 +1,7 @@
 target/
+# pi agent scratch (task output, session state) — local only
+.pi/
+
 *.db
 *.db-shm
 *.db-wal

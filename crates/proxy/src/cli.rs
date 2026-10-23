@@ -136,6 +136,11 @@ fn send_signal(pid: i32, sig: i32) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn env_from_dotenv(key: &str) -> Option<String> {
+    // Tests must be hermetic: without this the fallback file on a developer's
+    // machine silently adds real accounts to a mock-upstream run.
+    if std::env::var("DEEPSEEK_NO_DOTENV").is_ok() {
+        return None;
+    }
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
@@ -376,6 +381,7 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         "stats" => stats(args).await,
         "start" => start(args).await,
         "stop" => stop().await,
+        "reload" => reload().await,
         "restart" => {
             let bg = start_flags(args).0;
             stop().await?;
@@ -565,6 +571,28 @@ async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error
     }
 }
 
+/// Send SIGHUP so a running server re-reads its config and account list.
+///
+/// Deliberately fire-and-forget: the server applies the reload asynchronously,
+/// and confirmation is `deepseek-rs stats` (the `config` block) or the log.
+/// Blocking here would mean inventing a timeout for an operation that has no
+/// natural bound when it triggers an account login.
+async fn reload() -> Result<i32, Box<dyn std::error::Error>> {
+    let rt = Runtime::resolve();
+    let Some(pid) = rt.pid() else {
+        eprintln!("not running");
+        rt.clear_pid();
+        return Ok(1);
+    };
+    if let Err(e) = send_signal(pid, libc::SIGHUP) {
+        eprintln!("signal {pid}: {e}");
+        return Ok(1);
+    }
+    println!("reload sent  pid {pid}");
+    println!("check with: deepseek-rs stats   (look for config.generation)");
+    Ok(0)
+}
+
 async fn stop() -> Result<i32, Box<dyn std::error::Error>> {
     let rt = Runtime::resolve();
     let Some(pid) = rt.pid() else {
@@ -578,7 +606,13 @@ async fn stop() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(1);
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // The server abandons in-flight turns after its own grace period, so wait
+    // a little longer than that before resorting to SIGKILL. Reading the same
+    // config keeps the two in step instead of hard-coding 15s in both places.
+    let grace = config::Config::load()
+        .map(|c| c.shutdown_grace_secs)
+        .unwrap_or(20);
+    let deadline = std::time::Instant::now() + Duration::from_secs(grace + 5);
     while std::time::Instant::now() < deadline {
         if !pid_alive(pid) {
             rt.clear_pid();
@@ -889,7 +923,13 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
             }
             store.upsert_account(&email, &password, token.as_deref())?;
             println!("added {email}");
-            println!("restart to apply: deepseek-rs restart");
+            // A running server picks this up on SIGHUP; only a stopped one needs
+            // a restart, and in that case there is no pid to signal.
+            if Runtime::resolve().pid().is_some() {
+                println!("apply to the running server: deepseek-rs reload");
+            } else {
+                println!("takes effect on next start");
+            }
             Ok(0)
         }
         "rm" | "remove" | "delete" => {
@@ -991,7 +1031,8 @@ SERVER
   serve                       run in the foreground (Ctrl-C to stop)
   start [-b|--bg]             foreground by default (pretty logs, Ctrl-C stops);
                               -b/--bg detaches and waits until healthy
-  stop                        SIGTERM the server (SIGKILL after 15s)
+  stop                        SIGTERM the server (SIGKILL after grace + 5s)
+  reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start (same flags as start)
   status                      pid, url, uptime, account count
   health                      one-shot health check (exit 1 when down)

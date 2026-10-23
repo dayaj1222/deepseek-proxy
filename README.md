@@ -79,7 +79,10 @@ search   = false             # web search (heavily throttled upstream)
 request_delay_secs = 2       # pause between requests on one account
 queue_limit        = 64      # requests allowed to queue behind a busy account
 queue_timeout_secs = 120     # how long one may wait for a slot
+account_fail_threshold = 3   # consecutive failures that open a breaker; 0 off
+account_cooldown_max_secs = 600  # cap for the exponential breaker cooldown
 request_timeout_secs = 300   # per-turn wall clock
+shutdown_grace_secs = 20     # in-flight turns may finish this long after SIGTERM
 heartbeat_interval_secs = 10 # SSE keep-alive
 rate_limit_max_retries = 5   # retries for a throttled turn
 rate_limit_backoff_secs = 10.0
@@ -91,7 +94,9 @@ Frequently used environment overrides: `PROXY_HOST`, `PROXY_PORT`, `DB_PATH`,
 `CONFIG_PATH`, `DEEPSEEK_RUNTIME_DIR`, `MODEL_NAME`, `THINKING_ENABLED`,
 `SEARCH_ENABLED`, `REQUEST_DELAY`, `QUEUE_LIMIT`, `QUEUE_TIMEOUT`,
 `REQUEST_TIMEOUT`, `HEARTBEAT_INTERVAL`, `IMAGE_MAX_BYTES`,
-`RATE_LIMIT_MAX_RETRIES`, `RATE_LIMIT_BACKOFF_S`, `TOOL_REPAIR_MAX_RETRIES`.
+`RATE_LIMIT_MAX_RETRIES`, `RATE_LIMIT_BACKOFF_S`, `TOOL_REPAIR_MAX_RETRIES`,
+`LOGIN_COOLDOWN`, `ACCOUNT_FAIL_THRESHOLD`, `ACCOUNT_COOLDOWN_MAX`,
+`SHUTDOWN_GRACE`.
 
 Credentials never go in `config.toml`.
 
@@ -143,11 +148,24 @@ both in the same envelope (`not_found`, `method_not_allowed`).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/chat/completions` | Completions, streaming or not |
+| `POST` | `/v1/chat/completions` | Completions, streaming (`stream: true`, SSE) or not (one JSON `chat.completion`) |
 | `GET` | `/v1/models` | Advertised model ids |
 | `GET` | `/healthz` | Liveness |
-| `GET` | `/readyz` | Readiness |
+| `GET` | `/readyz` | Readiness (`503` while draining after SIGTERM) |
 | `GET` | `/stats` | Counters, per-account state, database counts |
+
+`stream: false` (the OpenAI default) returns a single `chat.completion` object
+with `choices[0].message` — including `reasoning_content` and `tool_calls` when
+the turn produced them — and a `usage` block. `stream: true` returns SSE.
+
+Endpoints this proxy does not implement — `/v1/embeddings`, the legacy
+`/v1/completions`, `/v1/images/*`, `/v1/audio/*` — answer `501` with
+`code: "not_supported"` rather than `404`, so a capability probe can tell
+"this proxy won't do it" from "no such route".
+
+CORS is fully open (`Access-Control-Allow-Origin: *`, preflight answered) so a
+local browser UI can call the API directly. Authorization is the bearer key, not
+the origin, so no allowlist is needed.
 
 `/stats` is what `deepseek-rs stats` and `status` read:
 
@@ -157,11 +175,18 @@ both in the same envelope (`not_found`, `method_not_allowed`).
              "tool_calls":0,"images_dropped":0},
  "threads":{"in_memory":0},
  "db":{"threads":0,"bindings":0,"api_keys":0,"accounts":0,"cached_tokens":0},
- "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null}]}
+ "accounts":[{"email":"...","healthy":true,"bound_threads":0,"waiting":0,"cooldown_ms":null,
+              "breaker":"closed","retry_in_secs":null}],
+ "config":{"generation":1,"loaded_at_secs_ago":0,"last_error":null}}
 ```
 
 With the server down, `stats` falls back to database counts and says so on
 stderr.
+
+Every response, including errors, carries an `x-request-id` header. Send your
+own to have it echoed back; otherwise the proxy mints one. The same id is on
+every log line written while handling that request (`req=<id>`), so one id from
+a bug report locates the whole turn.
 
 ## CLI
 
@@ -169,7 +194,8 @@ stderr.
 SERVER
   serve                       foreground (Ctrl-C stops)
   start [-b|--bg]             foreground by default; -b detaches, waits until healthy
-  stop                        SIGTERM (SIGKILL after 15s)
+  stop                        SIGTERM (SIGKILL after grace + 5s)
+  reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start
   status                      pid, url, uptime, account count
   health                      one-shot check (exit 1 when down)
@@ -221,8 +247,26 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   bounded correction turn instead of an error to the client.
 - **Rate limits retry before the first byte**, so streaming clients can still be
   served; what cannot be retried fails with a typed error.
-- **Stale cursors rebuild the session** from the transcript once rather than
-  failing the turn.
+- **Shutdown is bounded.** On SIGTERM `/readyz` immediately reports `503`, then
+  in-flight turns get `shutdown_grace_secs` to finish before the process exits.
+- **Config is hot-reloadable.** `deepseek-rs reload` (or `kill -HUP <pid>`)
+  re-reads `config.toml` and the account list without a restart and without
+  dropping a turn: a turn keeps the settings it started with. A config that does
+  not parse leaves the running one in place and is reported in
+  `/stats.config.last_error`. `host`, `port`, `db_path` and `image_max_bytes`
+  cannot change while bound; a reload logs `not reloadable; restart required`
+  instead of pretending. Adding or removing an account rebuilds the pool in the
+  background — thread bindings live in SQLite, so no conversation is stranded.
+- **A flapping account is taken out of rotation.** After
+  `account_fail_threshold` consecutive failures its breaker opens for
+  `login_cooldown_secs * 2^k` (capped by `account_cooldown_max_secs`), its
+  threads move to a healthy account, and one probe request tests it when the
+  window elapses. `/stats` shows `breaker` and `retry_in_secs` per account.
+- **Stale cursors are rewound, not replayed.** When the backend rejects the
+  saved parent id, the proxy steps back one commit (keeping the last three) and
+  resends the same delta, so the live session and its context survive. Only when
+  there is nothing left to step back to does it rebuild the session from the
+  transcript.
 
 ## Architecture
 

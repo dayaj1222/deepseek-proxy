@@ -8,9 +8,43 @@ use axum::response::sse::Event;
 use futures_util::StreamExt;
 use protocol::{route_event, Channel, FragmentRouter};
 use serde_json::{json, Value};
-use std::convert::Infallible;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::dialect;
+
+/// One thing a turn produces before it is turned into a transport.
+///
+/// The turn is the same whether the client asked for SSE or one JSON body, so
+/// it emits these and the caller decides: the streaming path wraps each one in
+/// an [`Event`], the non-streaming path concatenates them into a
+/// `chat.completion`. Errors travel in-band because a turn can fail after the
+/// first byte, and only the caller knows whether a status code is still
+/// available to change.
+pub enum Chunk {
+    /// An OpenAI-shaped `chat.completion.chunk` payload.
+    Data(String),
+    /// SSE keep-alive comment; ignored by the non-streaming collector.
+    KeepAlive,
+    /// Terminal failure: HTTP status plus the OpenAI error envelope.
+    Error(axum::http::StatusCode, Value),
+}
+
+/// Channel a turn writes to; the caller owns the receiving half.
+pub type ChunkSender = tokio::sync::mpsc::Sender<Chunk>;
+pub type ChunkReceiver = tokio::sync::mpsc::Receiver<Chunk>;
+
+/// Wrap a chunk receiver as an SSE response body.
+pub fn sse_stream(rx: ChunkReceiver) -> impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> {
+    ReceiverStream::new(rx).map(|chunk| {
+        Ok(match chunk {
+            Chunk::Data(data) => Event::default().data(data),
+            Chunk::KeepAlive => Event::default().comment("keep-alive"),
+            // The status cannot be sent at this point; the envelope still can,
+            // which is what the client parses.
+            Chunk::Error(_, payload) => Event::default().data(payload.to_string()),
+        })
+    })
+}
 
 /// Result of draining one upstream SSE response into OpenAI chunks.
 pub struct Pumped {
@@ -109,7 +143,7 @@ pub fn usage_block(prompt_tokens: u64, text: &str, calls: &[dialect::ToolCall]) 
 /// - The caller bounds the whole turn with `request_timeout`.
 pub async fn pump(
     resp: reqwest::Response,
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    tx: &ChunkSender,
     id: &str,
     model: &str,
     created: u64,
@@ -166,7 +200,7 @@ pub async fn pump(
             Ok(None) => break,
             Err(_) => {
                 if tx
-                    .send(Ok(Event::default().comment("keep-alive")))
+                    .send(Chunk::KeepAlive)
                     .await
                     .is_err()
                 {
@@ -262,7 +296,7 @@ pub async fn pump(
                 }
                 emitted = true;
                 if tx
-                    .send(Ok(Event::default().data(chunk.to_string())))
+                    .send(Chunk::Data(chunk.to_string()))
                     .await
                     .is_err()
                 {

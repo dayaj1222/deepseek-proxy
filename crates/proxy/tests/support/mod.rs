@@ -30,6 +30,12 @@ pub enum Step {
     HintError(&'static str),
     /// 401, so the client classifies it as a dead login.
     Unauthorized,
+    /// 200 with a raw JSON body and no SSE frames, as the backend answers when
+    /// it refuses the request outright (`{"code":26,...}` for a stale parent).
+    NonSse(String),
+    /// 500 with no body: a failure that is neither a throttle nor a dead login,
+    /// which is what counts against an account's circuit breaker.
+    ServerError,
 }
 
 /// The scenario the mock plays, one step per completion request.
@@ -39,6 +45,10 @@ pub struct MockScript {
     completions: Arc<Mutex<u32>>,
     /// Accounts whose login must fail (failover tests).
     dead_logins: Arc<Mutex<Vec<String>>>,
+    /// `parent_message_id` of every completion request, in order. This is how a
+    /// test proves the proxy resent on a *previous* cursor after the backend
+    /// rejected the newest one.
+    parents: Arc<Mutex<Vec<Option<i64>>>>,
 }
 
 impl MockScript {
@@ -47,6 +57,7 @@ impl MockScript {
             steps: Arc::new(Mutex::new(steps.into())),
             completions: Arc::new(Mutex::new(0)),
             dead_logins: Arc::new(Mutex::new(Vec::new())),
+            parents: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -59,6 +70,11 @@ impl MockScript {
     /// How many completion requests the proxy actually made.
     pub fn completions(&self) -> u32 {
         *self.completions.lock().unwrap()
+    }
+
+    /// `parent_message_id` sent with each completion request, in order.
+    pub fn parents(&self) -> Vec<Option<i64>> {
+        self.parents.lock().unwrap().clone()
     }
 }
 
@@ -133,12 +149,22 @@ async fn pow_challenge() -> Response {
     .into_response()
 }
 
-async fn completion(State(script): State<MockScript>) -> Response {
+async fn completion(State(script): State<MockScript>, body: String) -> Response {
     *script.completions.lock().unwrap() += 1;
+    script.parents.lock().unwrap().push(
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("parent_message_id").and_then(Value::as_i64)),
+    );
     let step = script.steps.lock().unwrap().pop_front();
     let sse = [(axum::http::header::CONTENT_TYPE, "text/event-stream")];
     match step {
         Some(Step::Sse(body)) => (StatusCode::OK, sse, body).into_response(),
+        Some(Step::NonSse(body)) => {
+            let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+            (StatusCode::OK, json, body).into_response()
+        }
+        Some(Step::ServerError) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Some(Step::HintError(message)) => {
             let body = format!(
                 "event: hint\ndata: {}\n\n",
@@ -157,6 +183,38 @@ pub struct App {
     pub base: String,
     child: std::process::Child,
     dir: std::path::PathBuf,
+    config: std::path::PathBuf,
+}
+
+impl App {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Send SIGHUP, which the server treats as "re-read the config".
+    pub fn sighup(&self) {
+        let rc = unsafe { libc::kill(self.pid() as i32, libc::SIGHUP) };
+        assert_eq!(rc, 0, "kill(SIGHUP) failed");
+    }
+
+    /// Rewrite the running config, the way an operator would before a SIGHUP.
+    pub fn write_config(&self, body: &str) {
+        std::fs::write(&self.config, body).expect("write config.toml");
+    }
+
+    /// Paths the proxy was started with, so a test can run the real CLI against
+    /// the same state directory instead of guessing.
+    pub fn db_path(&self) -> std::path::PathBuf {
+        self.dir.join("test.db")
+    }
+
+    pub fn runtime_dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config
+    }
 }
 
 impl Drop for App {
@@ -178,6 +236,40 @@ pub async fn spawn_app(upstream: &str, accounts: &[(&str, &str)]) -> App {
     spawn_app_with_keys(upstream, accounts, &[]).await
 }
 
+/// Poll `/stats` until `pred` accepts it, or fail after ~5s.
+///
+/// A reload is asynchronous by design — the signal is delivered, then the
+/// config is re-read — so tests must wait for the effect rather than sleep a
+/// guessed amount and hope.
+pub async fn stats_until(
+    app: &App,
+    what: &str,
+    mut pred: impl FnMut(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..100 {
+        let resp = reqwest::get(format!("{}/stats", app.base))
+            .await
+            .expect("GET /stats");
+        last = resp.json().await.expect("stats json");
+        if pred(&last) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}; last stats: {last}");
+}
+
+/// `spawn_app` with extra environment overrides, for config that is read once
+/// at boot (the breaker thresholds, for instance).
+pub async fn spawn_app_with_env(
+    upstream: &str,
+    accounts: &[(&str, &str)],
+    envs: &[(&str, &str)],
+) -> App {
+    spawn_with(upstream, accounts, &[], envs).await
+}
+
 /// Same as `spawn_app`, but registers `keys` (name, secret) first, so the proxy
 /// requires a bearer token. Registering goes through the real `keys add` CLI,
 /// which is the only public way to seed the key table.
@@ -186,11 +278,26 @@ pub async fn spawn_app_with_keys(
     accounts: &[(&str, &str)],
     keys: &[(&str, &str)],
 ) -> App {
+    spawn_with(upstream, accounts, keys, &[]).await
+}
+
+async fn spawn_with(
+    upstream: &str,
+    accounts: &[(&str, &str)],
+    keys: &[(&str, &str)],
+    envs: &[(&str, &str)],
+) -> App {
     let port = free_port();
     let dir =
         std::env::temp_dir().join(format!("deepseek-rs-test-{}-{}", std::process::id(), port));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+
+    // Every spawned proxy gets its own config file, and `CONFIG_PATH` points at
+    // it. Without this a test would inherit the repo's real `config.toml`, and
+    // the hot-reload tests would have nothing safe to rewrite.
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, "").expect("seed config.toml");
 
     for (name, secret) in keys {
         let status = std::process::Command::new(env!("CARGO_BIN_EXE_deepseek-rs"))
@@ -212,12 +319,19 @@ pub async fn spawn_app_with_keys(
         .env("PROXY_HOST", "127.0.0.1")
         .env("PROXY_PORT", port.to_string())
         .env("DB_PATH", dir.join("test.db"))
+        .env("CONFIG_PATH", &config_path)
         .env("DEEPSEEK_RUNTIME_DIR", &dir)
+        // Never inherit the developer's real accounts from `../deepseek/.env`:
+        // a test's account list must be exactly what the test declared.
+        .env("DEEPSEEK_NO_DOTENV", "1")
         .env("RUST_LOG", "warn")
         // Keep the scenario fast: no sleep between requests, no retry backoff.
         .env("REQUEST_DELAY", "0")
         .env("RATE_LIMIT_BACKOFF_S", "0")
         .env("TOOL_REPAIR_MAX_RETRIES", "1");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     for (i, (email, password)) in accounts.iter().enumerate() {
         cmd.env(format!("DEEPSEEK_EMAIL_{i}"), email)
             .env(format!("DEEPSEEK_PASSWORD_{i}"), password);
@@ -234,7 +348,12 @@ pub async fn spawn_app_with_keys(
             .map(|r| r.status().is_success())
             .unwrap_or(false)
         {
-            return App { base, child, dir };
+            return App {
+                base,
+                child,
+                dir,
+                config: config_path,
+            };
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -269,6 +388,15 @@ pub async fn complete_with_key(app: &App, body: Value, key: &str) -> reqwest::Re
 /// where hand-written SSE fixtures usually go wrong.
 pub fn sse_reply(message_id: i64, parent_id: i64, fragments: &[&str]) -> String {
     let mut out = String::new();
+    // The `ready` event is where the proxy learns the cursor: it reads the
+    // top-level `response_message_id`, not `v.response.message_id`. Without this
+    // line a scripted reply commits no parent id at all.
+    let ready = json!({
+        "request_message_id": parent_id,
+        "response_message_id": message_id,
+        "model_type": "default"
+    });
+    out.push_str(&format!("event: ready\ndata: {ready}\n\n"));
     let response = json!({
         "v": {"response": {
             "message_id": message_id,
