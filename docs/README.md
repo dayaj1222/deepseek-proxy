@@ -58,3 +58,4 @@ yours.
 | T-16 | Debug capture and replay | planned |
 | T-17 | Deployment artifacts | planned |
 | T-18 | Optional TLS and open-exposure guard | planned |
+| T-21 | Forced rebind: move a live thread to another account | planned |
