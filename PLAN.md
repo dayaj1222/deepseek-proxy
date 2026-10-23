@@ -414,6 +414,52 @@ Not verified / assumptions: <list>
 Docs updated: README sections
 ```
 
+## Status as of 2026-10-23
+
+Every landed change and its reasoning is in [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
+Every decision is in [`docs/adr/`](docs/adr/). Every planned feature has a
+one-page plan in [`docs/features/`](docs/features/).
+
+| Task | Title | Status |
+|---|---|---|
+| T-19 | Mock upstream + HTTP integration harness | **done** (`aeedec0`, `7b17f2c`) |
+| T-00 | Split `main.rs` into modules | **done** (`a4212d8`…`e34919d`), wider than the plan |
+| T-01 | OpenAI-shaped 401/404/405 | **done** (`4a57281`) |
+| T-02 | Request id + one log line per turn | **done** (`cc4cedd`) |
+| T-03 | Cooldown + circuit breaker | **done** (`1efc162`) |
+| — | Cursor rewind before rebuild (not in the original plan) | **done** (`167b072`) |
+| T-07 | Shutdown drain with deadline | **done** (`3f719ee`) |
+| T-11 | `reasoning_content` in non-streaming replies | **partial** — `message.reasoning_content` ships (`main.rs:2107`, via the shared `Chunk` fold); `usage.completion_tokens_details.reasoning_tokens` is still missing |
+| T-15 | Hot reload (SIGHUP) | **done** (`2efede5`, `fb02494`, `354ee32`) |
+| T-20 | 501 stubs for unsupported endpoints | **done** (`3f719ee`) |
+| — | Non-streaming JSON, CORS (not in the original plan) | **done** (`3f719ee`) |
+| — | Stray closing tags after a tool block | **done** (`d1f7f49`) |
+| T-04 | API-key metadata | planned — [plan](docs/features/T-04-api-key-metadata.md) |
+| T-05 | Usage accounting + per-key rate limit | planned — [plan](docs/features/T-05-usage-accounting.md) |
+| T-06 | Prometheus `/metrics` | planned — [plan](docs/features/T-06-prometheus-metrics.md) |
+| T-08 | `max_tokens` / `stop` | planned — [plan](docs/features/T-08-token-limits-and-stop.md) |
+| T-09 | Accept-and-ignore sampling params | planned — [plan](docs/features/T-09-sampling-params.md) |
+| T-10 | `response_format` | planned — [plan](docs/features/T-10-response-format.md) |
+| T-12 | `n > 1` | planned — [plan](docs/features/T-12-n-choices.md) |
+| T-13 | Multiple images per turn | planned — [plan](docs/features/T-13-multiple-images.md) |
+| T-14 | `/v1/responses` | planned — [plan](docs/features/T-14-responses-api.md) |
+| T-16 | Debug capture and replay | planned — [plan](docs/features/T-16-capture-and-replay.md) |
+| T-17 | Deployment artifacts | planned — [plan](docs/features/T-17-deployment-artifacts.md) |
+| T-18 | Optional TLS and exposure guard | planned — [plan](docs/features/T-18-tls-and-exposure-guard.md) |
+
+T-07 and T-20 were closed by work the plan did not anticipate: bounded shutdown
+and the 501 stubs both shipped in `3f719ee` alongside non-streaming JSON. T-11 is
+half done - the reply now carries `reasoning_content` because a turn emits
+`Chunk`s and the caller chooses the transport (ADR-0002), so the streaming and
+non-streaming paths share one fold; the `reasoning_tokens` count is still
+missing and has its own page in `docs/features/`. Cursor rewind, CORS and
+non-streaming JSON were not in the original plan at all; they were gaps found by
+using the server.
+
+**Next, if picking up cold:** T-04 → T-05 (usage needs key ids), then T-08
+(the most-requested API gap), then T-09 and T-10. T-19 is done, so every task
+below can be tested at the HTTP level from day one.
+
 ## 4. Risk register (check before merging anything touching these)
 
 | Risk | Where | Guard |

@@ -300,6 +300,16 @@ The `corpus/` fixtures are raw byte streams captured from DeepSeek's completion
 endpoint, paired with the routing output each should produce. They are what
 keeps the stream parser honest.
 
+### Documentation
+
+| Where | What |
+|---|---|
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | every landed change, with the reason |
+| [`docs/adr/`](docs/adr/) | why each design is the way it is |
+| [`docs/features/`](docs/features/) | one-page plans for what is not built yet |
+| [`PLAN.md`](PLAN.md) | task list, ground rules, and current status |
+| [`GLOSSARY.md`](GLOSSARY.md) | thread, turn, delta, cursor, repair turn, account, surface |
+
 ### Logging
 
 | | prod (default) | debug (`DEEPSEEK_LOG=debug`) |
