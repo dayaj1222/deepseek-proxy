@@ -49,6 +49,9 @@ pub struct MockScript {
     /// test proves the proxy resent on a *previous* cursor after the backend
     /// rejected the newest one.
     parents: Arc<Mutex<Vec<Option<i64>>>>,
+    /// The `prompt` of every completion request, in order, so a test can tell a
+    /// continuation (delta only) from a replay (whole transcript).
+    prompts: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockScript {
@@ -58,6 +61,7 @@ impl MockScript {
             completions: Arc::new(Mutex::new(0)),
             dead_logins: Arc::new(Mutex::new(Vec::new())),
             parents: Arc::new(Mutex::new(Vec::new())),
+            prompts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -75,6 +79,11 @@ impl MockScript {
     /// `parent_message_id` sent with each completion request, in order.
     pub fn parents(&self) -> Vec<Option<i64>> {
         self.parents.lock().unwrap().clone()
+    }
+
+    /// `prompt` sent with each completion request, in order.
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
     }
 }
 
@@ -151,10 +160,18 @@ async fn pow_challenge() -> Response {
 
 async fn completion(State(script): State<MockScript>, body: String) -> Response {
     *script.completions.lock().unwrap() += 1;
+    let parsed = serde_json::from_str::<Value>(&body).ok();
     script.parents.lock().unwrap().push(
-        serde_json::from_str::<Value>(&body)
-            .ok()
+        parsed
+            .as_ref()
             .and_then(|v| v.get("parent_message_id").and_then(Value::as_i64)),
+    );
+    script.prompts.lock().unwrap().push(
+        parsed
+            .as_ref()
+            .and_then(|v| v.get("prompt").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string(),
     );
     let step = script.steps.lock().unwrap().pop_front();
     let sse = [(axum::http::header::CONTENT_TYPE, "text/event-stream")];

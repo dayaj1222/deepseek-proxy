@@ -951,6 +951,30 @@ fn clone_change(change: &session::ThreadChange) -> session::ThreadChange {
     }
 }
 
+/// `x-deepseek-rs-rebind`: `next`, `fresh`, or an account email.
+///
+/// This is the deterministic channel a pi extension uses: the extension eats
+/// the operator's sentinel in the `input` hook, so the sentinel never becomes a
+/// message, and sets this header on the request that follows. The proxy then
+/// never scans message text for directives, and nothing has to be stripped
+/// from the transcript.
+fn rebind_header(headers: &HeaderMap) -> Result<Option<session::ThreadChange>, ProxyError> {
+    let Some(raw) = header_value(headers, "x-deepseek-rs-rebind") else {
+        return Ok(None);
+    };
+    // An unknown target is a client error: a silent no-op would leave the
+    // caller believing the session moved.
+    let (change, _) = parse_target(Some(&raw)).ok_or_else(|| {
+        ProxyError::new(
+            "x-deepseek-rs-rebind must be next, fresh, or an account email",
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request",
+        )
+        .with_param("x-deepseek-rs-rebind")
+    })?;
+    Ok(Some(change))
+}
+
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
     let s = &state.stats;
@@ -1503,9 +1527,20 @@ async fn chat_completions(
     );
     state.stats.total.fetch_add(1, Ordering::Relaxed);
 
+    // A rebind directive must be resolved before preparation: it decides
+    // whether this turn is a continuation (delta) or a replay into a session
+    // that has never seen the conversation.
+    let rebind = match rebind_header(&headers) {
+        Ok(r) => r,
+        Err(e) => {
+            state.stats.errors.fetch_add(1, Ordering::Relaxed);
+            return e.into_response();
+        }
+    };
+
     // Everything up to the upstream call is preparation, and it lives in one
     // module: resume, prompts, session create, image upload, body.
-    let prepared = match turn::prepare(&state, &key, &req, &model).await {
+    let prepared = match turn::prepare(&state, &key, &req, &model, rebind).await {
         Ok(p) => p,
         Err(e) => {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);

@@ -44,8 +44,14 @@ pub async fn prepare(
     key: &str,
     req: &ChatRequest,
     model: &str,
+    rebind: Option<crate::session::ThreadChange>,
 ) -> Result<Prepared, ProxyError> {
     let existing = state.threads.resume(key);
+    // A rebind opens a session that has never seen this conversation, so the
+    // turn must carry the whole transcript. Building the prompt as if this were
+    // a continuation would send only the delta into an empty session and lose
+    // everything said before it.
+    let rebinding = rebind.is_some();
 
     // Tool definitions are taught once, on the first turn of a thread. Later
     // turns ride on the server-side conversation, like the Python proxy.
@@ -80,8 +86,12 @@ pub async fn prepare(
         );
     }
 
-    let (prompt, replay) =
-        build_prompts(req, existing.as_ref(), &system_extra, image_note.as_deref());
+    let (prompt, replay) = build_prompts(
+        req,
+        if rebinding { None } else { existing.as_ref() },
+        &system_extra,
+        image_note.as_deref(),
+    );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
         return Err(ProxyError::new(
@@ -98,14 +108,21 @@ pub async fn prepare(
         "turn built"
     );
     // A brand-new thread has nothing to replay into, so a limit hit is final.
-    let can_recover = existing.is_some() && !replay.is_empty();
+    // A rebound thread does have a transcript, and that is exactly what was
+    // just replayed, so it recovers like any existing thread.
+    let can_recover = (existing.is_some() || rebinding) && !replay.is_empty();
 
-    // Create the remote session lazily, on the first turn for this thread.
-    let thread = match existing {
-        Some(t) => t,
-        None => {
-            crate::session::open_session(state, key, crate::session::ThreadChange::Fresh).await?
-        }
+    // Create the remote session lazily, on the first turn for this thread, or
+    // immediately when this turn is itself a rebind.
+    let thread = match rebind {
+        Some(change) => crate::session::open_session(state, key, change).await?,
+        None => match existing {
+            Some(t) => t,
+            None => {
+                crate::session::open_session(state, key, crate::session::ThreadChange::Fresh)
+                    .await?
+            }
+        },
     };
 
     let ref_file_ids = match loaded.data {

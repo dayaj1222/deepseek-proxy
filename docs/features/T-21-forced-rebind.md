@@ -62,30 +62,52 @@ rather than leaving a caller to discover it.
 
 ## Surface
 
-### Trigger 1 - client header (primary)
+### Trigger 1 - client header (shipped)
 
 ```
 x-deepseek-rs-rebind: next | fresh | <email>
 ```
 
 - `next` - move to the least-crowded healthy account that is not the current one
-- `<email>` - pin to that account for this turn
-- `fresh` - rebuild the session on the same account (useful for a poisoned
-  context; no account change)
+- `<email>` - pin to that account, **refused** if it is unhealthy
+- `fresh` - rebuild the session on the same account (a poisoned context; no
+  account change)
 
 Deterministic, debuggable, and matches the operator's intent: decide at the turn
 that matters.
 
-### Trigger 2 - CLI
+Two rules the implementation depends on:
+
+1. **The header is resolved before `turn::prepare`.** It decides whether the
+   turn is a continuation (`delta`) or a replay. A rebind opens a session that
+   has never seen the conversation, so the turn must carry `replay`; preparing
+   it as a continuation would send only the newest message and silently drop
+   everything before it. `turn::prepare` takes the change and builds the prompt
+   with `existing = None`.
+2. **An unknown target is a 400**, checked before the thread lock and before any
+   session exists. A typo must not half-move a conversation.
+
+A pi extension is the intended producer: the `input` hook consumes the
+operator's sentinel so it never becomes a message, then
+`before_provider_headers` sets this header on the request that follows, and
+`after_provider_response` clears the one-shot flag. The proxy never scans message
+text, so nothing has to be stripped from the transcript on the replay path. Any
+other client can send the header directly.
+
+### Trigger 2 - CLI and admin route (shipped)
 
 ```
-deepseek-rs rebind <thread_key> [--account EMAIL]
+deepseek-rs rebind                       # list flagged threads, stop
+deepseek-rs rebind --all --yes           # move them (cap 10)
+deepseek-rs rebind <thread> -a EMAIL --yes
 ```
 
-Writes the pin so the **next** turn rebuilds. For rescue from a terminal when
-the client cannot send headers.
+Backed by `GET /admin/throttled` and `POST /admin/rebind`, both behind
+`authorize`. `thread_bindings.throttled_at` records which threads a throttled
+account refused, written by the rate-limit-exhausted branch before the turn
+fails.
 
-### Trigger 3 - automatic, inside the existing rate-limit branch
+### Trigger 3 - automatic, inside the rate-limit branch (not built)
 
 ```toml
 [limits]
