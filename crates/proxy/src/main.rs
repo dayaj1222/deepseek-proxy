@@ -29,6 +29,7 @@ mod images;
 mod log;
 mod pool;
 mod prompt;
+mod session;
 mod sse;
 mod store;
 mod threads;
@@ -367,34 +368,11 @@ fn first_hint(raw: &str) -> Option<String> {
 async fn rebuild_session(
     state: &AppState,
     key: &str,
-    reason: &str,
+    reason: session::RebuildReason,
 ) -> Result<ThreadState, Response> {
-    let conn = state.pool().route(key).await;
-    let session_id = {
-        let _slot = conn
-            .acquire()
-            .await
-            .map_err(|e| queue_error(&format!("rate slot: {e}")))?;
-        conn.client()
-            .await
-            .create_chat_session()
-            .await
-            .map_err(|e| backend_error(&format!("create_session: {e}")))?
-    };
-    tracing::warn!("thread {key}: {reason}; rebuilding in a new remote session");
-
-    let fresh = threads::ThreadState {
-        session_id,
-        parent_message_id: None,
-        // A rebuilt session has new message ids, so nothing from the old one is
-        // worth rewinding into.
-        prev_parents: Vec::new(),
-        // A rebuilt session replays the whole transcript, so the counters
-        // restart with it.
-        exchanges: 0,
-    };
-    state.threads.replace(key, fresh.clone());
-    Ok(fresh)
+    session::open_session(state, key, session::ThreadChange::Rebuild { reason })
+        .await
+        .map_err(ProxyError::into_response)
 }
 
 fn content_text(content: &Option<Value>) -> String {
@@ -1631,7 +1609,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                         hint = %hint,
                         "stale parent message id; rebuilding the session and replaying the transcript"
                     );
-                    match rebuild_session(&state, &key, &hint).await {
+                    match rebuild_session(&state, &key, session::RebuildReason::StaleCursor).await {
                         Ok(fresh) => {
                             let thinking = body.thinking_enabled;
                             let search = body.search_enabled;
@@ -1694,7 +1672,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                     return;
                 }
                 context_recovered = true;
-                match rebuild_session(&state, &key, &hint).await {
+                match rebuild_session(&state, &key, session::RebuildReason::ContextLimit).await {
                     Ok(fresh) => {
                         let thinking = body.thinking_enabled;
                         let search = body.search_enabled;
@@ -2265,18 +2243,6 @@ fn backend_error(msg: &str) -> Response {
         "Backend request failed",
         axum::http::StatusCode::BAD_GATEWAY,
         "backend_error",
-    )
-    .into_response()
-}
-
-/// Account queue saturated. Python raises `AccountQueueFull`/
-/// `AccountQueueTimeout`, which `error_for()` maps to 503 `queue_unavailable`.
-fn queue_error(msg: &str) -> Response {
-    tracing::warn!(error = %msg, "account queue unavailable");
-    ProxyError::new(
-        "Request queue unavailable; try again later",
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "queue_unavailable",
     )
     .into_response()
 }

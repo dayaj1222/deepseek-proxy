@@ -447,6 +447,7 @@ one-page plan in [`docs/features/`](docs/features/).
 | T-17 | Deployment artifacts | planned — [plan](docs/features/T-17-deployment-artifacts.md) |
 | T-18 | Optional TLS and exposure guard | planned — [plan](docs/features/T-18-tls-and-exposure-guard.md) |
 | T-21 | Forced rebind to another account (not in the original plan) | planned — [plan](docs/features/T-21-forced-rebind.md) |
+| T-22 | One interface for thread identity changes (not in the original plan) | done — [plan](docs/features/T-22-thread-identity.md) |
 
 T-07 and T-20 were closed by work the plan did not anticipate: bounded shutdown
 and the 501 stubs both shipped in `3f719ee` alongside non-streaming JSON. T-11 is
