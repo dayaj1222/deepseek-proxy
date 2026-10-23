@@ -721,5 +721,180 @@ fn reload_returns_1_without_a_pidfile() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Exhausting the throttle retries flags the thread, and the flag is what
+/// `deepseek-rs rebind` selects from. Without it the CLI had nothing to read.
+#[tokio::test]
+async fn an_exhausted_throttle_flags_the_thread_for_rebind() {
+    // Default budget is 3 retries; the 4th throttle is the failure.
+    let script = MockScript::new(vec![
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+    ]);
+    let (upstream, _script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    // Non-streaming on purpose: a streaming reply commits its 200 header
+    // before the body, so a throttle would surface as an SSE error event and
+    // never as a status code. The JSON collector is what turns it into 429.
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 429);
+
+    let listed: serde_json::Value = reqwest::get(format!("{}/admin/throttled", app.base))
+        .await
+        .expect("GET /admin/throttled")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["count"], json!(1), "{listed}");
+    let row = &listed["threads"][0];
+    assert_eq!(row["account"], json!("a@example.com"));
+    assert_eq!(
+        row["account_healthy"],
+        json!(true),
+        "a cooldown is not a breaker trip"
+    );
+}
+
+/// A dry run reports the plan and changes nothing. Every rebind costs a full
+/// transcript replay, so the default must be the harmless one.
+#[tokio::test]
+async fn rebind_dry_run_changes_nothing() {
+    let script = MockScript::new(vec![
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+    ]);
+    let (upstream, _script) = start_mock(script).await;
+    let app = spawn_app(
+        &upstream,
+        &[("a@example.com", "pw"), ("b@example.com", "pw")],
+    )
+    .await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 429);
+
+    let plan: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/admin/rebind", app.base))
+        .json(&json!({"all_throttled": true, "dry_run": true, "account": "next"}))
+        .send()
+        .await
+        .expect("POST /admin/rebind")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(plan["dry_run"], json!(true));
+    assert_eq!(plan["count"], json!(1), "{plan}");
+    assert_eq!(plan["plan"][0]["from"], json!("a@example.com"));
+    assert_eq!(plan["plan"][0]["to"], json!("next"));
+
+    // Still flagged: the plan was not applied.
+    let listed: serde_json::Value = reqwest::get(format!("{}/admin/throttled", app.base))
+        .await
+        .expect("GET /admin/throttled")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["count"], json!(1), "{listed}");
+}
+
+/// Applying a rebind moves the binding and clears the flag, so the thread stops
+/// appearing in the list it was selected from.
+#[tokio::test]
+async fn rebind_moves_the_thread_and_clears_the_flag() {
+    let script = MockScript::new(vec![
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+        Step::HintError("Messages too frequent. Try again later."),
+    ]);
+    let (upstream, _script) = start_mock(script).await;
+    let app = spawn_app(
+        &upstream,
+        &[("a@example.com", "pw"), ("b@example.com", "pw")],
+    )
+    .await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 429);
+
+    let done: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/admin/rebind", app.base))
+        .json(&json!({"all_throttled": true, "account": "next"}))
+        .send()
+        .await
+        .expect("POST /admin/rebind")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(done["failed"], json!([]), "{done}");
+    assert_eq!(done["rebound"].as_array().unwrap().len(), 1, "{done}");
+    assert_eq!(done["rebound"][0]["from"], json!("a@example.com"));
+    assert_eq!(done["rebound"][0]["to"], json!("b@example.com"));
+
+    let listed: serde_json::Value = reqwest::get(format!("{}/admin/throttled", app.base))
+        .await
+        .expect("GET /admin/throttled")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["count"], json!(0), "{listed}");
+}
+
+/// Both admin routes sit behind the same API-key check as the chat route: a
+/// valid key may not hop accounts for free.
+#[tokio::test]
+async fn admin_routes_require_a_registered_key() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app_with_keys(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("me", "sk-test")],
+    )
+    .await;
+
+    let anon = reqwest::get(format!("{}/admin/throttled", app.base))
+        .await
+        .expect("GET");
+    assert_eq!(anon.status(), 401);
+
+    let keyed = reqwest::Client::new()
+        .get(format!("{}/admin/throttled", app.base))
+        .bearer_auth("sk-test")
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(keyed.status(), 200);
+
+    let anon_post = reqwest::Client::new()
+        .post(format!("{}/admin/rebind", app.base))
+        .json(&json!({"all_throttled": true, "dry_run": true}))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(anon_post.status(), 401);
+}
+
+/// An unknown target is a client error, not a silent no-op that leaves the
+/// operator believing the thread moved.
+#[tokio::test]
+async fn rebind_rejects_an_unknown_account_label() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/rebind", app.base))
+        .json(&json!({"thread": "t1", "account": "banana", "dry_run": true}))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], json!("invalid_request"), "{body}");
+}
+
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");
 const TOOL_CLOSE: &str = concat!("</inv", "oke>");

@@ -26,6 +26,15 @@ pub struct ThreadResume {
     pub parent_message_id: Option<String>,
 }
 
+/// One thread whose bound account rate-limited it, as read by `rebind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThrottledThread {
+    pub thread_id: String,
+    pub email: String,
+    /// Unix seconds when the throttle was recorded.
+    pub throttled_at: i64,
+}
+
 /// One account added through the CLI (`deepseek-rs accounts add`).
 #[derive(Debug, Clone)]
 pub struct AccountRow {
@@ -100,7 +109,12 @@ impl Store {
              CREATE TABLE IF NOT EXISTS thread_bindings (
                  thread_id  TEXT PRIMARY KEY,
                  email      TEXT NOT NULL,
-                 updated_at INTEGER NOT NULL
+                 updated_at INTEGER NOT NULL,
+                 -- Set when the bound account refused this thread for rate
+                 -- limiting; cleared when the thread moves account. NULL
+                 -- NULL means not throttled. Durable so the rebind command
+                 -- can find the victims of a throttle after a restart.
+                 throttled_at INTEGER
              );
              -- Cached login tokens so a restart skips the login round trip.
              CREATE TABLE IF NOT EXISTS account_tokens (
@@ -117,6 +131,13 @@ impl Store {
                  created_at INTEGER NOT NULL
              );",
         )?;
+        // Columns added after the first release. `CREATE TABLE IF NOT EXISTS`
+        // leaves an existing table alone, so a new column needs its own
+        // statement; the error means "already there" and is expected.
+        let _ = conn.execute(
+            "ALTER TABLE thread_bindings ADD COLUMN throttled_at INTEGER",
+            [],
+        );
         Ok(())
     }
 
@@ -135,14 +156,73 @@ impl Store {
 
     pub fn bind(&self, thread_id: &str, email: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
+        // A move to a different account clears the throttle: the flag records
+        // "this account refused this thread", and that is no longer true.
         conn.execute(
-            "INSERT INTO thread_bindings (thread_id, email, updated_at)
-             VALUES (?1, ?2, unixepoch())
+            "INSERT INTO thread_bindings (thread_id, email, updated_at, throttled_at)
+             VALUES (?1, ?2, unixepoch(), NULL)
              ON CONFLICT(thread_id) DO UPDATE SET
-                 email = excluded.email, updated_at = excluded.updated_at",
+                 email = excluded.email,
+                 updated_at = excluded.updated_at,
+                 throttled_at = CASE
+                     WHEN thread_bindings.email = excluded.email
+                     THEN thread_bindings.throttled_at
+                     ELSE NULL
+                 END",
             params![thread_id, email],
         )?;
         Ok(())
+    }
+
+    /// Record that the thread's bound account refused it for rate limiting.
+    ///
+    /// Only touches an existing binding: a thread with no binding has no
+    /// account to blame and `route` will pick one.
+    pub fn mark_throttled(&self, thread_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "UPDATE thread_bindings SET throttled_at = unixepoch()
+             WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the throttle flag after a rebind.
+    ///
+    /// `bind` clears it when the account changes; a same-account rebuild keeps
+    /// the binding, so the caller clears it explicitly.
+    pub fn clear_throttled(&self, thread_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "UPDATE thread_bindings SET throttled_at = NULL WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// Threads currently flagged as throttled, most recently hit first.
+    ///
+    /// The account's live cooldown is not known here - it lives in the pool -
+    /// so the caller joins the two.
+    pub fn throttled_threads(&self) -> Result<Vec<ThrottledThread>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT thread_id, email, throttled_at
+             FROM thread_bindings
+             WHERE throttled_at IS NOT NULL
+             ORDER BY throttled_at DESC, thread_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ThrottledThread {
+                    thread_id: r.get(0)?,
+                    email: r.get(1)?,
+                    throttled_at: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Cached bearer token for an account, if one was stored by a login.
@@ -378,6 +458,70 @@ mod tests {
         // A rejected token is dropped so the next start logs in again.
         s.forget_token("a@b").unwrap();
         assert_eq!(s.get_token("a@b").unwrap(), None);
+    }
+
+    #[test]
+    fn throttle_flag_is_set_read_and_cleared_by_a_move() {
+        let s = Store::open_memory().unwrap();
+        s.bind("t1", "a@b").unwrap();
+        assert!(s.throttled_threads().unwrap().is_empty());
+
+        s.mark_throttled("t1").unwrap();
+        let rows = s.throttled_threads().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].thread_id, "t1");
+        assert_eq!(rows[0].email, "a@b");
+        assert!(rows[0].throttled_at > 0);
+
+        // Re-binding the same account keeps the flag: nothing changed about
+        // which account refused the thread.
+        s.bind("t1", "a@b").unwrap();
+        assert_eq!(s.throttled_threads().unwrap().len(), 1);
+
+        // A different account makes the old refusal meaningless.
+        s.bind("t1", "c@d").unwrap();
+        assert!(s.throttled_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_throttled_keeps_the_binding() {
+        let s = Store::open_memory().unwrap();
+        s.bind("t1", "a@b").unwrap();
+        s.mark_throttled("t1").unwrap();
+
+        s.clear_throttled("t1").unwrap();
+
+        assert!(s.throttled_threads().unwrap().is_empty());
+        // The thread still belongs to the account it was moved to; only the
+        // "this failed" marker is gone.
+        assert_eq!(s.get_binding("t1").unwrap().as_deref(), Some("a@b"));
+    }
+
+    #[test]
+    fn throttled_threads_are_newest_first() {
+        let s = Store::open_memory().unwrap();
+        for (id, email) in [("t1", "a@b"), ("t2", "a@b"), ("t3", "a@b")] {
+            s.bind(id, email).unwrap();
+            s.mark_throttled(id).unwrap();
+            // `unixepoch()` has one-second resolution, so make the ordering
+            // deterministic rather than racing the clock.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+
+        let ids: Vec<String> = s
+            .throttled_threads()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.thread_id)
+            .collect();
+        assert_eq!(ids, vec!["t3", "t2", "t1"]);
+    }
+
+    #[test]
+    fn marking_an_unbound_thread_is_a_no_op() {
+        let s = Store::open_memory().unwrap();
+        s.mark_throttled("nobody").unwrap();
+        assert!(s.throttled_threads().unwrap().is_empty());
     }
 
     #[test]

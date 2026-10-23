@@ -8,6 +8,43 @@ live in [`adr/`](adr/).
 
 ---
 
+## 2026-10-23 - Rebind: flag throttled threads, then move them
+
+**A rate-limited thread is now durable and findable, and `deepseek-rs rebind`
+moves it to a fresh session on another account.**
+
+Rate limiting is an *account* condition, so "the thread was rate-limited" is a
+derived fact the proxy never stored: `/stats` reported breaker state, a throttle
+is deliberately not a breaker trip (ADR-0007), and the cooldown lived only in
+memory. There was nothing for a CLI to select on.
+
+- `thread_bindings.throttled_at` records when the bound account refused the
+  thread. `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so the
+  column is added by a real `ALTER TABLE`; the error means "already there".
+- The rate-limit-exhausted branch marks the thread *before* failing the turn,
+  so the record exists even though the client got a 429.
+- `bind` clears the flag when the account actually changes, and keeps it when
+  the same account is re-bound: the flag means "this account refused this
+  thread", which re-binding the same account does not fix.
+
+New surface:
+
+- `GET /admin/throttled` - flagged threads, newest first, joined with the live
+  per-account cooldown so "still cooling" is visible. Behind `authorize`.
+- `POST /admin/rebind` - `{thread | all_throttled, account, dry_run, limit}`.
+  `account` is `next`, `fresh`, or an email. Every move goes through
+  `session::open_session(Rebind { .., Manual })`, so a rebind is the same
+  operation as a context-limit rebuild, not a parallel path.
+- `deepseek-rs rebind [<thread>] [--all] [--account X] [--limit N] [--yes]`.
+  Bare `rebind` lists the flagged threads and stops; `--yes` applies. Moving a
+  thread replays its whole transcript, so the destructive direction has to be
+  typed. A bulk run is capped at 10 threads for the same reason.
+
+*Files:* `crates/proxy/src/store.rs`, `crates/proxy/src/main.rs`,
+`crates/proxy/src/cli.rs`, `crates/proxy/tests/http.rs`
+
+---
+
 ## 2026-10-23 - One interface for thread identity (T-22)
 
 **Every remote session is now opened through `session::open_session`.** Four
