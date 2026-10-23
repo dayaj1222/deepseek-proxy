@@ -337,13 +337,32 @@ fn completion_body(
     thinking: bool,
     search: bool,
     ref_file_ids: &[String],
+    model: &str,
 ) -> CompletionBody {
     let mut body = CompletionBody::new(&thread.session_id, prompt);
     body.thinking_enabled = thinking;
     body.search_enabled = search;
     body.parent_message_id = thread.parent_message_id;
     body.ref_file_ids = ref_file_ids.to_vec();
+    body.model_type = upstream_model_type(model);
     body
+}
+
+/// Map a client-facing model id onto the value DeepSeek expects.
+///
+/// The public ids are upper case (`EXPERT`) because that is what the OpenAI
+/// model list advertises; upstream wants the lower-case enum from
+/// aiodeepseek's `ModelType` (`default` / `expert` / `vision`). Before this the
+/// body always said `default`, so picking a model changed nothing for text and
+/// only affected the `x-model-type` header on image upload.
+fn upstream_model_type(model: &str) -> String {
+    let lowered = model.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        // `deepseek-chat` and friends are the generic chat ids: they are the
+        // default model, not an unknown one.
+        "deepseek-chat" | "deepseek-v3" | "deepseek-reasoner" | "" => "default".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// First fatal `hint` error in a fully-buffered SSE body, if any.
@@ -975,6 +994,55 @@ fn rebind_header(headers: &HeaderMap) -> Result<Option<session::ThreadChange>, P
     Ok(Some(change))
 }
 
+/// When the running executable was built, as `YYYY-MM-DD HH:MM:SS`.
+///
+/// There is no build script, and nothing else at startup says which binary is
+/// live — which cost an hour of log archaeology once: a stale `release` build
+/// from two days earlier was running, so a newly added control header was
+/// silently ignored and every feature landed since was simply absent. The
+/// mtime is the cheapest honest answer to "is the process I am looking at the
+/// code I just wrote?".
+fn build_id() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "unknown".to_string();
+    };
+    let Ok(meta) = std::fs::metadata(&exe) else {
+        return "unknown".to_string();
+    };
+    let Ok(modified) = meta.modified() else {
+        return "unknown".to_string();
+    };
+    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return "unknown".to_string();
+    };
+    let secs = since.as_secs() as i64;
+    // `chrono` is not a dependency here; format by hand from the epoch offset.
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Days since the Unix epoch to a proleptic Gregorian date (Howard Hinnant's
+/// `civil_from_days`), so the log line needs no date library.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
     let s = &state.stats;
@@ -1197,7 +1265,13 @@ async fn error_for(state: &AppState, key: &str, err: CompletionError) -> ProxyEr
         }
         CompletionError::LoginDead(msg) => {
             tracing::error!(thread = %key, error = %msg, "backend login failed");
-            let _ = state.pool().failover(key).await;
+            if state.pool().failover(key).await.is_some() {
+                // The account binding just moved, so the session id - scoped to
+                // the account that created it - now points at nothing. Forget
+                // it and let the next turn open a session on the new account,
+                // instead of burning a turn to discover the mismatch.
+                state.threads.forget(key);
+            }
             ProxyError::new(
                 "Backend login failed; disabled account, retry with a fresh thread",
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1883,6 +1957,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                                 thinking,
                                 search,
                                 &body.ref_file_ids,
+                                &body.model_type,
                             );
                             session_id = fresh.session_id.clone();
                             cursor = None;
@@ -1940,8 +2015,14 @@ async fn stream_response(live: LiveTurn) -> Response {
                     Ok(fresh) => {
                         let thinking = body.thinking_enabled;
                         let search = body.search_enabled;
-                        body =
-                            completion_body(&fresh, &replay, thinking, search, &body.ref_file_ids);
+                        body = completion_body(
+                            &fresh,
+                            &replay,
+                            thinking,
+                            search,
+                            &body.ref_file_ids,
+                            &body.model_type,
+                        );
                         // The rebuilt session is a different conversation: point
                         // the cursor at it, or the next turn parents into the
                         // session we just abandoned.
@@ -2151,7 +2232,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             // waits for the whole reply. That is the right trade — a repair
             // that works costs one turn, a repair that fails costs the turn
             // plus every retry after it.
-            let body = completion_body(&turn_state, &prompt, true, false, &[]);
+            let body = completion_body(&turn_state, &prompt, true, false, &[], &body.model_type);
             let raw = match completion_with_retry(&state, &key, &body).await {
                 Ok((resp, _slot)) => match resp.text().await {
                     Ok(t) => t,
@@ -2636,6 +2717,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         profile = ?profile,
         accounts = accounts.len(),
         request_delay_secs = cfg.request_delay_secs,
+        version = env!("CARGO_PKG_VERSION"),
+        built = %build_id(),
         "starting deepseek-rs"
     );
     tracing::info!(
@@ -3157,10 +3240,9 @@ mod tests {
         // Fresh thread: reminder goes after the transcript.
         let req = request(vec![msg_with("user", "hi")], tools.clone());
         let (delta, replay) = build_prompts(&req, None, "", None);
-        assert!(delta.starts_with(&dialect::periodic_reminder()));
         assert!(delta.contains("User: hi"));
         assert!(delta.ends_with(&dialect::periodic_reminder()));
-        assert!(replay.starts_with(&dialect::periodic_reminder()));
+        assert_eq!(replay.matches(&dialect::periodic_reminder()).count(), 1);
         assert!(replay.ends_with(&dialect::periodic_reminder()));
 
         // Continuation: still appended, still last.
@@ -3311,6 +3393,21 @@ mod tests {
             assert_eq!(payload["error"]["type"], expected, "status {status}");
             assert_eq!(payload["error"]["code"], "some_code");
         }
+    }
+
+    /// The build stamp is a diagnostic: a wrong date is worse than no date,
+    /// because it would send someone looking at the wrong binary.
+    #[test]
+    fn build_id_civil_dates_are_correct() {
+        // Known-good pairs against the Unix epoch, including a leap day and the
+        // new year boundary.
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(1), (1970, 1, 2));
+        assert_eq!(civil_from_days(59), (1970, 3, 1));
+        // 2000-02-29: a leap day in a leap century.
+        assert_eq!(civil_from_days(11016), (2000, 2, 29));
+        assert_eq!(civil_from_days(364), (1970, 12, 31));
+        assert_eq!(civil_from_days(365), (1971, 1, 1));
     }
 
     #[test]

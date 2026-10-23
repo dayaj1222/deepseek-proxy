@@ -55,6 +55,9 @@ impl ThreadState {
 pub trait Persist: Send + Sync {
     fn load(&self, thread_id: &str) -> Option<ThreadState>;
     fn save(&self, thread_id: &str, state: &ThreadState);
+    /// Drop the durable row. Default is a no-op so a read-only adapter stays
+    /// valid; the SQLite one overrides it.
+    fn forget(&self, _thread_id: &str) {}
 }
 
 /// Production adapter: SQLite through [`store::Store`].
@@ -95,6 +98,10 @@ impl Persist for SqlitePersist {
                 parent_message_id: state.parent_message_id.map(|p| p.to_string()),
             },
         );
+    }
+
+    fn forget(&self, thread_id: &str) {
+        let _ = self.store.delete_thread(thread_id);
     }
 }
 
@@ -262,6 +269,25 @@ impl Threads {
             .expect("threads lock poisoned")
             .insert(key.to_string(), fresh.clone());
         self.persist.save(key, &fresh);
+    }
+
+    /// Forget the thread's remote identity, because the session it names lives
+    /// under an account that can no longer serve it.
+    ///
+    /// Used on failover: `Pool::failover` moves the *account binding*, but a
+    /// session id is scoped to the account that created it. Leaving it in place
+    /// meant the next turn sent a session id belonging to a dead account and
+    /// only discovered the mismatch when the backend rejected it - at the price
+    /// of a rebuild plus a full replay. Dropping it here makes the next turn
+    /// open a fresh session on the new account, which it has to do anyway.
+    pub fn forget(&self, key: &str) {
+        self.cache
+            .lock()
+            .expect("threads lock poisoned")
+            .remove(key);
+        // The durable row must go too, or a restart would resurrect the dead
+        // session id.
+        self.persist.forget(key);
     }
 
     /// Threads currently cached in memory (`/stats`).

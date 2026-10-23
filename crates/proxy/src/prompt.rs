@@ -45,8 +45,7 @@ pub struct Turn<'a> {
 /// 1. transcript, then `system_extra` (tool definitions);
 /// 2. delta = continuation prompt for an existing thread, else the replay;
 /// 3. image note, in both;
-/// 4. protocol reminder — at the head of a fresh thread and at the tail of
-///    every turn;
+/// 4. protocol reminder — at the tail of every turn;
 /// 5. the `tool_choice` directive last of all.
 pub fn for_turn(turn: &Turn<'_>) -> Prompt {
     let transcript = flatten_transcript(turn.messages);
@@ -69,15 +68,11 @@ pub fn for_turn(turn: &Turn<'_>) -> Prompt {
         replay = format!("{note}\n\n{replay}");
     }
 
-    // Re-anchor the wire format on every turn: at the head of a fresh thread
-    // (nothing has been taught yet) and at the tail of every turn (closest to
-    // the generation, where drift happens).
+    // One anchor per turn, at the tail: closest to the generation, where drift
+    // happens. A fresh thread used to get it at the head as well, which put the
+    // template in the prompt four times on turn one (head and tail of both
+    // strings) on top of the copy the system prompt already carries.
     if let Some(reminder) = turn.reminder {
-        if !turn.continuation {
-            for prompt in [&mut delta, &mut replay] {
-                *prompt = format!("{reminder}\n\n{prompt}");
-            }
-        }
         delta.push_str("\n\n");
         delta.push_str(reminder);
         replay.push_str("\n\n");
@@ -189,12 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn reminder_is_anchored_at_head_and_tail_of_a_fresh_thread() {
+    fn reminder_is_anchored_once_at_the_tail_of_a_fresh_thread() {
         let messages = [msg("user", "hi")];
         let out = for_turn(&turn(&messages, false, Some("REM")));
-        assert!(out.delta.starts_with("REM"));
+        assert!(out.delta.starts_with("User: hi"));
         assert!(out.delta.ends_with("REM"));
-        assert!(out.replay.starts_with("REM"));
+        assert_eq!(out.delta.matches("REM").count(), 1);
+        assert_eq!(out.replay.matches("REM").count(), 1);
         assert!(out.replay.ends_with("REM"));
     }
 

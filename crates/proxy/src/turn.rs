@@ -161,6 +161,7 @@ pub async fn prepare(
         thinking,
         state.settings.get().search_enabled,
         &ref_file_ids,
+        model,
     );
 
     Ok(Prepared {

@@ -388,7 +388,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)] // used by tests and future admin UI
     pub fn delete_thread(&self, thread_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
         conn.execute(
