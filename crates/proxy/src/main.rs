@@ -754,6 +754,203 @@ async fn method_not_allowed() -> Response {
     .into_response()
 }
 
+/// `GET /admin/throttled` — threads whose bound account rate-limited them.
+///
+/// Most recent first. The account's *live* cooldown lives in the pool, not the
+/// database, so it is joined here: a thread is worth rebinding when its account
+/// is still cooling down, not merely because it failed once an hour ago.
+async fn admin_throttled(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(e) = authorize(&state, &headers) {
+        return e;
+    }
+    let rows = match state.store.throttled_threads() {
+        Ok(rows) => rows,
+        Err(e) => return backend_error(&format!("store: {e}")),
+    };
+    let accounts = state.pool().snapshot().await;
+    let live: HashMap<&str, (Option<u64>, bool)> = accounts
+        .iter()
+        .map(|a| (a.email.as_str(), (a.cooldown_ms, a.healthy)))
+        .collect();
+    let now = unix_secs();
+
+    let threads: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let (cooldown_ms, healthy) = live
+                .get(r.email.as_str())
+                .copied()
+                .unwrap_or((None, false));
+            json!({
+                "thread": r.thread_id,
+                "account": r.email,
+                "throttled_at": r.throttled_at,
+                "throttled_secs_ago": now.saturating_sub(r.throttled_at.max(0) as u64),
+                "account_cooldown_ms": cooldown_ms,
+                "account_healthy": healthy,
+            })
+        })
+        .collect();
+
+    Json(json!({ "count": threads.len(), "threads": threads })).into_response()
+}
+
+/// `POST /admin/rebind` — move one thread, or every throttled thread, to a
+/// fresh remote session, optionally on another account.
+///
+/// `account` accepts `next` (least-crowded healthy other account), `fresh`
+/// (same account, new session), or an email. `dry_run` returns the plan without
+/// touching anything, because a bulk rebind replays every transcript it moves.
+#[derive(Deserialize)]
+struct RebindRequest {
+    #[serde(default)]
+    thread: Option<String>,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    all_throttled: bool,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Upper bound on a bulk rebind. Every thread moved costs one replay.
+const REBIND_BULK_LIMIT: usize = 10;
+
+fn parse_target(account: Option<&str>) -> Option<(session::ThreadChange, String)> {
+    let raw = account.unwrap_or("next").trim();
+    match raw {
+        "" | "next" => Some((
+            session::ThreadChange::Rebind {
+                target: pool::AccountTarget::Next,
+                reason: session::RebuildReason::Manual,
+            },
+            "next".to_string(),
+        )),
+        "fresh" | "current" => Some((
+            session::ThreadChange::Rebuild {
+                reason: session::RebuildReason::Manual,
+            },
+            "fresh".to_string(),
+        )),
+        email if email.contains('@') => Some((
+            session::ThreadChange::Rebind {
+                target: pool::AccountTarget::Email(email.to_string()),
+                reason: session::RebuildReason::Manual,
+            },
+            email.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+async fn admin_rebind(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RebindRequest>,
+) -> Response {
+    if let Err(e) = authorize(&state, &headers) {
+        return e;
+    }
+    let Some((change, target_label)) = parse_target(body.account.as_deref()) else {
+        return ProxyError::new(
+            "account must be next, fresh, or an email",
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request",
+        )
+        .with_param("account")
+        .into_response();
+    };
+
+    // Which threads? An explicit one wins over the bulk flag.
+    let targets: Vec<String> = match (&body.thread, body.all_throttled) {
+        (Some(t), _) => vec![t.clone()],
+        (None, true) => {
+            let rows = match state.store.throttled_threads() {
+                Ok(rows) => rows,
+                Err(e) => return backend_error(&format!("store: {e}")),
+            };
+            let cap = body.limit.unwrap_or(REBIND_BULK_LIMIT).min(REBIND_BULK_LIMIT);
+            rows.into_iter().take(cap).map(|r| r.thread_id).collect()
+        }
+        (None, false) => {
+            return ProxyError::new(
+                "thread is required unless all_throttled is true",
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_request",
+            )
+            .with_param("thread")
+            .into_response()
+        }
+    };
+
+    if body.dry_run {
+        let plan: Vec<Value> = targets
+            .iter()
+            .map(|t| {
+                json!({
+                    "thread": t,
+                    "from": state.store.get_binding(t).ok().flatten(),
+                    "to": target_label,
+                })
+            })
+            .collect();
+        return Json(json!({ "dry_run": true, "count": plan.len(), "plan": plan }))
+            .into_response();
+    }
+
+    let mut done: Vec<Value> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    for thread in targets {
+        let from = state.store.get_binding(&thread).ok().flatten();
+        // Serialize against an in-flight turn on this thread: replacing the
+        // session under a streaming turn would orphan its cursor.
+        let _turn = state.threads.lock(&thread).await;
+        match session::open_session(&state, &thread, clone_change(&change)).await {
+            Ok(fresh) => {
+                // A rebind makes the old throttle flag meaningless; `bind`
+                // clears it when the account changes, but a same-account
+                // `fresh` rebuild must clear it explicitly.
+                if let Err(e) = state.store.clear_throttled(&thread) {
+                    tracing::warn!(thread = %thread, error = %e, "could not clear throttle flag");
+                }
+                done.push(json!({
+                    "thread": thread,
+                    "from": from,
+                    "to": state.store.get_binding(&thread).ok().flatten(),
+                    "session": fresh.session_id,
+                }));
+            }
+            Err(e) => failed.push(json!({ "thread": thread, "error": e.message })),
+        }
+    }
+
+    let status = if failed.is_empty() {
+        axum::http::StatusCode::OK
+    } else if done.is_empty() {
+        axum::http::StatusCode::BAD_GATEWAY
+    } else {
+        axum::http::StatusCode::MULTI_STATUS
+    };
+    (status, Json(json!({ "rebound": done, "failed": failed }))).into_response()
+}
+
+/// `ThreadChange` is consumed by `open_session`; the bulk loop needs one per
+/// thread, so rebuild it from the account label.
+fn clone_change(change: &session::ThreadChange) -> session::ThreadChange {
+    match change {
+        session::ThreadChange::Fresh => session::ThreadChange::Fresh,
+        session::ThreadChange::Rebuild { reason } => {
+            session::ThreadChange::Rebuild { reason: *reason }
+        }
+        session::ThreadChange::Rebind { target, reason } => session::ThreadChange::Rebind {
+            target: target.clone(),
+            reason: *reason,
+        },
+    }
+}
+
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
     let s = &state.stats;
@@ -1705,6 +1902,12 @@ async fn stream_response(live: LiveTurn) -> Response {
                 let wait = backoff_delay(&turn_settings, attempt);
                 if attempt >= turn_settings.rate_limit_max_retries {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    // Flag the thread so `deepseek-rs rebind` can find it, most
+                    // recent first, even after a restart. The account, not the
+                    // thread, is what was throttled; this records the victim.
+                    if let Err(e) = state.store.mark_throttled(&key) {
+                        tracing::warn!(thread = %key, error = %e, "could not record throttle");
+                    }
                     tracing::error!(
                         thread = %key,
                         retries = attempt,
@@ -2281,6 +2484,10 @@ fn build_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/stats", get(stats))
+        // Management surface for `deepseek-rs rebind`. Both handlers call
+        // `authorize`, so a valid API key is required to hop accounts.
+        .route("/admin/throttled", get(admin_throttled))
+        .route("/admin/rebind", post(admin_rebind))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         // Honest refusals instead of 404: a client probing capabilities should

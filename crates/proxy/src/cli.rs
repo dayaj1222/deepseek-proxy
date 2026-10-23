@@ -379,6 +379,7 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         "health" => health().await,
         "status" => status().await,
         "stats" => stats(args).await,
+        "rebind" => rebind(args).await,
         "start" => start(args).await,
         "stop" => stop().await,
         "reload" => reload().await,
@@ -1020,6 +1021,215 @@ fn short_err(msg: &str) -> String {
     msg.lines().next().unwrap_or(msg).to_string()
 }
 
+/// `deepseek-rs rebind` — move throttled threads onto a fresh remote session.
+///
+/// The proxy, not the CLI, owns the account pool and the cooldown clocks, so
+/// this is a thin HTTP client: it reads `/admin/throttled` to show what is
+/// flagged, then posts to `/admin/rebind`. Without a flag it only *shows* the
+/// plan; moving threads costs a full transcript replay each, so the action has
+/// to be asked for.
+async fn rebind(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
+    let cfg = cfg_or_exit();
+    let mut thread: Option<String> = None;
+    let mut all = false;
+    let mut account = "next".to_string();
+    let mut dry_run = true;
+    let mut limit: Option<usize> = None;
+    let mut key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+    let mut as_json = false;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--all" | "--all-throttled" => all = true,
+            "--dry-run" | "-n" => dry_run = true,
+            "--yes" | "-y" | "--apply" => dry_run = false,
+            "--json" => as_json = true,
+            "--account" | "-a" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => account = v.clone(),
+                    None => {
+                        eprintln!("--account needs a value (next, fresh, or an email)");
+                        return Ok(2);
+                    }
+                }
+            }
+            "--limit" => {
+                i += 1;
+                limit = args.get(i).and_then(|v| v.parse().ok());
+            }
+            "--key" | "-k" => {
+                i += 1;
+                key = args.get(i).cloned().unwrap_or_default();
+            }
+            flag if flag.starts_with('-') => {
+                eprintln!("unknown flag '{flag}'\n");
+                rebind_usage();
+                return Ok(2);
+            }
+            value => {
+                if thread.is_some() {
+                    eprintln!("only one thread may be given\n");
+                    return Ok(2);
+                }
+                thread = Some(value.to_string());
+            }
+        }
+        i += 1;
+    }
+
+    // A bare `rebind` is the read-only reading: show what is flagged.
+    if thread.is_none() && !all {
+        all = true;
+        dry_run = true;
+    }
+    if thread.is_some() && all {
+        eprintln!("give a thread or --all, not both\n");
+        return Ok(2);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let root = root_url(&cfg);
+    let authorized = |req: reqwest::RequestBuilder| {
+        if key.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&key)
+        }
+    };
+
+    // The flagged list is both the "before" picture and the thing a bulk run
+    // selects from, so it is always fetched.
+    let listed = authorized(client.get(format!("{root}/admin/throttled")))
+        .send()
+        .await
+        .map_err(|e| format!("proxy unreachable at {root}: {e}"))?;
+    if !listed.status().is_success() {
+        eprintln!(
+            "GET /admin/throttled -> HTTP {}",
+            listed.status().as_u16()
+        );
+        if listed.status() == reqwest::StatusCode::UNAUTHORIZED {
+            eprintln!("pass a registered key with --key or DEEPSEEK_API_KEY");
+        }
+        return Ok(1);
+    }
+    let listed: serde_json::Value = listed.json().await.map_err(|e| e.to_string())?;
+    let rows = listed["threads"].as_array().cloned().unwrap_or_default();
+
+    if as_json && dry_run {
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(0);
+    }
+
+    if rows.is_empty() && thread.is_none() {
+        println!("no threads are flagged as throttled");
+        return Ok(0);
+    }
+
+    if !as_json {
+        println!(
+            "{:<34} {:<26} {:>8} {:>10}  health",
+            "thread", "account", "age", "cooldown"
+        );
+        for r in &rows {
+            let age = r["throttled_secs_ago"].as_u64().unwrap_or(0);
+            let cooldown = r["account_cooldown_ms"].as_u64();
+            println!(
+                "{:<34} {:<26} {:>8} {:>10}  {}",
+                r["thread"].as_str().unwrap_or("?"),
+                r["account"].as_str().unwrap_or("?"),
+                format!("{}s ago", age),
+                cooldown
+                    .map(|ms| format!("{}s", ms.div_ceil(1000)))
+                    .unwrap_or_else(|| "-".to_string()),
+                if r["account_healthy"].as_bool().unwrap_or(false) {
+                    "ok"
+                } else {
+                    "cooling"
+                }
+            );
+        }
+        println!();
+    }
+
+    if dry_run {
+        let n = thread.as_ref().map(|_| 1).unwrap_or(rows.len());
+        println!(
+            "would rebind {n} thread(s) to '{account}'; each move replays the whole transcript"
+        );
+        println!("run again with --yes to do it");
+        return Ok(0);
+    }
+
+    let mut payload = serde_json::json!({
+        "account": account,
+        "dry_run": false,
+        "all_throttled": all,
+    });
+    if let Some(t) = &thread {
+        payload["thread"] = serde_json::Value::String(t.clone());
+    }
+    if let Some(n) = limit {
+        payload["limit"] = serde_json::json!(n);
+    }
+
+    let posted = authorized(client.post(format!("{root}/admin/rebind")).json(&payload))
+        .send()
+        .await
+        .map_err(|e| format!("proxy unreachable at {root}: {e}"))?;
+    let status = posted.status();
+    let body: serde_json::Value = posted.json().await.unwrap_or(serde_json::json!({}));
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(if status.is_success() { 0 } else { 1 });
+    }
+
+    let done = body["rebound"].as_array().cloned().unwrap_or_default();
+    let failed = body["failed"].as_array().cloned().unwrap_or_default();
+    for r in &done {
+        println!(
+            "{}  {} -> {}",
+            r["thread"].as_str().unwrap_or("?"),
+            r["from"].as_str().unwrap_or("(unbound)"),
+            r["to"].as_str().unwrap_or("?")
+        );
+    }
+    for r in &failed {
+        eprintln!(
+            "{}  FAILED: {}",
+            r["thread"].as_str().unwrap_or("?"),
+            r["error"].as_str().unwrap_or("unknown")
+        );
+    }
+    println!("\n{} moved, {} failed", done.len(), failed.len());
+    Ok(if failed.is_empty() { 0 } else { 1 })
+}
+
+fn rebind_usage() {
+    println!(
+        "USAGE
+  deepseek-rs rebind [<thread-key>] [--all] [options]
+
+  With no arguments, lists the threads whose account rate-limited them and
+  stops. Nothing moves unless --yes is given.
+
+OPTIONS
+  --all, --all-throttled     every flagged thread (capped at 10 per run)
+  --account <next|fresh|EMAIL>  where to land (default: next healthy account)
+  --limit N                  cap a bulk run
+  --dry-run, -n              show the plan (default when no --yes)
+  --yes, -y, --apply         actually rebind
+  --key <api-key>            registered key (default: DEEPSEEK_API_KEY)
+  --json                     machine-readable output"
+    );
+}
+
 fn usage() {
     println!(
         "deepseek-rs {version} — OpenAI-compatible proxy for the DeepSeek private API
@@ -1037,6 +1247,8 @@ SERVER
   status                      pid, url, uptime, account count
   health                      one-shot health check (exit 1 when down)
   stats [--json]              live counters, per-account state, db counts
+  rebind [--all] [--yes]      move rate-limited threads to a fresh session
+                              (see `deepseek-rs rebind --help`)
 
 LOGS
   logs [-n N] [-f] [--path P] last N lines (default {lines}); -f follows
