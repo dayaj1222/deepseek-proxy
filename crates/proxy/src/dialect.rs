@@ -47,6 +47,23 @@ pub fn fingerprint(call: &ToolCall) -> (String, String) {
 pub const INVOKE_OPEN: &str = "<invoke";
 pub const INVOKE_CLOSE: &str = "</invoke>";
 
+/// How many stray closing tags right after a completed block are swallowed
+/// instead of leaking into the prose. Models sometimes close twice or three
+/// times; swallowing those keeps the reply clean, while anything past the
+/// limit is left untouched so a literal tag in prose survives.
+pub const MAX_STRAY_CLOSERS: usize = 2;
+
+/// Drop up to [`MAX_STRAY_CLOSERS`] closing tags at the head of `s`.
+fn strip_stray_closers(mut s: &str) -> &str {
+    for _ in 0..MAX_STRAY_CLOSERS {
+        match s.trim_start().strip_prefix(INVOKE_CLOSE) {
+            Some(rest) => s = rest,
+            None => break,
+        }
+    }
+    s
+}
+
 /// Concrete example shown to the model.
 pub const TEMPLATE: &str =
     "<invoke name=\"tool_name\">{\"param1\": \"value1\", \"count\": 5}</invoke>";
@@ -211,6 +228,7 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
         }
 
         rest = &body_and_rest[close_rel + INVOKE_CLOSE.len()..];
+                rest = strip_stray_closers(rest);
     }
 
     out
@@ -689,6 +707,7 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
                     ))),
                 }
                 rest = &body_and_rest[close_rel + INVOKE_CLOSE.len()..];
+                rest = strip_stray_closers(rest);
             }
             None => {
                 // Output cut before the closing tag: an unterminated block.
@@ -1261,6 +1280,10 @@ impl Parser {
                     }
                     out.extend(event);
                     self.pending.drain(..consumed);
+                    // Doubled/tripled closing tags right after a block are
+                    // swallowed, up to the limit.
+                    let drop = self.pending.len() - strip_stray_closers(&self.pending).len();
+                    self.pending.drain(..drop);
                 }
             }
         }
@@ -1407,6 +1430,24 @@ mod stream_tests {
         assert!(f.calls.is_empty());
         assert_eq!(f.malformed.len(), 1);
         assert_eq!(f.malformed[0].name.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn swallows_two_extra_closing_tags() {
+        let c = INVOKE_CLOSE;
+        let mut f = StreamToolFilter::new();
+        let out = f.feed(&format!("<invoke name=\"t\">{{\"a\":1}}{c}{c}{c} ok"));
+        assert_eq!(out, " ok");
+        assert_eq!(f.calls.len(), 1);
+    }
+
+    #[test]
+    fn leaves_closing_tags_beyond_the_limit() {
+        let c = INVOKE_CLOSE;
+        let mut f = StreamToolFilter::new();
+        let out = f.feed(&format!("<invoke name=\"t\">{{\"a\":1}}{c}{c}{c}{c}x"));
+        assert_eq!(out, format!("{c}x"));
+        assert_eq!(f.calls.len(), 1);
     }
 
     #[test]
