@@ -574,6 +574,81 @@ impl Pool {
         self.conns[chosen].clone()
     }
 
+    /// Route a thread to an explicitly chosen account.
+    ///
+    /// `route` prefers the in-memory owner map and only moves a thread when its
+    /// account is *unhealthy*, so a deliberate rebind would be undone on the
+    /// next turn. This writes both the owner map and the durable binding, which
+    /// is what makes the choice stick.
+    ///
+    /// An `Email` target is refused rather than silently rerouted when the
+    /// account is unhealthy: an operator who names an account must learn that it
+    /// cannot serve, not get a different one.
+    #[allow(dead_code)] // Rebind lands with T-21
+    pub async fn route_forced(
+        &self,
+        thread_id: &str,
+        target: &AccountTarget,
+    ) -> Result<Arc<Connection>, PoolError> {
+        if matches!(target, AccountTarget::Current) {
+            return Ok(self.route(thread_id).await);
+        }
+
+        let current = {
+            let owner = self.owner.lock().await;
+            owner.get(thread_id).copied()
+        };
+
+        let chosen = match target {
+            AccountTarget::Current => unreachable!("handled above"),
+            AccountTarget::Next => {
+                let counts = self.occupancy().await;
+                let mut best: Option<(usize, usize)> = None;
+                for (i, c) in self.conns.iter().enumerate() {
+                    if Some(i) == current || !c.healthy() {
+                        continue;
+                    }
+                    let score = counts.get(&c.email).copied().unwrap_or(0);
+                    let better = match best {
+                        Some((_, best_score)) => score < best_score,
+                        None => true,
+                    };
+                    if better {
+                        best = Some((i, score));
+                    }
+                }
+                match best {
+                    Some((i, _)) => i,
+                    None => {
+                        return Err(PoolError::Other(
+                            "no healthy account other than the current one".to_string(),
+                        ))
+                    }
+                }
+            }
+            AccountTarget::Email(email) => {
+                let idx = self
+                    .conns
+                    .iter()
+                    .position(|c| &c.email == email)
+                    .ok_or_else(|| PoolError::Other(format!("unknown account {email}")))?;
+                if !self.conns[idx].healthy() {
+                    return Err(PoolError::Other(format!(
+                        "account {email} is not healthy"
+                    )));
+                }
+                idx
+            }
+        };
+
+        self.owner
+            .lock()
+            .await
+            .insert(thread_id.to_string(), chosen);
+        let _ = self.store.bind(thread_id, &self.conns[chosen].email);
+        Ok(self.conns[chosen].clone())
+    }
+
     /// Least-crowded account whose breaker is closed (or half-open), if any.
     async fn least_crowded_healthy(&self) -> Option<usize> {
         let counts = self.occupancy().await;
@@ -803,6 +878,21 @@ impl Pool {
             }
         }
     }
+}
+
+/// Which account a forced rebind should land on.
+///
+/// `Next` and `Email` are the T-21 / admin-route targets; `Current` is the
+/// identity case, which is exactly what `route` already does.
+#[allow(dead_code)] // Rebind lands with T-21
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountTarget {
+    /// Whatever account the thread is already bound to.
+    Current,
+    /// Any healthy account other than the current one.
+    Next,
+    /// That specific account, refused when it is not healthy.
+    Email(String),
 }
 
 /// Error text used when a request reaches an account whose breaker is open.

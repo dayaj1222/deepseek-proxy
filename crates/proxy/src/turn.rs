@@ -104,33 +104,7 @@ pub async fn prepare(
     let thread = match existing {
         Some(t) => t,
         None => {
-            let conn = state.pool().route(key).await;
-            let session_id = {
-                let _slot = conn
-                    .acquire()
-                    .await
-                    .map_err(|e| queue(&format!("rate slot: {e}")))?;
-                conn.client()
-                    .await
-                    .create_chat_session()
-                    .await
-                    .map_err(|e| {
-                        ProxyError::new(
-                            format!("create_session: {e}"),
-                            axum::http::StatusCode::BAD_GATEWAY,
-                            "backend_error",
-                        )
-                    })?
-            };
-            let t = ThreadState {
-                session_id,
-                parent_message_id: None,
-                prev_parents: Vec::new(),
-                exchanges: 0,
-            };
-            tracing::info!(thread = %key, session = %t.session_id, "new remote session");
-            state.threads.remember(key, t.clone());
-            t
+            crate::session::open_session(state, key, crate::session::ThreadChange::Fresh).await?
         }
     };
 

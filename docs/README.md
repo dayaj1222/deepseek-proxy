@@ -59,3 +59,4 @@ yours.
 | T-17 | Deployment artifacts | planned |
 | T-18 | Optional TLS and open-exposure guard | planned |
 | T-21 | Forced rebind: move a live thread to another account | planned |
+| T-22 | One interface for thread identity changes | done |

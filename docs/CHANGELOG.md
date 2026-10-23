@@ -8,6 +8,41 @@ live in [`adr/`](adr/).
 
 ---
 
+## 2026-10-23 - One interface for thread identity (T-22)
+
+**Every remote session is now opened through `session::open_session`.** Four
+call sites used to build a `ThreadState` by hand and call a different setter,
+so a new field was a four-file sweep and each caller remembered a different
+subset of the identity.
+
+`ThreadChange::{Fresh, Rebuild, Rebind}` is the caller-facing vocabulary;
+`open_session` resolves the account, creates the session, builds the state with
+the new `ThreadState::new`, and installs it. `rebuild_session` is now a thin
+wrapper over `Rebuild`, and its `reason` is a `RebuildReason` enum rather than a
+free-form string, so the log line says `change="stale cursor"` instead of
+echoing a hint.
+
+Two defects on the same seam were fixed:
+
+- `SqlitePersist::save` dropped the row when `parent_message_id` was `None`, so
+  a fresh or rebuilt session was never persisted and a restart opened a second
+  remote session. The schema always allowed a `NULL` parent; only the guard was
+  wrong.
+- `Pool::route_forced` was added. `route` prefers the in-memory owner map and
+  only moves a thread when its account is unhealthy, so a deliberate rebind
+  would have been undone on the next turn. `route_forced` writes both the owner
+  map and the durable binding, and refuses an `Email` target that is not
+  healthy rather than rerouting it silently.
+
+`Threads::remember` is now `#[cfg(test)]`; production installs state through
+`replace`.
+
+*Files:* `crates/proxy/src/session.rs` (new), `crates/proxy/src/threads.rs`,
+`crates/proxy/src/pool.rs`, `crates/proxy/src/turn.rs`,
+`crates/proxy/src/main.rs`, `docs/adr/0013-one-interface-for-thread-identity.md`
+
+---
+
 ## 2026-10-23 - Documentation pass
 
 **`docs/` now explains the project, not just the API.** Added this changelog, an

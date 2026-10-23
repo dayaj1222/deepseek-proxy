@@ -35,6 +35,22 @@ pub struct ThreadState {
     pub exchanges: usize,
 }
 
+impl ThreadState {
+    /// The only place that knows the field list.
+    ///
+    /// Every construction site used to spell the four fields out by hand, so
+    /// adding one was a compile-error sweep across four files. A new remote
+    /// session always starts with no parent and an empty ring.
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            parent_message_id: None,
+            prev_parents: Vec::new(),
+            exchanges: 0,
+        }
+    }
+}
+
 /// Durable side of the seam: where resume state survives a restart.
 pub trait Persist: Send + Sync {
     fn load(&self, thread_id: &str) -> Option<ThreadState>;
@@ -68,14 +84,15 @@ impl Persist for SqlitePersist {
     }
 
     fn save(&self, thread_id: &str, state: &ThreadState) {
-        let Some(parent) = state.parent_message_id else {
-            return;
-        };
+        // A fresh or rebuilt session has no parent yet, but its session id is
+        // the only thing that survives a restart. Dropping the row here made
+        // the next process open a *second* remote session for a thread that
+        // already had one.
         let _ = self.store.save_thread(
             thread_id,
             &store::ThreadResume {
                 session_id: state.session_id.clone(),
-                parent_message_id: Some(parent.to_string()),
+                parent_message_id: state.parent_message_id.map(|p| p.to_string()),
             },
         );
     }
@@ -173,6 +190,13 @@ impl Threads {
 
     /// Cache only. Used for a brand-new remote session, which has no cursor to
     /// persist yet.
+    /// Seed state without touching durable storage.
+    ///
+    /// Production reaches this state machine through
+    /// [`crate::session::open_session`], which installs a new session with
+    /// `replace`. Only tests need a cache entry with no remote session behind
+    /// it.
+    #[cfg(test)]
     pub fn remember(&self, key: &str, state: ThreadState) {
         self.cache
             .lock()
@@ -188,12 +212,9 @@ impl Threads {
         let Some(mid) = cursor else { return };
         let merged = {
             let mut cache = self.cache.lock().expect("threads lock poisoned");
-            let entry = cache.entry(key.to_string()).or_insert_with(|| ThreadState {
-                session_id: session_id.to_string(),
-                parent_message_id: None,
-                prev_parents: Vec::new(),
-                exchanges: 0,
-            });
+            let entry = cache
+                .entry(key.to_string())
+                .or_insert_with(|| ThreadState::new(session_id));
             // A rebuilt session has its own message ids: walking back into the
             // abandoned one would fail exactly the same way.
             if entry.session_id != session_id {
@@ -383,6 +404,26 @@ mod tests {
         let t = threads.resume("t1").unwrap();
         assert_eq!(t.session_id, "fresh");
         assert_eq!(t.parent_message_id, None);
+    }
+
+    /// A rebuilt session has no parent yet, but its id is the only thing that
+    /// survives a restart. The durable adapter used to drop that row, so the
+    /// next process opened a *second* remote session for the same thread.
+    #[test]
+    fn sqlite_persist_keeps_a_session_that_has_no_parent_yet() {
+        let store = crate::store::Store::open_memory().expect("in-memory store");
+        let persist = SqlitePersist::new(store);
+
+        persist.save("t1", &state("fresh", None));
+
+        let resumed = persist.load("t1").expect("rebuilt session must survive");
+        assert_eq!(resumed.session_id, "fresh");
+        assert_eq!(resumed.parent_message_id, None);
+
+        // And a later commit still upgrades the same row rather than adding one.
+        persist.save("t1", &state("fresh", Some(9)));
+        let resumed = persist.load("t1").expect("row");
+        assert_eq!(resumed.parent_message_id, Some(9));
     }
 
     #[tokio::test]
