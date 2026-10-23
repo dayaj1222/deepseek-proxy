@@ -970,5 +970,27 @@ async fn rebind_rejects_an_unknown_account_label() {
     assert_eq!(body["error"]["code"], json!("invalid_request"), "{body}");
 }
 
+/// A server must not shut itself down. `timeout(grace, serve)` used to wrap
+/// the whole serve future, so the grace clock started at bind and the process
+/// exited `shutdown_grace_secs` after boot with no signal at all.
+#[tokio::test]
+async fn the_server_outlives_its_shutdown_grace_without_a_signal() {
+    let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("SHUTDOWN_GRACE", "1")],
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let resp = reqwest::get(format!("{}/healthz", app.base)).await;
+    assert!(
+        resp.is_ok_and(|r| r.status().is_success()),
+        "the proxy exited on its own after the grace period elapsed"
+    );
+}
+
 const TOOL_OPEN: &str = concat!("<inv", "oke name=\"bash\">");
 const TOOL_CLOSE: &str = concat!("</inv", "oke>");
