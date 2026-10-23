@@ -878,6 +878,80 @@ async fn admin_routes_require_a_registered_key() {
     assert_eq!(anon_post.status(), 401);
 }
 
+/// `x-deepseek-rs-rebind` moves the thread before the turn runs, and the turn
+/// carries the whole transcript because the new session has never seen it.
+///
+/// This is the trap the header has to avoid: preparing the prompt as a
+/// continuation would send only the newest message into an empty session and
+/// silently drop the conversation.
+#[tokio::test]
+async fn a_rebind_header_moves_the_account_and_replays_the_transcript() {
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &["391"])),
+        Step::Sse(sse_reply(4, 3, &["done"])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app(
+        &upstream,
+        &[("a@example.com", "pw"), ("b@example.com", "pw")],
+    )
+    .await;
+
+    // Turn 1: a normal fresh turn, which binds the thread to some account.
+    let first = complete(&app, hello_turn()).await;
+    assert_eq!(first.status(), 200);
+
+    // Turn 2: same thread key, but ask to move it.
+    let body = json!({
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "user", "content": "17*23"},
+            {"role": "assistant", "content": "391"},
+            {"role": "user", "content": "now double it"}
+        ]
+    });
+    let second = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .header("x-deepseek-rs-rebind", "next")
+        .json(&body)
+        .send()
+        .await
+        .expect("rebind turn");
+    assert_eq!(second.status(), 200);
+
+    let prompts = script.prompts();
+    assert_eq!(prompts.len(), 2, "one completion per turn");
+    let replay = &prompts[1];
+    assert!(
+        replay.contains("17*23"),
+        "a rebound turn must replay the earlier message, not just the delta: {replay}"
+    );
+    assert!(
+        replay.contains("now double it"),
+        "the new message must be in the replay too: {replay}"
+    );
+}
+
+/// A bad header is rejected before the thread lock and before any session is
+/// created, so a typo cannot half-move a conversation.
+#[tokio::test]
+async fn an_unknown_rebind_header_is_a_400() {
+    let (upstream, script) = start_mock(MockScript::new(vec![])).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", app.base))
+        .header("x-deepseek-rs-rebind", "banana")
+        .json(&hello_turn())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["param"], json!("x-deepseek-rs-rebind"));
+    assert_eq!(script.completions(), 0, "nothing may reach upstream");
+}
+
 /// An unknown target is a client error, not a silent no-op that leaves the
 /// operator believing the thread moved.
 #[tokio::test]

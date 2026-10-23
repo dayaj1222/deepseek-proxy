@@ -45,6 +45,40 @@ New surface:
 
 ---
 
+## 2026-10-23 - Rebind header: a deterministic trigger
+
+**`x-deepseek-rs-rebind` moves a live thread before the turn runs.** No message
+scanning, no sentinel to strip, no ambiguity about whether a directive is "new".
+
+The header is resolved in `chat_completions` before `turn::prepare`, because it
+decides the *shape* of the turn: a rebind opens a session that has never seen
+the conversation, so the prompt must be `replay`. Preparing it as a continuation
+would send only the newest message into an empty session and silently drop
+everything said before it. `turn::prepare` therefore takes the change and calls
+`build_prompts` with `existing = None`.
+
+`next`, `fresh`, or an email; anything else is a 400 before the thread lock,
+because a typo must not half-move a conversation. The target is resolved through
+the same `parse_target` as `POST /admin/rebind`, and the move itself is
+`session::open_session(Rebind { .., Manual })` - the third caller of the one
+interface, alongside the first turn and the context-limit rebuild.
+
+The intended producer is a pi extension: `input` consumes the sentinel so it
+never becomes a message, `before_provider_headers` sets the header on the next
+request, `after_provider_response` clears it. That keeps the sentinel out of the
+transcript entirely, which is why the proxy needs no stripping logic and no
+delta-only detection - both of which break on a fresh thread, where `delta` and
+`replay` are the same string.
+
+Tests record the `prompt` of every upstream call, so "a rebound turn replays the
+transcript" is asserted on the bytes the model would see, not inferred.
+
+*Files:* `crates/proxy/src/main.rs`, `crates/proxy/src/turn.rs`,
+`crates/proxy/tests/http.rs`, `crates/proxy/tests/support/mod.rs`,
+`docs/features/T-21-forced-rebind.md`
+
+---
+
 ## 2026-10-23 - One interface for thread identity (T-22)
 
 **Every remote session is now opened through `session::open_session`.** Four
