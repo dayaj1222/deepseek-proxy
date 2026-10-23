@@ -1299,6 +1299,9 @@ struct Recovery {
     expected: usize,
     resolved: usize,
     repairing: bool,
+    /// The failure list of the attempt currently being repaired, kept so a
+    /// retry can restate what actually went wrong.
+    last_failures: Vec<dialect::MalformedCall>,
 }
 
 impl Recovery {
@@ -1314,6 +1317,7 @@ impl Recovery {
             expected: 0,
             resolved: 0,
             repairing: false,
+            last_failures: Vec::new(),
         }
     }
 
@@ -1379,18 +1383,28 @@ impl Recovery {
     /// Port of `begin_repair()`: build the prompt and reset the per-attempt
     /// counters. `previous` snapshots every call accepted so far, so the next
     /// repair cannot re-accept an echo of one of them.
-    fn begin_repair(&mut self) -> String {
-        let mut prompt = dialect::build_repair_prompt(&self.pending, &self.specs);
-        // Only the schema of a tool the model actually named and got wrong on
-        // its arguments. Sending the whole catalogue here makes a repair turn
-        // larger than the turn it repairs — in exactly the situation (context
-        // pressure) where repair is most likely needed.
-        let schemas = dialect::repair_schemas(&self.pending, &self.specs);
-        if !schemas.is_empty() {
-            prompt.push_str("\nSchema(s) for the tool call(s) that failed:\n");
-            prompt.push_str(&dialect::py_json_dumps(&Value::Array(schemas)));
+    fn begin_repair(&mut self, attempt: usize) -> String {
+        let mut prompt = dialect::build_repair_prompt(&self.pending, &self.specs, attempt);
+        // Schemas only on the first attempt. They are the expensive part of a
+        // repair prompt, and they answer "what shape were the arguments?" -
+        // a question the model has already been given the answer to by the time
+        // it fails a second time. Repeating them adds bulk to exactly the turn
+        // where the context is already long, and the ladder is trying to get
+        // *shorter* as attempts are spent.
+        if attempt <= 1 {
+            // Only the schema of a tool the model actually named and got wrong
+            // on its arguments. Sending the whole catalogue here makes a repair
+            // turn larger than the turn it repairs.
+            let schemas = dialect::repair_schemas(&self.pending, &self.specs);
+            if !schemas.is_empty() {
+                prompt.push_str("\nSchema(s) for the tool call(s) that failed:\n");
+                prompt.push_str(&dialect::py_json_dumps(&Value::Array(schemas)));
+            }
         }
         self.expected = self.pending.len();
+        // Keep the detail: a failed retry must be able to say which tool and
+        // which reason, not just "something was omitted".
+        self.last_failures = self.pending.clone();
         self.pending.clear();
         self.resolved = 0;
         self.previous.clear();
@@ -1402,15 +1416,33 @@ impl Recovery {
         prompt
     }
 
-    /// Port of `end_repair()`: an attempt that resolved nothing records exactly
-    /// one omission marker, never the whole failure list again.
+    /// Port of `end_repair()`: an attempt that resolved nothing keeps the
+    /// failure list it was given.
+    ///
+    /// The Python original collapsed the list into a single nameless
+    /// `repair_omitted_call`, which made every retry weaker than the attempt
+    /// before it: the model was no longer told which tool it had got wrong or
+    /// why. Restating the same list is bounded (`expected` is set from it, not
+    /// accumulated), so the growth the original guarded against cannot happen.
     fn end_repair(&mut self) {
         if self.resolved < self.expected {
-            self.pending.push(dialect::MalformedCall::new(
-                None,
-                String::new(),
-                "repair_omitted_call",
-            ));
+            let unresolved = self.expected - self.resolved;
+            let mut carried: Vec<dialect::MalformedCall> = self
+                .last_failures
+                .iter()
+                .take(unresolved)
+                .cloned()
+                .collect();
+            if carried.is_empty() {
+                // Nothing was described to begin with (a required call that
+                // never arrived); a marker is all that can be said.
+                carried.push(dialect::MalformedCall::new(
+                    None,
+                    String::new(),
+                    "repair_omitted_call",
+                ));
+            }
+            self.pending.extend(carried);
         }
     }
 
@@ -2092,7 +2124,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             if !recovery.has_pending() {
                 break;
             }
-            let prompt = recovery.begin_repair();
+            let prompt = recovery.begin_repair(attempt as usize);
             let expected = recovery.expected;
             tracing::warn!(thread = %key, attempt, expected, "tool repair");
 
@@ -2104,7 +2136,22 @@ async fn stream_response(live: LiveTurn) -> Response {
                 prev_parents: Vec::new(),
                 exchanges: 0,
             };
-            let body = completion_body(&turn_state, &prompt, false, false, &[]);
+            // Thinking on every repair turn.
+            //
+            // The prompt asks the model to check the block's shape before
+            // emitting it, which is a deliberation the request has to allow:
+            // with thinking off there is no scratch space to do it in, so the
+            // instruction is unfollowable. That was inherited from Python
+            // (`turn.generate(repair_prompt, stream=False)`), not chosen — and
+            // it is the likely reason a model could fail the same way five
+            // times while a single nudge in the chat, on a turn that *did*
+            // think, fixed it.
+            //
+            // Cost: thinking tokens on a non-streaming call, so the repair
+            // waits for the whole reply. That is the right trade — a repair
+            // that works costs one turn, a repair that fails costs the turn
+            // plus every retry after it.
+            let body = completion_body(&turn_state, &prompt, true, false, &[]);
             let raw = match completion_with_retry(&state, &key, &body).await {
                 Ok((resp, _slot)) => match resp.text().await {
                     Ok(t) => t,
@@ -3047,7 +3094,7 @@ mod tests {
             .unwrap();
         assert!(produced.is_none());
         assert!(recovery.has_pending());
-        let prompt = recovery.begin_repair();
+        let prompt = recovery.begin_repair(1);
         assert!(prompt.contains("unknown_or_disallowed_tool"));
         assert!(prompt.contains("Valid tool names: bash."));
     }
@@ -3152,7 +3199,7 @@ mod tests {
             "{}".into(),
             "arguments_do_not_match_schema",
         ));
-        let prompt = recovery.begin_repair();
+        let prompt = recovery.begin_repair(1);
         assert!(prompt.contains("Schema(s) for the tool call(s) that failed:"));
         assert!(
             prompt.contains("\"command\""),
@@ -3183,7 +3230,7 @@ mod tests {
                 String::new(),
                 reason,
             ));
-            let prompt = recovery.begin_repair();
+            let prompt = recovery.begin_repair(1);
             assert!(
                 !prompt.contains("Schema(s) for the tool call(s) that failed:"),
                 "{reason} must not trigger a schema dump"
@@ -3211,7 +3258,7 @@ mod tests {
                 recovery.accept(event).expect("malformed is not an error");
             }
             assert!(!recovery.pending.is_empty(), "{text} must reach repair");
-            let prompt = recovery.begin_repair();
+            let prompt = recovery.begin_repair(1);
             assert!(
                 prompt.contains("Schema(s) for the tool call(s) that failed:"),
                 "{text} must carry a schema"

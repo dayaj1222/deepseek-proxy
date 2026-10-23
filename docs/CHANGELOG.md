@@ -45,6 +45,48 @@ New surface:
 
 ---
 
+## 2026-10-23 - Tool repair: thinking on, escalating phrasing, kept detail
+
+**Three changes to the repair loop, each fixing a way a retry was weaker than
+the attempt before it.**
+
+1. **Thinking was off.** The repair prompt asks the model to check the block's
+   shape before emitting it, which is a deliberation the request has to allow.
+   With `thinking_enabled: false` there is no scratch space to do it in, so the
+   instruction was unfollowable. Inherited from Python
+   (`turn.generate(repair_prompt, stream=False)`), not chosen. All repair turns
+   now think. Safe because `route_all` splits reasoning from answer and the loop
+   already discarded the reasoning channel (`let (_, repair_text, _)`), so
+   chain-of-thought can never reach the tool-call scanner.
+2. **The failure detail was thrown away after attempt one.** `end_repair`
+   replaced the pending list with a single nameless `repair_omitted_call`, so
+   attempts two and three told the model neither which tool failed nor why - it
+   could only re-guess. The list is now carried forward, bounded because
+   `expected` is set from it rather than accumulated.
+3. **The same paragraph was repeated verbatim.** `build_repair_prompt` takes the
+   attempt number and round-robins three tiers, each *plainer* than the last:
+
+   | Attempt | Opening |
+   | --- | --- |
+   | 1 | the original wording, `periodic_reminder()` included |
+   | 2 | "that call could not be run, so nothing happened" + the wire shape |
+   | 3 | "still not usable, send exactly one call" + the wire shape |
+   | 4 | back to tier 1 |
+
+   The escalation drops jargon rather than adding it. `periodic_reminder`
+   contains `YOU WILL BE KILLED`, which is not useful to a model that already
+   knows it made a mistake; the observed fix in practice is a short, plain
+   nudge. Schema(s) go out on attempt 1 only: they answer "what shape were the
+   arguments?", which the model has already been told by the time it fails
+   twice, and repeating them bloats exactly the turn where context is long.
+
+Every tier still names the failure and the valid tool names, so the ladder can
+only remove redundancy, never information the model needs.
+
+*Files:* `crates/proxy/src/dialect.rs`, `crates/proxy/src/main.rs`
+
+---
+
 ## 2026-10-23 - `/rebind`: a pi command instead of a magic string
 
 **The producer for `x-deepseek-rs-rebind` is a slash command, not a sentinel in
