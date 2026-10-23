@@ -92,8 +92,9 @@ fn instruction() -> String {
     s.push_str("2. BODY: exactly one JSON object between the tags. Strings, numbers,\n");
     s.push_str("   booleans, null, arrays and nested objects are all fine as JSON values.\n");
     s.push_str("   Do NOT wrap the block in code fences, never emit bare JSON with no tags.\n");
-    s.push_str("3. LITERAL MARKERS: if a value must contain the literal text <invoke\n");
-    s.push_str("   or </invoke>, write a backslash directly before it.\n");
+    s.push_str("3. LITERAL MARKERS: never put a raw \u003c or \u003c/ in a JSON string\n");
+    s.push_str("   value; it ends the block early and the call is lost. Write \\u003c if a\n");
+    s.push_str("   value really needs a less-than sign.\n");
     s.push_str("4. MULTIPLE CALLS: you may emit several complete blocks back to back IN ONE\n");
     s.push_str("   TURN ONLY for short, independent, read-only calls (e.g. reading files,\n");
     s.push_str("   listing directories, grepping, small quick commands). NEVER batch writes,\n");
@@ -125,20 +126,12 @@ fn final_reminder() -> String {
 /// a doubled closing tag) right before the model answers.
 pub fn periodic_reminder() -> String {
     let mut s = String::new();
-    s.push_str("⚠ HARD FORMAT REQUIREMENT — READ BEFORE EMITTING ANY TOOL CALL.\n");
-    s.push_str("Violations are NOT repaired for you: a malformed or repeated block is DROPPED\n");
-    s.push_str("and never executed, and you will burn this turn on a correction loop instead\n");
-    s.push_str("of progressing the task.\n");
-    s.push_str("Reminder — tool calls use exactly this form:\n");
+    s.push_str("Tool call format: a malformed or repeated block is dropped and never run.\n");
+    s.push_str("Calls use exactly this form:\n");
     s.push_str(TEMPLATE);
-    s.push_str("\n!!IMPORTANT!!\n");
-    s.push_str(
-        "1. Never emit <｜｜DSML｜｜ invoke>, <｜｜DSML｜｜> or related tags those are useless and will be shown to the user, YOU WILL BE KILLED.\n",
-    );
-    s.push_str("2. Never emit the </invoke> ending tag more than once per tool call.\n");
-    s.push_str(
-        "Get the format wrong and your tool call silently does nothing and the loop might break.",
-    );
+    s.push_str("\n1. Do not emit the legacy marker spellings or related DSML tags;\n");
+    s.push_str("   they reach the user and do nothing.\n");
+    s.push_str("2. Emit the closing tag exactly once per tool call.\n");
     s
 }
 
@@ -1047,7 +1040,9 @@ mod tests {
         assert!(prompt.contains("Valid tool names: bash, edit."));
         assert!(prompt.contains(TEMPLATE));
         // The repair turn carries the same hard-format warning as a normal turn.
-        assert!(prompt.contains("HARD FORMAT REQUIREMENT"));
+        // The first repair turn carries the per-turn reminder, which is now
+        // plain rather than shouting; this marker is unique to it.
+        assert!(prompt.contains("dropped and never run"));
         // `Recovery.begin_repair()` appends this line, so a repair turn must too.
         assert!(
             prompt.contains("Only fix the listed failures. Do not repeat calls already accepted.")
@@ -1093,9 +1088,9 @@ mod tests {
         }
 
         // The jargon goes away as attempts are spent, and never comes back.
-        assert!(tiers[0].contains("HARD FORMAT REQUIREMENT"));
-        assert!(!tiers[1].contains("HARD FORMAT REQUIREMENT"));
-        assert!(!tiers[2].contains("HARD FORMAT REQUIREMENT"));
+        assert!(tiers[0].contains("dropped and never run"));
+        assert!(!tiers[1].contains("dropped and never run"));
+        assert!(!tiers[2].contains("dropped and never run"));
         assert!(tiers[1].len() < tiers[0].len());
         assert!(tiers[2].len() < tiers[1].len());
     }
