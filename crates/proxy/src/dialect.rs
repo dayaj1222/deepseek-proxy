@@ -505,12 +505,50 @@ pub fn extract_malformed(text: &str) -> Vec<MalformedCall> {
 /// the model to follow the protocol it was already given. Per-call schemas for
 /// argument failures are appended by [`crate::Recovery::begin_repair`] via
 /// [`repair_schemas`]; the full catalogue is never sent.
-pub fn build_repair_prompt(malformed: &[MalformedCall], specs: &[ToolSpec]) -> String {
-    let mut out = String::from(
-        "Your previous response contained malformed tool call(s) that could not be executed. \
-         Do not quote, copy, explain, or repeat it. Re-emit EACH corrected call now, \
-         and nothing else.",
-    );
+/// How a repair turn is phrased. Escalates as attempts are spent.
+///
+/// The tiers deliberately get *simpler*. A model that has ignored a long,
+/// jargon-heavy instruction twice is not helped by being told the same thing a
+/// third time in the same words: the practical fix reported by operators is
+/// "think before emitting, once" - short, plain, and specific. So tier 0 keeps
+/// the original wording, tier 1 drops the protocol essay, and tier 2 is one
+/// short sentence plus the wire shape.
+fn repair_tier(attempt: usize) -> usize {
+    // `attempt` is 1-based at the call site, so the first repair is tier 0.
+    attempt.saturating_sub(1) % 3
+}
+
+/// Build the repair prompt for `attempt` (1-based).
+///
+/// `malformed` is the failure list for *this* attempt. It keeps the tool name
+/// and reason across retries: an earlier version replaced everything with a
+/// nameless `repair_omitted_call`, so attempts two and three told the model
+/// nothing about what it had got wrong.
+pub fn build_repair_prompt(
+    malformed: &[MalformedCall],
+    specs: &[ToolSpec],
+    attempt: usize,
+) -> String {
+    let tier = repair_tier(attempt);
+    let mut out = String::new();
+
+    match tier {
+        0 => out.push_str(
+            "Your previous response contained malformed tool call(s) that could not be executed. \
+             Do not quote, copy, explain, or repeat it. Re-emit EACH corrected call now, \
+             and nothing else.",
+        ),
+        1 => out.push_str(
+            "That tool call could not be run, so nothing happened. The problem is only \
+             the call's format, not what you were trying to do. Send the same call again, \
+             correctly, and nothing else.",
+        ),
+        _ => out.push_str(
+            "Still not usable. Send exactly one tool call, in the shape below, with no \
+             other text.",
+        ),
+    }
+
     for (i, m) in malformed.iter().enumerate() {
         let name = match &m.name {
             Some(n) => format!("\"{n}\""),
@@ -529,18 +567,32 @@ pub fn build_repair_prompt(malformed: &[MalformedCall], specs: &[ToolSpec]) -> S
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         out.push_str(&format!("\nValid tool names: {}.", names.join(", ")));
     }
-    out.push_str(
-        "\nThink about the format before you emit anything. Which tag opens the block, what \
-         goes between the tags, and which tag closes it? What does the JSON body look like, \
-         and does the tool name you are about to use appear in the valid list above? Work \
-         through that in your reasoning, then emit the call once.\n",
-    );
-    // The per-turn reminder carries the wire shape and the concrete failure
-    // modes (legacy marker tags, doubled closing tag); a repair turn needs the
-    // same warning, not a weaker one.
-    out.push_str("\n\n");
-    out.push_str(&periodic_reminder());
-    out.push_str("\n\nOnly fix the listed failures. Do not repeat calls already accepted.");
+
+    match tier {
+        0 => {
+            out.push_str(
+                "\nThink about the format before you emit anything. Which tag opens the block, what \
+                 goes between the tags, and which tag closes it? What does the JSON body look like, \
+                 and does the tool name you are about to use appear in the valid list above? Work \
+                 through that in your reasoning, then emit the call once.\n",
+            );
+            // The per-turn reminder carries the wire shape and the concrete failure
+            // modes (legacy marker tags, doubled closing tag); a first repair turn
+            // needs the same warning, not a weaker one.
+            out.push_str("\n\n");
+            out.push_str(&periodic_reminder());
+            out.push_str("\n\nOnly fix the listed failures. Do not repeat calls already accepted.");
+        }
+        1 => {
+            out.push_str("\n\nReminder of the wire shape:\n");
+            out.push_str(TEMPLATE);
+        }
+        _ => {
+            out.push_str("\n\n");
+            out.push_str(TEMPLATE);
+        }
+    }
+
     out
 }
 
@@ -990,7 +1042,7 @@ mod tests {
                 raw: json!({"type": "function", "function": {"name": "edit", "parameters": {"type": "object"}}}),
             },
         ];
-        let prompt = build_repair_prompt(&malformed, &specs);
+        let prompt = build_repair_prompt(&malformed, &specs, 1);
         assert!(prompt.contains("Failure 1: name=\"bash\" reason=invalid_json_body"));
         assert!(prompt.contains("Valid tool names: bash, edit."));
         assert!(prompt.contains(TEMPLATE));
@@ -1004,6 +1056,60 @@ mod tests {
         assert!(!prompt.contains("Available schemas"));
         // The bad body must not be replayed into the same conversation.
         assert!(!prompt.contains("not json"));
+    }
+
+    /// Each attempt gets a different, *simpler* opening: the same paragraph
+    /// repeated verbatim is what the ladder exists to avoid, and the tier that
+    /// drops the protocol essay must actually be shorter than tier 0.
+    #[test]
+    fn repair_prompt_escalates_and_gets_shorter() {
+        let malformed = vec![MalformedCall {
+            name: Some("bash".into()),
+            body: "not json".into(),
+            reason: "invalid_json_body".into(),
+        }];
+        let specs = vec![ToolSpec {
+            name: "bash".into(),
+            raw: json!({"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}),
+        }];
+
+        let tiers: Vec<String> = (1..=3)
+            .map(|attempt| build_repair_prompt(&malformed, &specs, attempt))
+            .collect();
+
+        // All three differ from one another.
+        assert_ne!(tiers[0], tiers[1]);
+        assert_ne!(tiers[1], tiers[2]);
+        assert_ne!(tiers[0], tiers[2]);
+
+        // Every tier still names the failure: the detail is what lets a model
+        // fix the right thing, and it used to be lost after the first attempt.
+        for (i, prompt) in tiers.iter().enumerate() {
+            assert!(
+                prompt.contains("Failure 1: name=\"bash\" reason=invalid_json_body"),
+                "tier {i} lost the failure detail: {prompt}"
+            );
+            assert!(prompt.contains(TEMPLATE), "tier {i} lost the wire shape");
+        }
+
+        // The jargon goes away as attempts are spent, and never comes back.
+        assert!(tiers[0].contains("HARD FORMAT REQUIREMENT"));
+        assert!(!tiers[1].contains("HARD FORMAT REQUIREMENT"));
+        assert!(!tiers[2].contains("HARD FORMAT REQUIREMENT"));
+        assert!(tiers[1].len() < tiers[0].len());
+        assert!(tiers[2].len() < tiers[1].len());
+    }
+
+    /// The tier rotates, so a fourth attempt is a second pass rather than a
+    /// prompt the model has already ignored three times.
+    #[test]
+    fn repair_tier_round_robins() {
+        assert_eq!(repair_tier(1), 0);
+        assert_eq!(repair_tier(2), 1);
+        assert_eq!(repair_tier(3), 2);
+        assert_eq!(repair_tier(4), 0);
+        // 0 saturates to 0, so it lands on tier 0 rather than underflowing.
+        assert_eq!(repair_tier(0), 0, "0 must not panic or underflow");
     }
 
     #[test]
