@@ -15,7 +15,11 @@ use std::sync::{Arc, Mutex};
 use crate::store::{self, Store};
 
 /// How many previous cursors a thread keeps for a rollback.
-pub const REWIND_DEPTH: usize = 3;
+///
+/// The turn walks the ring newest-first on a rejected parent id, so this is
+/// both the capacity and the maximum number of cheap retries before the
+/// expensive rebuild path runs.
+pub const REWIND_DEPTH: usize = 5;
 
 /// Resume state for one conversation thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,7 +302,42 @@ mod tests {
         let t = threads.resume("t1").unwrap();
         assert_eq!(t.parent_message_id, Some(6));
         // The oldest entries fall off; the newest REWIND_DEPTH stay.
-        assert_eq!(t.prev_parents, vec![3, 4, 5]);
+        assert_eq!(t.prev_parents, vec![1, 2, 3, 4, 5]);
+        assert_eq!(t.prev_parents.len(), REWIND_DEPTH);
+    }
+
+    #[test]
+    fn rewind_walks_the_whole_ring_newest_first() {
+        let persist = Arc::new(MemoryPersist::new());
+        let threads = threads_with(persist.clone());
+        threads.remember("t1", state("s1", Some(1)));
+        for mid in 2..=6 {
+            threads.commit("t1", "s1", Some(mid));
+        }
+        // Newest-first: 5, 4, 3, 2, 1 - the whole ring, not just one step.
+        for expected in [5, 4, 3, 2, 1] {
+            assert_eq!(threads.rewind("t1"), Some(expected));
+            assert_eq!(threads.resume("t1").unwrap().parent_message_id, Some(expected));
+            assert_eq!(persist.rows()["t1"].parent_message_id, Some(expected));
+        }
+        // Exhausted: the caller must rebuild instead.
+        assert_eq!(threads.rewind("t1"), None);
+    }
+
+    #[test]
+    fn rewind_stops_at_the_ring_capacity() {
+        let threads = threads_with(Arc::new(MemoryPersist::new()));
+        threads.remember("t1", state("s1", Some(1)));
+        for mid in 2..=20 {
+            threads.commit("t1", "s1", Some(mid));
+        }
+        // Only REWIND_DEPTH commits are recoverable, no matter how long the
+        // thread is: 19, 18, 17, 16, 15.
+        let walked: Vec<i64> = (0..REWIND_DEPTH)
+            .filter_map(|_| threads.rewind("t1"))
+            .collect();
+        assert_eq!(walked, vec![19, 18, 17, 16, 15]);
+        assert_eq!(threads.rewind("t1"), None);
     }
 
     #[test]

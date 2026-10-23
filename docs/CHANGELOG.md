@@ -21,6 +21,26 @@ contributor can tell done from planned without reading 43 commit messages.
 
 ## Dialect
 
+### 2026-10-23 - walk the rewind ring, depth 5
+
+A rejected parent id was stepped back **once** before the replay path ran. When
+the stale cursor is the newest commit only - the common case - one step lands on
+a perfectly valid cursor, but the code gave up after that single retry and
+replayed the whole transcript. That replay is itself what trips the upstream
+throttle (ADR-0008), so a recoverable turn became a 429 loop.
+
+The turn now walks the ring newest-first, up to `REWIND_DEPTH` steps. Depth rose
+from 3 to 5 because it is now both the capacity and the retry budget. The
+rebuild path is unchanged and still the second tier: walking cannot help when
+every cursor is dead or the ring is empty.
+
+*Files:* `crates/proxy/src/threads.rs`, `crates/proxy/src/main.rs`
+*Tests:* `rewind_walks_the_whole_ring_newest_first`,
+`rewind_stops_at_the_ring_capacity`, plus the depth-5 update to
+`commit_keeps_a_bounded_history_of_cursors`
+*Docs:* ADR-0008 amendment, README
+*Verified:* `cargo test --workspace` - 104 + 22 passing
+
 ### `d1f7f49` fix(dialect): swallow up to two stray closing tags after a tool block
 
 Models sometimes close a block two or three times. The extra closing tag leaked

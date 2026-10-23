@@ -1486,9 +1486,11 @@ async fn stream_response(live: LiveTurn) -> Response {
         let mut attempt: u32 = 0;
         let mut context_recovered = false;
         let mut cursor_recovered = false;
-        // One rewind per turn: if the previous cursor is stale too, the session
-        // itself is gone and only a rebuild can help.
-        let mut rewound = false;
+        // How many commits this turn has already stepped back. Each rewind is
+        // one cheap retry on the live session; only when the whole ring is
+        // exhausted (or empty) is the session itself presumed gone and the
+        // expensive replay path taken.
+        let mut rewinds: usize = 0;
         let mut body = body;
         // The conversation cursor, ported from aiodeepseek's
         // `Conversation._parent_message_id`: the id of the NEWEST upstream
@@ -1606,16 +1608,17 @@ async fn stream_response(live: LiveTurn) -> Response {
                 // behind it, so it costs one turn instead of a full replay — and
                 // a replay of a long thread is itself what trips the upstream
                 // throttle, turning a recoverable turn into a 429 loop.
-                let previous = if rewound {
+                let previous = if rewinds >= threads::REWIND_DEPTH {
                     None
                 } else {
                     state.threads.rewind(&key)
                 };
                 if let Some(prev) = previous {
-                    rewound = true;
+                    rewinds += 1;
                     tracing::warn!(
                         thread = %key,
                         prev,
+                        rewinds,
                         hint = %hint,
                         "stale parent message id; rewinding one commit and continuing"
                     );

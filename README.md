@@ -263,10 +263,10 @@ private, CGNAT, and reserved ranges are refused, and redirects are not followed.
   threads move to a healthy account, and one probe request tests it when the
   window elapses. `/stats` shows `breaker` and `retry_in_secs` per account.
 - **Stale cursors are rewound, not replayed.** When the backend rejects the
-  saved parent id, the proxy steps back one commit (keeping the last three) and
-  resends the same delta, so the live session and its context survive. Only when
-  there is nothing left to step back to does it rebuild the session from the
-  transcript.
+  saved parent id, the proxy walks back through the last five commits, resending
+  the same delta on the first one that still exists, so the live session and its
+  context survive. Only when the whole ring is exhausted - or empty, after a
+  restart or a rebuild - does it recreate the session from the transcript.
 
 ## Architecture
 
