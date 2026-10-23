@@ -92,9 +92,9 @@ fn instruction() -> String {
     s.push_str("2. BODY: exactly one JSON object between the tags. Strings, numbers,\n");
     s.push_str("   booleans, null, arrays and nested objects are all fine as JSON values.\n");
     s.push_str("   Do NOT wrap the block in code fences, never emit bare JSON with no tags.\n");
-    s.push_str("3. LITERAL MARKERS: never put a raw \u003c or \u003c/ in a JSON string\n");
-    s.push_str("   value; it ends the block early and the call is lost. Write \\u003c if a\n");
-    s.push_str("   value really needs a less-than sign.\n");
+    s.push_str("3. LITERAL MARKERS: never put a raw angle bracket or a raw closing\n");
+    s.push_str("   marker inside a JSON string value; it ends the block early and the\n");
+    s.push_str("   call is lost. If a value really needs one, write \\u003c.\n");
     s.push_str("4. MULTIPLE CALLS: you may emit several complete blocks back to back IN ONE\n");
     s.push_str("   TURN ONLY for short, independent, read-only calls (e.g. reading files,\n");
     s.push_str("   listing directories, grepping, small quick commands). NEVER batch writes,\n");
