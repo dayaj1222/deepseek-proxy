@@ -45,6 +45,37 @@ New surface:
 
 ---
 
+## 2026-10-23 - `/rebind`: a pi command instead of a magic string
+
+**The producer for `x-deepseek-rs-rebind` is a slash command, not a sentinel in
+the message text.** `pi-ext/deepseek-rebind.ts` adds
+`/rebind [next|fresh|off|<email>]`, arms a one-shot flag, and sets the header on
+the next provider request.
+
+A command is not a turn: it never reaches the model and never enters the
+transcript. That removes the two defects a sentinel could not avoid - detection
+had to be delta-only, which breaks on a fresh thread where `delta` and `replay`
+are the same string, and the text had to be stripped from the replay path so the
+new account would not read the directive as conversation.
+
+The flag is cleared inside `before_provider_headers`, not
+`after_provider_response`: neither event carries a request id, so the only
+moment that cannot clear the wrong request is the one that applies the header.
+It also makes the move exactly-once if a lower layer retries. A pending move is
+dropped on `session_shutdown` so it cannot leak into a different conversation.
+
+`pi-ext/` is not part of the Rust workspace: pi compiles the TypeScript through
+`jiti`, so there is no build step, and the file is symlinked into
+`~/.pi/agent/extensions/` rather than copied.
+
+Verified: `tsc --strict --noEmit` passes; `/rebind banana` produces **0** model
+turns while an unknown command produces 4, which proves the command is loaded
+and dispatching rather than falling through as a prompt.
+
+*Files:* `pi-ext/deepseek-rebind.ts`, `pi-ext/README.md`, `pi-ext/package.json`
+
+---
+
 ## 2026-10-23 - Rebind header: a deterministic trigger
 
 **`x-deepseek-rs-rebind` moves a live thread before the turn runs.** No message
