@@ -9,6 +9,7 @@ yours.
 | what changed, when, and **why** | [`CHANGELOG.md`](CHANGELOG.md) |
 | why a particular design is the way it is | [`adr/`](adr/) — one decision per file |
 | what is planned next, in detail | [`features/`](features/) — one feature per file |
+| what the model actually receives, and why it is wrong | [`audit/system-prompt-audit.md`](audit/system-prompt-audit.md) |
 | the task list and ground rules for contributors | [`../PLAN.md`](../PLAN.md) |
 | the vocabulary used everywhere | [`../GLOSSARY.md`](../GLOSSARY.md) |
 
