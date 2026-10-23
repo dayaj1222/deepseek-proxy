@@ -17,6 +17,24 @@ So the fixed protocol block plus one trivial tool is **2131 bytes (~530 tokens)*
 and the per-turn tail reminder is **677 bytes (~170 tokens)**. A realistic
 client with 10-30 tools puts the schema section in the tens of kilobytes.
 
+### What is actually re-sent per turn (measured)
+
+Rendered two consecutive turns through `prompt::for_turn` (one tool) and counted:
+
+| | Turn 1 (fresh thread) | Turn 2 (continuation) |
+|---|---|---|
+| tool schemas | **yes** (once) | **no** |
+| `periodic_reminder` | **2x** (head + tail) | 1x (tail) |
+| `TEMPLATE` copies | **4** | 2 |
+
+So the schemas are **not** re-sent on every turn: a continuation sends only the
+delta (`User: again`) plus the tail reminder. The client's `tools` array arrives
+once per request, and the proxy renders it into the turn-1 replay only (and into
+a rebuild replay). That part is already efficient.
+
+The waste is the **reminder, twice on turn one** - and the four copies of the
+template it drags in with it.
+
 ## 1. How the prompt is assembled
 
 ```
