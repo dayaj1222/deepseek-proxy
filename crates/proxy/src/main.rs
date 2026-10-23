@@ -2779,20 +2779,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
     let stats_for_signal = state.stats.clone();
-    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        stats_for_signal
-            .shutting_down
-            .store(true, Ordering::Relaxed);
-    });
-    match tokio::time::timeout(grace, serve).await {
-        Ok(r) => r?,
-        Err(_) => {
-            tracing::warn!(
-                grace_s = cfg.shutdown_grace_secs,
-                "grace period elapsed with requests still in flight; exiting"
-            );
+    // The drain deadline must start when the signal arrives, not when the
+    // listener binds. Wrapping the whole `serve` future in `timeout(grace, ..)`
+    // started that clock at startup, so the process exited exactly
+    // `shutdown_grace_secs` after boot, with or without a signal — a server
+    // that served for 20 seconds and then stopped itself.
+    let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel();
+    let serve = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                stats_for_signal
+                    .shutting_down
+                    .store(true, Ordering::Relaxed);
+                let _ = stopping_tx.send(());
+            })
+            .await
+    };
+    tokio::pin!(serve);
+    let drained = tokio::select! {
+        r = &mut serve => {
+            r?;
+            true
         }
+        // Arms only once the signal fires, then bounds the drain.
+        _ = async {
+            let _ = stopping_rx.await;
+            tokio::time::sleep(grace).await;
+        } => false,
+    };
+    if !drained {
+        tracing::warn!(
+            grace_s = cfg.shutdown_grace_secs,
+            "grace period elapsed with requests still in flight; exiting"
+        );
     }
     tracing::info!("stopped");
     Ok(())
@@ -3414,8 +3434,8 @@ mod tests {
     fn reminder_text_names_the_failure_modes() {
         let text = dialect::periodic_reminder();
         println!("-----BEGIN-----\n{text}\n-----END-----");
-        assert!(text.contains("DROPPED"));
-        assert!(text.contains("Never emit the </invoke> ending tag more than once per tool call."));
+        assert!(text.contains("dropped and never run"));
+        assert!(text.contains("Emit the closing tag exactly once per tool call."));
         assert!(text.contains(dialect::TEMPLATE));
     }
 }
