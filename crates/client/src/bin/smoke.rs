@@ -1,7 +1,7 @@
 //! End-to-end smoke test against the live DeepSeek API.
 //!
-//! Reads credentials from `../deepseek/.env` (`DEEPSEEK_EMAIL_0` /
-//! `DEEPSEEK_PASSWORD_0`) so no secrets live in this repo.
+//! Reads credentials from the project's git-ignored `.env` (`DEEPSEEK_EMAIL_0` /
+//! `DEEPSEEK_PASSWORD_0`) so no secrets are committed.
 //!
 //!     cargo run -p client --bin client-smoke
 
@@ -19,7 +19,7 @@ fn env_from(file: &Path, key: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
+    let env = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
     let email = env_from(&env, "DEEPSEEK_EMAIL_0").ok_or("DEEPSEEK_EMAIL_0 missing")?;
     let password = env_from(&env, "DEEPSEEK_PASSWORD_0").ok_or("DEEPSEEK_PASSWORD_0 missing")?;
 

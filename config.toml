@@ -3,7 +3,7 @@
 # Precedence: environment variables > this file > built-in defaults.
 # Every key is optional; delete a line to fall back to the default.
 #
-# Credentials are NOT here — they live in ../deepseek/.env or the environment
+# Credentials are NOT here — they live in this project's .env or the environment
 # (DEEPSEEK_EMAIL_<n> / DEEPSEEK_PASSWORD_<n> / DEEPSEEK_TOKEN_<n>), one per
 # account, numbered from 0.
 

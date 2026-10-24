@@ -141,7 +141,8 @@ fn env_from_dotenv(key: &str) -> Option<String> {
     if std::env::var("DEEPSEEK_NO_DOTENV").is_ok() {
         return None;
     }
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../deepseek/.env");
+    // The project's own `.env` (crates/proxy -> repo root).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
         .filter_map(|l| l.split_once('='))
@@ -157,7 +158,7 @@ fn env_val(key: &str) -> Option<String> {
 }
 
 /// Accounts from `DEEPSEEK_EMAIL_<i>`/`PASSWORD_<i>`/`TOKEN_<i>`, falling back to
-/// unindexed names and then `../deepseek/.env`.
+/// unindexed names and then the project's `.env`.
 pub fn env_accounts() -> Vec<pool::AccountSpec> {
     let mut out = Vec::new();
     for i in 0.. {
