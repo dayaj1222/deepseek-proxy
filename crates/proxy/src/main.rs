@@ -502,6 +502,11 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// UUID keeps one DeepSeek conversation across compaction), and only then a
 /// hash of the messages. The old message-only hash stranded a conversation on
 /// a fresh remote session every time the first message changed.
+/// The part of an email before the `@`, for log lines.
+fn short_account(email: &str) -> &str {
+    email.split('@').next().unwrap_or(email)
+}
+
 fn thread_key(headers: &HeaderMap, req: &ChatRequest) -> String {
     if let Some(v) = req
         .thread_id
@@ -1623,8 +1628,10 @@ async fn chat_completions(
         .with_param("model")
         .into_response();
     }
+    let bound = state.store.get_binding(&key).ok().flatten();
     tracing::info!(
         thread = %key,
+        account = %bound.as_deref().map_or("new", short_account),
         model = %model,
         stream = req.stream,
         messages = req.messages.len(),
@@ -2206,6 +2213,10 @@ async fn stream_response(live: LiveTurn) -> Response {
         // edited/alternate messages).
 
         let max = turn_settings.tool_repair_max_retries;
+        // `begin_repair` clears the pending failures, so a repair that dies on
+        // the wire must be remembered separately: otherwise the loop exits with
+        // nothing pending and the turn is delivered as an empty success.
+        let mut repair_aborted = false;
         for attempt in 1..=max {
             if tx.is_closed() {
                 return;
@@ -2254,6 +2265,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!("thread {key}: repair completion failed: {e}");
+                    repair_aborted = true;
                     break;
                 }
             };
@@ -2261,6 +2273,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Some(Ok(text)) => text,
                 Some(Err(e)) => {
                     tracing::error!("thread {key}: repair body failed: {e}");
+                    repair_aborted = true;
                     break;
                 }
                 None => return,
@@ -2293,7 +2306,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         }
 
         // Python raises here rather than returning a turn with no usable calls.
-        if recovery.has_pending() {
+        if recovery.has_pending() || repair_aborted {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
             fail_turn(
                 &state,
@@ -2359,7 +2372,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         let turn_usage = usage_block(prompt_tokens, &prose, &filter.calls);
         tracing::info!(
             thread = %key,
-            account = %account,
+            account = %short_account(&account),
             status = 200,
             finish_reason,
             tool_calls = filter.calls.len(),
