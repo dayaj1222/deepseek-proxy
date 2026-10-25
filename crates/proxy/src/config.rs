@@ -6,6 +6,7 @@
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// File-backed configuration. Every field is optional; unset means "use the
 /// default", so a partial `config.toml` is valid.
@@ -61,6 +62,14 @@ pub struct DeepseekSection {
     /// Send the web-search flag. Off by default: thinking+search is throttled
     /// hard by the backend and turns transient limits into hard failures.
     pub search: bool,
+    /// Account indices to leave out of the pool, e.g. `disabled_accounts = [1, 2]`.
+    ///
+    /// A disabled index is never turned into an account: its
+    /// `DEEPSEEK_EMAIL_<i>` / `DEEPSEEK_PASSWORD_<i>` / `DEEPSEEK_TOKEN_<i>`
+    /// stay in `.env` but are skipped, so no login is attempted and no thread
+    /// is ever bound to it. Indices come from the `_<i>` suffix, not from the
+    /// order accounts appear in the file.
+    pub disabled_accounts: Vec<usize>,
 }
 
 impl Default for DeepseekSection {
@@ -69,6 +78,7 @@ impl Default for DeepseekSection {
             model: "deepseek-chat".into(),
             thinking: false,
             search: false,
+            disabled_accounts: Vec::new(),
         }
     }
 }
@@ -149,6 +159,7 @@ pub struct Config {
     pub model: String,
     pub thinking: bool,
     pub search: bool,
+    pub disabled_accounts: Vec<usize>,
     pub request_delay_secs: f64,
     pub queue_limit: usize,
     pub queue_timeout_secs: f64,
@@ -190,6 +201,8 @@ impl Config {
             model: env_str("MODEL_NAME").unwrap_or(file.deepseek.model),
             thinking: env_flag("THINKING_ENABLED", file.deepseek.thinking),
             search: env_flag("SEARCH_ENABLED", file.deepseek.search),
+            disabled_accounts: env_indices("DEEPSEEK_DISABLED_ACCOUNTS")
+                .unwrap_or_else(|| file.deepseek.disabled_accounts.clone()),
             request_delay_secs: env_num("REQUEST_DELAY")
                 .unwrap_or(file.limits.request_delay_secs)
                 .max(0.0),
@@ -269,6 +282,36 @@ fn env_num<T: std::str::FromStr>(key: &str) -> Option<T> {
     env_str(key).and_then(|v| v.trim().parse().ok())
 }
 
+/// Parse a comma/space separated index list: `"1,2,3"`, `"1 2 3"`, `"[1,2]"`.
+///
+/// Returns `None` when the variable is unset so the caller can fall back to the
+/// config file; an empty value yields an empty list (explicitly "none").
+fn env_indices(key: &str) -> Option<Vec<usize>> {
+    let raw = env_str(key)?;
+    Some(
+        raw.trim_matches(|c| c == '[' || c == ']')
+            .split([',', ' ', ';'])
+            .filter_map(|part| part.trim().parse::<usize>().ok())
+            .collect(),
+    )
+}
+
+/// Account indices disabled by configuration, cached for the process lifetime.
+///
+/// `env_accounts()` runs on startup, on `accounts list`, and on every config
+/// reload; re-reading `config.toml` each time would be wasteful and could
+/// disagree with itself mid-run. A config that fails to load means "nothing
+/// disabled" here, because the caller that actually needs the config reports
+/// the error itself.
+pub fn disabled_accounts() -> &'static [usize] {
+    static CACHE: OnceLock<Vec<usize>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Config::load()
+            .map(|cfg| cfg.disabled_accounts)
+            .unwrap_or_default()
+    })
+}
+
 fn env_flag(key: &str, default: bool) -> bool {
     match env_str(key) {
         Some(v) => matches!(
@@ -312,6 +355,16 @@ mod tests {
             anchor_path("config.toml", "deepseek-rs.db"),
             PathBuf::from("deepseek-rs.db")
         );
+    }
+
+    #[test]
+    fn disabled_accounts_parses_from_toml() {
+        let f: FileConfig =
+            toml::from_str("[deepseek]\ndisabled_accounts = [1, 2, 3]\n").unwrap();
+        assert_eq!(f.deepseek.disabled_accounts, vec![1, 2, 3]);
+        // Omitted means nothing disabled, never "disable everything".
+        let empty: FileConfig = toml::from_str("").unwrap();
+        assert!(empty.deepseek.disabled_accounts.is_empty());
     }
 
     #[test]

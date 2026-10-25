@@ -28,10 +28,27 @@ model = "deepseek-chat"
 # Default thinking flag for requests that do not specify one.
 thinking = false
 
+# Account indices to leave out of the pool, e.g. [1, 2]. Their credentials
+# stay in .env; they are never loaded, logged in, or routed to.
+disabled_accounts = [1, 2, 3]
+
 # Send the web-search flag. Leave this false unless you have a reason:
 # thinking+search is throttled hard by the backend, and a mid-stream limit
 # turns into a failed turn rather than a retry.
 search = false
+
+# Account indices to leave out of the pool, matching the index in
+# DEEPSEEK_EMAIL_<i> / DEEPSEEK_PASSWORD_<i> / DEEPSEEK_TOKEN_<i>.
+#
+# A disabled index is never loaded: no login is attempted, it never enters the
+# pool, and no thread is ever bound to it. Its credentials stay in `.env`, so
+# re-enabling is a one-line change and nothing has to be re-entered. Disabling
+# index 1 does not disable index 2 — later indices are still scanned.
+#
+# Environment form (comma-separated) overrides this list:
+#   DEEPSEEK_DISABLED_ACCOUNTS="1,2"
+#
+# disabled_accounts = [1, 2]
 
 [limits]
 # Seconds to wait after a request finishes before starting the next one on
@@ -88,6 +105,3 @@ rate_limit_backoff_secs = 10.0
 # Mirrors the Python proxy's TOOL_REPAIR_MAX_RETRIES.
 tool_repair_max_retries = 5
 
-# The tool-call wire format is re-asserted on EVERY turn, appended to the end
-# of the outgoing prompt. The system prompt that teaches the format is only
-# sent on the first turn, so long threads drift without this. Not tunable.
