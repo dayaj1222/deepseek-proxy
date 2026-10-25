@@ -1948,6 +1948,11 @@ async fn stream_response(live: LiveTurn) -> Response {
                     return;
                 }
             };
+            // `pump` returns when the response body is dropped. Do not treat
+            // that cancellation as a completed reply and start repair work.
+            if tx.is_closed() {
+                return;
+            }
             drop(slot);
 
             // Advance the cursor only on a turn that actually succeeded.
@@ -2270,6 +2275,9 @@ async fn stream_response(live: LiveTurn) -> Response {
 
         let max = turn_settings.tool_repair_max_retries;
         for attempt in 1..=max {
+            if tx.is_closed() {
+                return;
+            }
             if !recovery.has_pending() {
                 break;
             }
@@ -2301,18 +2309,29 @@ async fn stream_response(live: LiveTurn) -> Response {
             // that works costs one turn, a repair that fails costs the turn
             // plus every retry after it.
             let body = completion_body(&turn_state, &prompt, true, false, &[], &body.model_type);
-            let raw = match completion_with_retry(&state, &key, &body).await {
-                Ok((resp, _slot)) => match resp.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::error!("thread {key}: repair body failed: {e}");
-                        break;
-                    }
-                },
+            let completion = match until_client_disconnect(
+                &tx,
+                completion_with_retry(&state, &key, &body),
+            )
+            .await
+            {
+                Some(result) => result,
+                None => return,
+            };
+            let (resp, _slot) = match completion {
+                Ok(v) => v,
                 Err(e) => {
                     tracing::error!("thread {key}: repair completion failed: {e}");
                     break;
                 }
+            };
+            let raw = match until_client_disconnect(&tx, resp.text()).await {
+                Some(Ok(text)) => text,
+                Some(Err(e)) => {
+                    tracing::error!("thread {key}: repair body failed: {e}");
+                    break;
+                }
+                None => return,
             };
             let (_, repair_text, repair_mid) = route_all(&raw);
             // The correction answer is now the newest upstream message, so it —
@@ -2450,6 +2469,18 @@ async fn stream_response(live: LiveTurn) -> Response {
         return Sse::new(sse::sse_stream(rx)).into_response();
     }
     collect_completion(rx).await
+}
+
+/// Cancel turn work as soon as the client drops the response body.
+async fn until_client_disconnect<F: std::future::Future>(
+    tx: &sse::ChunkSender,
+    future: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        _ = tx.closed() => None,
+        result = future => Some(result),
+    }
 }
 
 /// Drain a turn into one `chat.completion` body.
@@ -3004,6 +3035,35 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disconnect_cancels_inflight_repair_future() {
+        use std::sync::atomic::AtomicBool;
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = Arc::clone(&dropped);
+        let repair = async move {
+            let _drop_flag = DropFlag(drop_flag);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        };
+        let waiter = tokio::spawn(async move { until_client_disconnect(&tx, repair).await });
+
+        started_rx.await.unwrap();
+        drop(rx);
+
+        assert_eq!(waiter.await.unwrap(), None);
+        assert!(dropped.load(Ordering::Relaxed), "repair future was not cancelled");
+    }
 
     fn msg_with(role: &str, content: &str) -> Msg {
         Msg {
