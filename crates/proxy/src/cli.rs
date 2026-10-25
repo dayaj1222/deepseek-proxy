@@ -231,6 +231,16 @@ pub fn load_accounts(store: &store::Store) -> Vec<pool::AccountSpec> {
         if known.contains(&row.email) {
             continue;
         }
+        // Two independent switches: the `disabled` flag set by the CLI, and the
+        // `disabled_accounts` list in config. Either one keeps it out of the pool.
+        if row.disabled {
+            tracing::debug!(
+                number,
+                account = %row.email,
+                "account disabled by CLI, skipping"
+            );
+            continue;
+        }
         if disabled.contains(number, &row.email) {
             tracing::debug!(
                 number,
@@ -925,10 +935,11 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 } else {
                     "password"
                 };
-                let mark = if disabled.contains(*number, &a.email) {
-                    "  (disabled)"
-                } else {
-                    ""
+                let mark = match (a.disabled, disabled.contains(*number, &a.email)) {
+                    (true, true) => "  (disabled: cli+config)",
+                    (true, false) => "  (disabled)",
+                    (false, true) => "  (disabled: config)",
+                    (false, false) => "",
                 };
                 println!(
                     "{:<4} {:<32} {:<8} {:<9}  {}{}",
@@ -1013,6 +1024,48 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
             }
             Ok(0)
         }
+        "disable" | "enable" => {
+            let off = sub == "disable";
+            let Some(target) = args.get(3) else {
+                eprintln!("usage: deepseek-rs accounts {sub} <number|email>");
+                return Ok(2);
+            };
+            // Accept the `#` number from `accounts list` as well as the email,
+            // so the workflow is: list, copy the number, disable it.
+            let email = match target.parse::<usize>() {
+                Ok(number) => match db_accounts_numbered(&store)?
+                    .into_iter()
+                    .find(|(n, _)| *n == number)
+                {
+                    Some((_, row)) => row.email,
+                    None => {
+                        let total = store.accounts()?.len();
+                        eprintln!(
+                            "no database account #{number} (there {} {total})",
+                            if total == 1 { "is" } else { "are" }
+                        );
+                        return Ok(1);
+                    }
+                },
+                Err(_) => target.clone(),
+            };
+            match store.set_account_disabled(&email, off)? {
+                Some(_) => {
+                    println!("{email} {}", if off { "disabled" } else { "enabled" });
+                    println!(
+                        "applies to the next request; `deepseek-rs reload` rebuilds the pool now"
+                    );
+                    Ok(0)
+                }
+                None => {
+                    eprintln!("no database account {email}");
+                    eprintln!(
+                        "only database accounts can be toggled; env accounts are disabled in config.toml"
+                    );
+                    Ok(1)
+                }
+            }
+        }
         "rm" | "remove" | "delete" => {
             let Some(email) = args.get(3) else {
                 eprintln!("usage: deepseek-rs accounts rm <email>");
@@ -1032,7 +1085,7 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
         }
         other => {
             eprintln!("unknown accounts subcommand '{other}'");
-            eprintln!("usage: deepseek-rs accounts [list|add|rm]");
+            eprintln!("usage: deepseek-rs accounts [list|add|rm|disable|enable]");
             Ok(2)
         }
     }
@@ -1044,7 +1097,9 @@ fn keys(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
 
     // `key <name> <key>` is the original spelling of `keys add`.
     let (sub, offset) = match sub {
-        "" | "list" | "ls" | "add" | "rm" | "remove" | "delete" => (sub, 3),
+        "" | "list" | "ls" | "add" | "rm" | "remove" | "delete" | "disable" | "enable" => {
+            (sub, 3)
+        }
         _ => ("add", 2),
     };
 
