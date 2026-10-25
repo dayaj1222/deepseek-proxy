@@ -42,6 +42,8 @@ pub struct AccountRow {
     pub password: String,
     pub token: Option<String>,
     pub created_at: i64,
+    /// Switched off with `accounts disable`; never loaded into the pool.
+    pub disabled: bool,
 }
 
 /// One registered API key (only its hash is stored).
@@ -128,7 +130,11 @@ impl Store {
                  email      TEXT PRIMARY KEY,
                  password   TEXT NOT NULL DEFAULT '',
                  token      TEXT,
-                 created_at INTEGER NOT NULL
+                 created_at INTEGER NOT NULL,
+                 -- Set by `accounts disable`; kept in the DB rather than in
+                 -- config.toml so the CLI never rewrites a hand-edited file
+                 -- and so the flag survives a config reload.
+                 disabled   INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         // Columns added after the first release. `CREATE TABLE IF NOT EXISTS`
@@ -136,6 +142,10 @@ impl Store {
         // statement; the error means "already there" and is expected.
         let _ = conn.execute(
             "ALTER TABLE thread_bindings ADD COLUMN throttled_at INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
             [],
         );
         Ok(())
@@ -263,7 +273,7 @@ impl Store {
     pub fn accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT email, password, token, created_at FROM accounts
+            "SELECT email, password, token, created_at, disabled FROM accounts
              ORDER BY created_at, email",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -272,6 +282,7 @@ impl Store {
                 password: r.get(1)?,
                 token: r.get(2)?,
                 created_at: r.get(3)?,
+                disabled: r.get::<_, i64>(4)? != 0,
             })
         })?;
         let mut out = Vec::new();
@@ -300,6 +311,33 @@ impl Store {
             params![email, password, token],
         )?;
         Ok(())
+    }
+
+    /// Switch an account off or on. Returns `None` when no such account exists,
+    /// so the CLI can report an unknown email instead of silently doing nothing.
+    pub fn set_account_disabled(
+        &self,
+        email: &str,
+        disabled: bool,
+    ) -> Result<Option<bool>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n = conn.execute(
+            "UPDATE accounts SET disabled = ?2 WHERE email = ?1",
+            params![email, i64::from(disabled)],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        // A disabled account must not keep a cached login token: leaving it
+        // behind would let a re-enable skip the login round trip and resume on
+        // a token that may have expired while the account sat out.
+        if disabled {
+            conn.execute(
+                "DELETE FROM account_tokens WHERE email = ?1",
+                params![email],
+            )?;
+        }
+        Ok(Some(disabled))
     }
 
     /// Remove an account and any token cached for it. True when a row was deleted.
@@ -457,6 +495,30 @@ mod tests {
         // A rejected token is dropped so the next start logs in again.
         s.forget_token("a@b").unwrap();
         assert_eq!(s.get_token("a@b").unwrap(), None);
+    }
+
+    #[test]
+    fn account_disabled_flag_roundtrips_and_unknown_email_is_reported() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_account("a@b", "pw", None).unwrap();
+        s.upsert_account("c@d", "pw", None).unwrap();
+        assert!(s.accounts().unwrap().iter().all(|a| !a.disabled));
+
+        assert_eq!(s.set_account_disabled("a@b", true).unwrap(), Some(true));
+        let rows = s.accounts().unwrap();
+        assert!(rows.iter().find(|a| a.email == "a@b").unwrap().disabled);
+        assert!(!rows.iter().find(|a| a.email == "c@d").unwrap().disabled);
+
+        // Disabling drops any cached login token so a re-enable logs in again.
+        s.save_token("a@b", "tok").unwrap();
+        s.set_account_disabled("a@b", true).unwrap();
+        assert_eq!(s.get_token("a@b").unwrap(), None);
+
+        assert_eq!(s.set_account_disabled("a@b", false).unwrap(), Some(false));
+        assert!(!s.accounts().unwrap().iter().any(|a| a.disabled));
+
+        // An unknown email is `None`, not a silent no-op.
+        assert_eq!(s.set_account_disabled("nope@x", true).unwrap(), None);
     }
 
     #[test]
