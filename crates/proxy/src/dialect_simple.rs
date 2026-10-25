@@ -32,7 +32,7 @@ pub fn tools_block(tools: &[Value]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, and keep the JSON valid. You may emit several complete blocks back to back only for short, independent, read-only calls; otherwise emit one call per response and wait for its result. Otherwise answer normally. The DSML dialect is ABSOLUTELY FORBIDDEN: never write any tag containing the letters DSML, never use the full-width bars `｜｜`, and never use XML-style wrappers such as a calls wrapper, tool_calls, invoke or parameter, in any spelling. That syntax will not run and will be rejected. The `<tool>` marker is the only tool-call syntax, with no exceptions.\n\nRules:\n1. Do not wrap the call in a code fence.\n2. Use only the parameters in the tool's schema and never invent values.\n3. After a tool result arrives, continue the task; do not repeat the same call.\n4. If no tool fits, answer directly without a call.\n\nAvailable tools:\n",
+        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, and keep the JSON valid. You may emit several complete blocks back to back only for short, independent, read-only calls; otherwise emit one call per response and wait for its result. Otherwise answer normally. The DSML dialect is ABSOLUTELY FORBIDDEN: never write these tags: `<｜｜DSML｜｜ calls>`, `<｜｜DSML｜｜ invoke name=\"...\">`, `<｜｜DSML｜｜ parameter name=\"...\">` and their closing forms `</｜｜DSML｜｜ parameter>`, `</｜｜DSML｜｜ invoke>`, `</｜｜DSML｜｜ calls>`; never write any other tag containing the letters DSML or the full-width bars `｜｜`; never use XML-style wrappers such as a calls wrapper, tool_calls, invoke or parameter, in any spelling. That syntax will not run and will be rejected. The `<tool>` marker is the only tool-call syntax, with no exceptions.\n\nRules:\n1. Do not wrap the call in a code fence.\n2. Use only the parameters in the tool's schema and never invent values.\n3. After a tool result arrives, continue the task; do not repeat the same call.\n4. If no tool fits, answer directly without a call.\n\nAvailable tools:\n",
     );
     for tool in tools {
         if let Some(function) = tool.get("function") {
@@ -44,7 +44,7 @@ pub fn tools_block(tools: &[Value]) -> String {
 }
 
 pub fn reminder() -> String {
-    "Tool-call reminder: to call a tool, write `<tool>` followed by one JSON object with `name` and `arguments`, then `</tool>`; keep the JSON valid. Batch only short, independent, read-only calls. ABSOLUTELY FORBIDDEN: the DSML dialect. Never write any tag containing the letters DSML, never use the full-width bars `｜｜`, and never write a calls wrapper, an invoke tag, a parameter tag or a tool_calls block, in any spelling, with or without spaces. That syntax is NOT understood here: it will not run, it will be rejected, and you will have to redo the call. If you feel pulled toward it, stop and write `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>` instead. The `<tool>` marker is the ONLY tool-call syntax, with no exceptions.".into()
+    "Tool-call reminder: to call a tool, write `<tool>` followed by one JSON object with `name` and `arguments`, then `</tool>`; keep the JSON valid. Batch only short, independent, read-only calls. ABSOLUTELY FORBIDDEN: the DSML dialect. Never write these tags: `<｜｜DSML｜｜ calls>`, `<｜｜DSML｜｜ invoke name=\"...\">`, `<｜｜DSML｜｜ parameter name=\"...\">` and their closing forms `</｜｜DSML｜｜ parameter>`, `</｜｜DSML｜｜ invoke>`, `</｜｜DSML｜｜ calls>`. Never write any other tag containing the letters DSML or the full-width bars `｜｜`, and never write a calls wrapper, an invoke tag, a parameter tag or a tool_calls block, in any spelling, with or without spaces. That syntax is NOT understood here: it will not run, it will be rejected, and you will have to redo the call. If you feel pulled toward it, stop and write `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>` instead. The `<tool>` marker is the ONLY tool-call syntax, with no exceptions.".into()
 }
 
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
@@ -292,6 +292,8 @@ mod tests {
         // because the backend tends to fall back to DSML on its own.
         assert!(tools_block(&tools).contains("ABSOLUTELY FORBIDDEN"));
         assert!(reminder().contains("ABSOLUTELY FORBIDDEN: the DSML dialect"));
+        assert!(reminder().contains("<｜｜DSML｜｜ invoke name="));
+        assert!(tools_block(&tools).contains("</｜｜DSML｜｜ calls>"));
         assert!(reminder().contains("tool_calls block"));
     }
 
