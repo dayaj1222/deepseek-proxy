@@ -159,7 +159,12 @@ fn env_val(key: &str) -> Option<String> {
 
 /// Accounts from `DEEPSEEK_EMAIL_<i>`/`PASSWORD_<i>`/`TOKEN_<i>`, falling back to
 /// unindexed names and then the project's `.env`.
+///
+/// Indices listed in `[deepseek] disabled_accounts` (or the
+/// `DEEPSEEK_DISABLED_ACCOUNTS` environment variable) are skipped before their
+/// spec is built, so they never reach the pool.
 pub fn env_accounts() -> Vec<pool::AccountSpec> {
+    let disabled = config::disabled_accounts();
     let mut out = Vec::new();
     for i in 0.. {
         let email = env_val(&format!("DEEPSEEK_EMAIL_{i}"));
@@ -167,6 +172,15 @@ pub fn env_accounts() -> Vec<pool::AccountSpec> {
         let token = env_val(&format!("DEEPSEEK_TOKEN_{i}"));
         if token.is_none() && !(email.is_some() && password.is_some()) {
             break;
+        }
+        // `disabled_accounts` in config.toml / DEEPSEEK_DISABLED_ACCOUNTS.
+        // Skipped before the spec is built, so the index is never logged in,
+        // never enters the pool, and never receives a thread binding. The
+        // `continue` (not `break`) keeps later indices alive: disabling 1 must
+        // not silently disable 2.
+        if disabled.contains(&i) {
+            tracing::debug!(index = i, "account disabled by config, skipping");
+            continue;
         }
         out.push(pool::AccountSpec {
             email: email.unwrap_or_else(|| format!("token-account-{i}")),
@@ -851,7 +865,8 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
         "" | "list" | "ls" => {
             let env = env_accounts();
             let db = store.accounts()?;
-            if env.is_empty() && db.is_empty() {
+            let disabled = config::disabled_accounts();
+            if env.is_empty() && db.is_empty() && disabled.is_empty() {
                 println!("no accounts configured");
                 println!("add one:  deepseek-rs accounts add <email> <password>");
                 return Ok(0);
@@ -887,6 +902,15 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
                     db.len(),
                     env.len()
                 );
+            }
+            if !disabled.is_empty() {
+                let list = disabled
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("\ndisabled by config (index {list}): not loaded, not logged in");
+                println!("re-enable: remove from [deepseek] disabled_accounts in config.toml");
             }
             Ok(0)
         }
