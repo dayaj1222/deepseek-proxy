@@ -105,21 +105,20 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
         if !prose.is_empty() {
             out.push(ScanEvent::Text(std::mem::take(&mut prose)));
         }
-        let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
-        match values.next() {
-            Some(Ok(value)) => {
-                let tail = &body[values.byte_offset()..];
+        match parse_object(body) {
+            Some((value, used)) => {
+                let tail = &body[used..];
                 rest = tail.trim_start().strip_prefix(TOOL_CLOSE).unwrap_or(tail);
                 match call_from_value(&value) {
                     Ok(call) => out.push(ScanEvent::Tool(call)),
                     Err((name, reason)) => out.push(ScanEvent::Malformed(MalformedCall::new(
                         name,
-                        body[..body.len() - tail.len()].to_string(),
+                        body[..used].to_string(),
                         reason,
                     ))),
                 }
             }
-            _ => {
+            None => {
                 // Cut off or invalid: the bad region ends at the closing tag or
                 // the next marker, whichever comes first.
                 let end = [body.find(TOOL_CLOSE), body.find(TOOL_MARKER)]
@@ -144,6 +143,78 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
         out.push(ScanEvent::Text(prose));
     }
     out
+}
+
+/// First JSON object at the start of `body` and the bytes it occupies.
+///
+/// Strict JSON first. If that fails, the same object is retried after the
+/// slips models make when writing JSON by hand: raw control characters inside
+/// strings (tabs, newlines), exotic Unicode spaces and zero-width characters
+/// between tokens, and a trailing comma before a closer. Nothing inside a
+/// string changes meaning: a raw newline becomes the escape `\n`.
+fn parse_object(body: &str) -> Option<(Value, usize)> {
+    let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
+    if let Some(Ok(value)) = values.next() {
+        return Some((value, values.byte_offset()));
+    }
+    let (clean, used) = repair_object(body)?;
+    Some((serde_json::from_str(&clean).ok()?, used))
+}
+
+fn repair_object(body: &str) -> Option<(String, usize)> {
+    let mut out = String::with_capacity(body.len());
+    let (mut in_str, mut esc, mut depth) = (false, false, 0usize);
+    for (i, c) in body.char_indices() {
+        if in_str {
+            match c {
+                _ if esc => {
+                    esc = false;
+                    out.push(c);
+                }
+                '\\' => {
+                    esc = true;
+                    out.push(c);
+                }
+                '"' => {
+                    in_str = false;
+                    out.push(c);
+                }
+                c if c < ' ' => match c {
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c => out.push_str(&format!("\\u{:04x}", c as u32)),
+                },
+                c => out.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                depth += 1;
+                out.push(c);
+            }
+            '}' | ']' => {
+                let kept = out.trim_end().len();
+                if out[..kept].ends_with(',') {
+                    out.truncate(kept - 1);
+                }
+                out.push(c);
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((out, i + c.len_utf8()));
+                }
+            }
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' => {}
+            c if c.is_whitespace() && !c.is_ascii() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    None
 }
 
 /// Reasons are the `json_invoke` vocabulary, so `repair_schemas` re-sends the
@@ -482,5 +553,33 @@ mod tests {
         assert_eq!(calls[0].name, "bash");
         assert!(calls[0].json().unwrap()["command"].as_str().unwrap().contains("dbg4.mjs"));
         assert_eq!(prose, "But better: measure sim time.\n\n");
+    }
+
+    #[test]
+    fn edit_call_with_nested_edits_array_parses() {
+        let raw = r##"<tool>{"name":"edit","arguments":{"edits":[{"path":"/home/daya/Development/legal-graphrag/code/db.py","old":"    con.executescript(GRAPH_SCHEMA)","new":"    con.executescript(GRAPH_SCHEMA); con.executescript(GRAPH_FTS_SCHEMA)"}]}}</tool>"##;
+        let (_, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "events: {:?}", scan(raw));
+        assert_eq!(calls[0].json().unwrap()["edits"][0]["old"], "    con.executescript(GRAPH_SCHEMA)");
+    }
+
+    #[test]
+    fn hand_written_json_slips_are_repaired() {
+        // Raw tab and newline inside a string, an NBSP and a zero-width space
+        // between tokens, and a trailing comma.
+        let raw = "<tool>{\"name\":\u{a0}\"edit\",\u{200b}\"arguments\":{\"old\":\"a\n\tb\",\"n\":1,},}</tool> after";
+        let (prose, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "events: {:?}", scan(raw));
+        assert_eq!(calls[0].name, "edit");
+        assert_eq!(calls[0].json().unwrap()["old"], "a\n\tb");
+        assert_eq!(prose, " after");
+    }
+
+    #[test]
+    fn truncated_json_is_still_malformed() {
+        assert!(matches!(
+            scan("<tool>{\"name\":\"edit\",\"arguments\":{\"old\":\"a").pop(),
+            Some(ScanEvent::Malformed(m)) if m.name.as_deref() == Some("edit")
+        ));
     }
 }
