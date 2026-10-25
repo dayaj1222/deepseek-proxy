@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn one_marker_routes_json_call_and_strips_it_from_prose() {
+    fn accepts_optional_closing_tool_tag_after_call_json() {
         let raw = "Working. <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}</tool>";
         let (prose, calls) = parse_tool_calls(raw);
         assert_eq!(prose, "Working. ");
@@ -187,6 +187,10 @@ mod tests {
 
     #[test]
     fn trailing_text_is_malformed_and_streamed_tag_is_held() {
+        assert!(matches!(
+            scan("<tool>{\"name\":\"x\",\"arguments\":{}}</tool> extra").last(),
+            Some(ScanEvent::Malformed(_))
+        ));
         assert!(matches!(
             scan("<tool>{\"name\":\"x\",\"arguments\":{}}oops").last(),
             Some(ScanEvent::Malformed(_))
