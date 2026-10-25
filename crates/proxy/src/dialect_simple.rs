@@ -1,19 +1,22 @@
-//! Minimal tool wire format: one `<tool>` marker followed by one JSON call.
+//! Minimal tool wire format: one `<tool>` marker, one JSON call, then `</tool>`.
 //!
-//! The marker is a separator, not an XML element. Everything after it must be
-//! the call JSON; there is no closing tag or trailing assistant text.
+//! The marker is a separator, not an XML element. Everything between the marker
+//! and the closing tag must be the call JSON; there is no trailing assistant
+//! text. The closing tag is what terminates the call, so the parser accepts a
+//! missing one only for compatibility with models that omit it.
 
 use serde_json::Value;
 
 use crate::dialect::{MalformedCall, ScanEvent, ToolCall};
 
 pub const TOOL_MARKER: &str = "<tool>";
+pub const TOOL_CLOSE: &str = "</tool>";
 
 pub fn render_tool_call(call: &ToolCall) -> String {
     let args = serde_json::from_str::<Value>(&call.arguments)
         .unwrap_or_else(|_| Value::String(call.arguments.clone()));
     format!(
-        "{TOOL_MARKER}{{\"name\":{},\"arguments\":{}}}",
+        "{TOOL_MARKER}{{\"name\":{},\"arguments\":{}}}{TOOL_CLOSE}",
         serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".into()),
         args
     )
@@ -24,7 +27,7 @@ pub fn tools_block(tools: &[Value]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "Tool calls use one separator and one JSON object. For a tool call, output `<tool>` followed by `{\"name\":\"TOOL_NAME\",\"arguments\":{...}}`, with no text after the JSON. Output at most one tool call per response. Otherwise answer normally.\n\nAvailable tools:\n",
+        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, with no text after the closing tag. Output at most one tool call per response. Otherwise answer normally.\n\nAvailable tools:\n",
     );
     for tool in tools {
         if let Some(function) = tool.get("function") {
@@ -36,7 +39,7 @@ pub fn tools_block(tools: &[Value]) -> String {
 }
 
 pub fn reminder() -> String {
-    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`; put no text after it. Do not add a closing tag.".into()
+    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`, then close it with `</tool>`; put no text after the closing tag. Emit at most one such block.".into()
 }
 
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
@@ -161,14 +164,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_single_tag_and_json_object_without_a_closing_tag() {
+    fn renders_tag_json_object_and_closing_tag() {
         assert_eq!(
             render_tool_call(&ToolCall {
                 name: "bash".into(),
                 arguments: "{\"command\":\"echo hi\"}".into(),
             }),
-            "<tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}"
+            "<tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}</tool>"
         );
+    }
+
+    #[test]
+    fn teaches_and_reminds_the_closing_tag() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "bash", "description": "run", "parameters": {}}
+        })];
+        assert!(tools_block(&tools).contains("</tool>`"));
+        assert!(reminder().contains("</tool>"));
+        assert!(!reminder().contains("Do not add a closing tag"));
     }
 
     #[test]

@@ -26,6 +26,11 @@ pub const ASSISTANT_OPEN: &str = "<｜Assistant｜>";
 /// The DSML sentinel: exactly `｜DSML｜`.
 pub const DSML: &str = "｜DSML｜";
 
+/// The taught wire form: the doubled sentinel
+/// `\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}` with a short `calls` wrapper.
+/// Inbound parsing folds it back to [`DSML`], so both spellings parse; this
+/// one is what the prompt teaches and what history replay emits.
+pub const DSML_TEACH: &str = "\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}";
 /// Thinking region markers from the V4 template. Built with `concat!` so the
 /// source cannot be mangled by tooling that treats angle-bracket text as HTML.
 pub const THINK_OPEN: &str = concat!("<", "think", ">");
@@ -44,7 +49,11 @@ fn close(tag: &str) -> String {
 
 /// Normalise line endings.
 fn normalize(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    // Fold the doubled sentinel we teach (and any drifted mixture of the two
+    // spellings) back to the canonical single sentinel every parser path
+    // below matches on. Longest-first, so a doubled tag never half-matches.
+    let folded = text.replace(DSML_TEACH, DSML);
+    folded.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +116,12 @@ pub fn tools_block(tools: &[Value]) -> String {
     out.push_str("### Available Tool Schemas\n\n");
     out.push_str(&schemas);
     out.push_str("\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n");
-    out
+    // Teach the doubled sentinel and the short `calls` wrapper. Parsing
+    // accepts both this and the single-sentinel `tool_calls` form.
+    let out = out
+        .replace(&open("tool_calls"), &open("calls"))
+        .replace(&close("tool_calls"), &close("calls"));
+    out.replace(DSML, DSML_TEACH)
 }
 
 /// One parameter line. Strings go raw (`string="true"`); everything else is
@@ -152,13 +166,13 @@ pub fn render_tool_call(call: &ToolCall) -> String {
 
 fn calls_block(calls: &[ToolCall]) -> String {
     let mut out = String::new();
-    out.push_str(&open("tool_calls"));
+    out.push_str(&open("calls"));
     out.push('\n');
     for call in calls {
         out.push_str(&render_tool_call(call));
         out.push('\n');
     }
-    out.push_str(&close("tool_calls"));
+    out.push_str(&close("calls"));
     out
 }
 
@@ -194,7 +208,10 @@ pub fn history_tool_calls(calls: &[Value]) -> Option<String> {
     if parsed.is_empty() {
         None
     } else {
-        Some(format!("\n\n{}", calls_block(&parsed)))
+        Some(format!(
+            "\n\n{}",
+            calls_block(&parsed).replace(DSML, DSML_TEACH)
+        ))
     }
 }
 
@@ -223,7 +240,10 @@ pub fn reminder() -> String {
     out.push_str("for a plain string value, string=\"false\" for a number, boolean, null, ");
     out.push_str("array or object written as JSON. A missing string= attribute makes the ");
     out.push_str("value's type a guess.\n");
-    out
+    let out = out
+        .replace(&open("tool_calls"), &open("calls"))
+        .replace(&close("tool_calls"), &close("calls"));
+    out.replace(DSML, DSML_TEACH)
 }
 
 /// Generation prompt tail: `<｜Assistant｜>` plus the think open/close token.
@@ -485,6 +505,10 @@ fn parse_events(text: &str) -> Vec<ScanEvent> {
     let close_param = close("parameter");
     let wrapper_inner = format!("{DSML}tool_calls");
     let wrapper_close_inner = format!("/{DSML}tool_calls");
+    // The taught short wrapper (`calls`). Both wrappers are structural noise
+    // and must never surface as prose, whichever one the model emits.
+    let calls_inner = format!("{DSML}calls");
+    let calls_close_inner = format!("/{DSML}calls");
 
     while i < normalized.len() {
         let Some(rel) = normalized[i..].find('<') else {
@@ -501,7 +525,11 @@ fn parse_events(text: &str) -> Vec<ScanEvent> {
         let inner = &normalized[start + 1..gt];
         let after = &normalized[gt + 1..];
 
-        if inner == wrapper_inner || inner == wrapper_close_inner {
+        if inner == wrapper_inner
+            || inner == wrapper_close_inner
+            || inner == calls_inner
+            || inner == calls_close_inner
+        {
             i = gt + 1;
             continue;
         }
@@ -692,12 +720,14 @@ impl DsmlStreamFilter {
 
     fn next_step(&self) -> StreamStep {
         let open_wrapper = open("tool_calls");
+        let open_calls = open("calls");
         let close_wrapper = close("tool_calls");
+        let close_calls = close("calls");
         let open_invoke = open("invoke ");
         let close_invoke = close("invoke");
         let close_param = close("parameter");
 
-        let found = [open_wrapper.as_str(), open_invoke.as_str()]
+        let found = [open_wrapper.as_str(), open_calls.as_str(), open_invoke.as_str()]
             .iter()
             .filter_map(|needle| self.pending.find(needle).map(|at| (at, *needle)))
             .min_by_key(|(at, _)| *at);
@@ -723,7 +753,7 @@ impl DsmlStreamFilter {
             };
         };
 
-        if needle == open_wrapper.as_str() {
+        if needle == open_wrapper.as_str() || needle == open_calls.as_str() {
             return StreamStep::Consume {
                 text_len: at,
                 consumed: at + needle.len(),
@@ -765,7 +795,8 @@ impl DsmlStreamFilter {
         let mut consumed = at + needle.len() + tag_end + 1 + close_rel + close_invoke.len();
         let mut stray = stray_closer_len(&self.pending[consumed..], &close_invoke);
         consumed += stray;
-        stray = stray_closer_len(&self.pending[consumed..], &close_wrapper);
+        stray = stray_closer_len(&self.pending[consumed..], &close_calls)
+            + stray_closer_len(&self.pending[consumed..], &close_wrapper);
         consumed += stray;
         let _ = &mut event;
         StreamStep::Consume {
@@ -1006,8 +1037,8 @@ mod tests {
     #[test]
     fn reminder_restates_the_invoke_shape_and_the_string_attribute() {
         let r = reminder();
-        assert!(r.contains(&open("invoke ")));
-        assert!(r.contains(&open("parameter ")));
+        assert!(r.contains(&open("invoke ").replace(DSML, DSML_TEACH)));
+        assert!(r.contains(&open("parameter ").replace(DSML, DSML_TEACH)));
         assert!(r.contains("string="));
     }
 
@@ -1109,7 +1140,8 @@ mod tests {
         assert!(text.starts_with(ASSISTANT_OPEN));
         assert!(text.contains(THINK_CLOSE));
         assert!(text.contains("helping"));
-        assert!(text.contains(&open("tool_calls")));
+        assert!(text.contains(DSML_TEACH));
+        assert!(text.contains(&open("calls").replace(DSML, DSML_TEACH)));
         assert!(text.ends_with(EOS));
     }
 
@@ -1176,5 +1208,35 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ScanEvent::Malformed(m) if m.reason == "unterminated_block")));
+    }
+
+    #[test]
+    fn doubled_sentinel_and_short_wrapper_are_accepted() {
+        let text = format!(
+            "<{t}calls>\n<{t}invoke name=\"shell\">\n<{t}parameter name=\"arguments\" string=\"false\">{{\"command\":\"ls\"}}</{t}parameter>\n</{t}invoke>\n</{t}calls>",
+            t = DSML_TEACH
+        );
+        let (prose, calls) = parse_tool_calls(&text);
+        assert!(prose.trim().is_empty(), "DSML leaked as prose: {prose:?}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].json().unwrap(),
+            json!({"arguments": {"command": "ls"}})
+        );
+    }
+
+    #[test]
+    fn taught_prompt_uses_the_doubled_sentinel_and_short_wrapper() {
+        let block = tools_block(&[json!({
+            "type": "function",
+            "function": {"name": "bash", "parameters": {}}
+        })]);
+        assert!(block.contains(DSML_TEACH), "block: {block}");
+        assert!(block.contains(&open("calls").replace(DSML, DSML_TEACH)));
+        assert!(!block.contains("tool_calls"), "block: {block}");
+        let r = reminder();
+        assert!(r.contains(DSML_TEACH), "reminder: {r}");
+        assert!(!r.contains("tool_calls"), "reminder: {r}");
     }
 }

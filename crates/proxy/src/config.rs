@@ -62,14 +62,16 @@ pub struct DeepseekSection {
     /// Send the web-search flag. Off by default: thinking+search is throttled
     /// hard by the backend and turns transient limits into hard failures.
     pub search: bool,
-    /// Account indices to leave out of the pool, e.g. `disabled_accounts = [1, 2]`.
+    /// Email addresses to leave out of the pool, e.g.
+    /// `disabled_accounts = ["a@b.com", "c@d.com"]`.
     ///
-    /// A disabled index is never turned into an account: its
-    /// `DEEPSEEK_EMAIL_<i>` / `DEEPSEEK_PASSWORD_<i>` / `DEEPSEEK_TOKEN_<i>`
-    /// stay in `.env` but are skipped, so no login is attempted and no thread
-    /// is ever bound to it. Indices come from the `_<i>` suffix, not from the
-    /// order accounts appear in the file.
-    pub disabled_accounts: Vec<usize>,
+    /// Email is the key because it is the one identifier every account has,
+    /// whether it came from `.env` (`DEEPSEEK_EMAIL_<i>`) or was added with
+    /// `deepseek-rs accounts add`. Matching is case-insensitive. A disabled
+    /// account is never turned into a spec: no login is attempted, it never
+    /// enters the pool, and no thread is ever bound to it. Its credentials
+    /// stay where they are, so re-enabling is a one-line config change.
+    pub disabled_accounts: Vec<DisabledAccount>,
 }
 
 impl Default for DeepseekSection {
@@ -159,7 +161,7 @@ pub struct Config {
     pub model: String,
     pub thinking: bool,
     pub search: bool,
-    pub disabled_accounts: Vec<usize>,
+    pub disabled_accounts: DisabledAccounts,
     pub request_delay_secs: f64,
     pub queue_limit: usize,
     pub queue_timeout_secs: f64,
@@ -201,8 +203,9 @@ impl Config {
             model: env_str("MODEL_NAME").unwrap_or(file.deepseek.model),
             thinking: env_flag("THINKING_ENABLED", file.deepseek.thinking),
             search: env_flag("SEARCH_ENABLED", file.deepseek.search),
-            disabled_accounts: env_indices("DEEPSEEK_DISABLED_ACCOUNTS")
-                .unwrap_or_else(|| file.deepseek.disabled_accounts.clone()),
+            disabled_accounts: env_str("DEEPSEEK_DISABLED_ACCOUNTS")
+                .map(|raw| DisabledAccounts::from_csv(&raw))
+                .unwrap_or_else(|| DisabledAccounts::from_entries(&file.deepseek.disabled_accounts)),
             request_delay_secs: env_num("REQUEST_DELAY")
                 .unwrap_or(file.limits.request_delay_secs)
                 .max(0.0),
@@ -282,29 +285,91 @@ fn env_num<T: std::str::FromStr>(key: &str) -> Option<T> {
     env_str(key).and_then(|v| v.trim().parse().ok())
 }
 
-/// Parse a comma/space separated index list: `"1,2,3"`, `"1 2 3"`, `"[1,2]"`.
-///
-/// Returns `None` when the variable is unset so the caller can fall back to the
-/// config file; an empty value yields an empty list (explicitly "none").
-fn env_indices(key: &str) -> Option<Vec<usize>> {
-    let raw = env_str(key)?;
-    Some(
-        raw.trim_matches(|c| c == '[' || c == ']')
-            .split([',', ' ', ';'])
-            .filter_map(|part| part.trim().parse::<usize>().ok())
-            .collect(),
-    )
+/// One `disabled_accounts` entry: a 1-based database number or an email.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DisabledAccount {
+    Number(usize),
+    Email(String),
 }
 
-/// Account indices disabled by configuration, cached for the process lifetime.
+/// Resolved `disabled_accounts`: database numbers plus email addresses.
 ///
-/// `env_accounts()` runs on startup, on `accounts list`, and on every config
+/// Numbers address database accounts (1-based, creation order); emails address
+/// any account, including one that only exists in `.env`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisabledAccounts {
+    pub numbers: Vec<usize>,
+    pub emails: Vec<String>,
+}
+
+impl DisabledAccounts {
+    pub fn is_empty(&self) -> bool {
+        self.numbers.is_empty() && self.emails.is_empty()
+    }
+
+    pub fn contains_number(&self, number: usize) -> bool {
+        self.numbers.contains(&number)
+    }
+
+    /// Case-insensitive: an email typed with different capitalisation must
+    /// still disable the account it names.
+    pub fn contains_email(&self, email: &str) -> bool {
+        let email = email.trim();
+        self.emails.iter().any(|e| e.eq_ignore_ascii_case(email))
+    }
+
+    /// Either kind of entry disables the account.
+    pub fn contains(&self, number: usize, email: &str) -> bool {
+        self.contains_number(number) || self.contains_email(email)
+    }
+
+    fn from_entries(entries: &[DisabledAccount]) -> Self {
+        let mut out = Self::default();
+        for entry in entries {
+            match entry {
+                DisabledAccount::Number(n) => out.numbers.push(*n),
+                DisabledAccount::Email(e) => {
+                    let e = e.trim().trim_matches('"');
+                    if !e.is_empty() {
+                        out.emails.push(e.to_string());
+                    }
+                }
+            }
+        }
+        out.numbers.sort_unstable();
+        out.numbers.dedup();
+        out.emails.sort_unstable();
+        out.emails.dedup();
+        out
+    }
+
+    /// `"1,2"`, `"[1, 2]"`, `"a@b.com,c@d.com"`, or a mixture: anything that
+    /// parses as a number is a database number, everything else an email.
+    fn from_csv(raw: &str) -> Self {
+        let entries: Vec<DisabledAccount> = raw
+            .trim_matches(|c| c == '[' || c == ']')
+            .split([',', ' ', ';'])
+            .map(|t| t.trim().trim_matches('"'))
+            .filter(|t| !t.is_empty())
+            .map(|token| match token.parse::<usize>() {
+                Ok(n) => DisabledAccount::Number(n),
+                Err(_) => DisabledAccount::Email(token.to_string()),
+            })
+            .collect();
+        Self::from_entries(&entries)
+    }
+}
+
+/// Accounts disabled by configuration, cached for the process lifetime.
+///
+/// `load_accounts()` runs on startup, on `accounts list`, and on every config
 /// reload; re-reading `config.toml` each time would be wasteful and could
 /// disagree with itself mid-run. A config that fails to load means "nothing
 /// disabled" here, because the caller that actually needs the config reports
 /// the error itself.
-pub fn disabled_accounts() -> &'static [usize] {
-    static CACHE: OnceLock<Vec<usize>> = OnceLock::new();
+pub fn disabled_accounts() -> &'static DisabledAccounts {
+    static CACHE: OnceLock<DisabledAccounts> = OnceLock::new();
     CACHE.get_or_init(|| {
         Config::load()
             .map(|cfg| cfg.disabled_accounts)
@@ -358,13 +423,31 @@ mod tests {
     }
 
     #[test]
-    fn disabled_accounts_parses_from_toml() {
-        let f: FileConfig =
-            toml::from_str("[deepseek]\ndisabled_accounts = [1, 2, 3]\n").unwrap();
-        assert_eq!(f.deepseek.disabled_accounts, vec![1, 2, 3]);
+    fn disabled_accounts_accept_numbers_and_emails() {
+        let f: FileConfig = toml::from_str(
+            "[deepseek]\ndisabled_accounts = [2, 5, \"C@D.com\"]\n",
+        )
+        .unwrap();
+        let d = DisabledAccounts::from_entries(&f.deepseek.disabled_accounts);
+        assert_eq!(d.numbers, vec![2, 5]);
+        assert_eq!(d.emails, vec!["C@D.com".to_string()]);
+        assert!(d.contains_number(2));
+        assert!(!d.contains_number(3));
+        assert!(d.contains_email("c@d.com"));
+        assert!(!d.contains_email("other@x.com"));
+        assert!(d.contains(5, "nobody@x.com"));
         // Omitted means nothing disabled, never "disable everything".
         let empty: FileConfig = toml::from_str("").unwrap();
-        assert!(empty.deepseek.disabled_accounts.is_empty());
+        assert!(DisabledAccounts::from_entries(&empty.deepseek.disabled_accounts).is_empty());
+    }
+
+    #[test]
+    fn disabled_accounts_env_form_accepts_numbers_and_emails() {
+        let d = DisabledAccounts::from_csv("1, a@b.com;3");
+        assert_eq!(d.numbers, vec![1, 3]);
+        assert_eq!(d.emails, vec!["a@b.com".to_string()]);
+        assert!(DisabledAccounts::from_csv("  ").is_empty());
+        assert!(DisabledAccounts::from_csv("[a@b.com]").contains_email("a@b.com"));
     }
 
     #[test]

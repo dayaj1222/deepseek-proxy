@@ -28,27 +28,27 @@ model = "deepseek-chat"
 # Default thinking flag for requests that do not specify one.
 thinking = false
 
-# Account indices to leave out of the pool, e.g. [1, 2]. Their credentials
-# stay in .env; they are never loaded, logged in, or routed to.
-disabled_accounts = [1, 2, 3]
-
 # Send the web-search flag. Leave this false unless you have a reason:
 # thinking+search is throttled hard by the backend, and a mid-stream limit
 # turns into a failed turn rather than a retry.
 search = false
 
-# Account indices to leave out of the pool, matching the index in
-# DEEPSEEK_EMAIL_<i> / DEEPSEEK_PASSWORD_<i> / DEEPSEEK_TOKEN_<i>.
+# Accounts to leave out of the pool.
 #
-# A disabled index is never loaded: no login is attempted, it never enters the
-# pool, and no thread is ever bound to it. Its credentials stay in `.env`, so
-# re-enabling is a one-line change and nothing has to be re-entered. Disabling
-# index 1 does not disable index 2 — later indices are still scanned.
+# Database accounts are numbered from 1 in creation order -- exactly the `#`
+# column of `deepseek-rs accounts list` -- so `[2, 5]` disables the second and
+# fifth account added. Numbers shift if an earlier account is deleted. An email
+# string also works, case-insensitively, for any account including one that only
+# exists in `.env`.
+#
+# A disabled account is never loaded: no login is attempted, it never enters
+# the pool, and no thread is ever bound to it. Its credentials stay in the
+# database, so re-enabling is a one-line change and nothing is re-entered.
 #
 # Environment form (comma-separated) overrides this list:
-#   DEEPSEEK_DISABLED_ACCOUNTS="1,2"
+#   DEEPSEEK_DISABLED_ACCOUNTS="2,5"
 #
-# disabled_accounts = [1, 2]
+# disabled_accounts = [2, 5]
 
 [limits]
 # Seconds to wait after a request finishes before starting the next one on
