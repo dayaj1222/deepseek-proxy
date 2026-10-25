@@ -10,7 +10,7 @@
 [proxy]
 host = "0.0.0.0"
 port = 9174
-dialect = "deepseek_v4_dsml"
+dialect = "simple_tool_tag"
 
 [storage]
 # SQLite file holding thread resume state and API-key hashes.

@@ -23,7 +23,7 @@ pub struct FileConfig {
 pub struct ProxySection {
     pub host: String,
     pub port: u16,
-    /// Wire dialect: `json_invoke` (default) or `deepseek_v4_dsml`.
+    /// Wire dialect: `json_invoke` (default), `deepseek_v4_dsml`, or `simple_tool_tag`.
     pub dialect: Option<String>,
 }
 
@@ -344,6 +344,10 @@ mod tests {
         assert_eq!(
             Dialect::parse("deepseek_v4_dsml").unwrap(),
             Dialect::DeepSeekV4Dsml
+        );
+        assert_eq!(
+            Dialect::parse("simple_tool_tag").unwrap(),
+            Dialect::SimpleToolTag
         );
         let err = Dialect::parse("dsml").unwrap_err();
         assert!(

@@ -26,6 +26,7 @@ mod cli;
 mod config;
 mod dialect;
 mod dialect_dsml;
+mod dialect_simple;
 mod images;
 mod log;
 mod pool;
@@ -364,6 +365,9 @@ fn build_prompts_with(
             let offered: Vec<Value> = specs.iter().map(|s| s.raw.clone()).collect();
             prompt::for_turn_dsml(&turn, &offered, thinking)
         }
+        dialect::Dialect::SimpleToolTag => {
+            prompt::for_turn_with_dialect(&turn, dialect::Dialect::SimpleToolTag)
+        }
     };
     (out.delta, out.replay)
 }
@@ -611,7 +615,7 @@ fn render_message(m: &Msg, wire: dialect::Dialect) -> Option<String> {
                 }
                 return Some(format!("Assistant: {body}"));
             }
-            let calls = dialect::format_tool_calls_for_history(&m.tool_calls);
+            let calls = dialect::format_tool_calls_for_history_with(&m.tool_calls, wire);
             if calls.is_empty() {
                 return if body.is_empty() {
                     None

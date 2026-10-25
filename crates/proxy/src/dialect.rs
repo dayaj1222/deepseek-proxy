@@ -41,6 +41,7 @@ impl ToolCall {
 pub enum Dialect {
     JsonInvoke,
     DeepSeekV4Dsml,
+    SimpleToolTag,
 }
 
 impl Default for Dialect {
@@ -52,6 +53,7 @@ impl Default for Dialect {
 impl Dialect {
     pub const JSON_INVOKE: &'static str = "json_invoke";
     pub const DEEPSEEK_V4_DSML: &'static str = "deepseek_v4_dsml";
+    pub const SIMPLE_TOOL_TAG: &'static str = "simple_tool_tag";
 
     /// Parse a configured dialect name. Unknown values are a hard error: a
     /// silent fallback would teach one format and parse another.
@@ -59,10 +61,12 @@ impl Dialect {
         match value.trim() {
             Self::JSON_INVOKE => Ok(Self::JsonInvoke),
             Self::DEEPSEEK_V4_DSML => Ok(Self::DeepSeekV4Dsml),
+            Self::SIMPLE_TOOL_TAG => Ok(Self::SimpleToolTag),
             other => Err(format!(
-                "unknown dialect {other:?}; expected \"{}\" or \"{}\"",
+                "unknown dialect {other:?}; expected \"{}\", \"{}\" or \"{}\"",
                 Self::JSON_INVOKE,
-                Self::DEEPSEEK_V4_DSML
+                Self::DEEPSEEK_V4_DSML,
+                Self::SIMPLE_TOOL_TAG
             )),
         }
     }
@@ -71,6 +75,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => Self::JSON_INVOKE,
             Self::DeepSeekV4Dsml => Self::DEEPSEEK_V4_DSML,
+            Self::SimpleToolTag => Self::SIMPLE_TOOL_TAG,
         }
     }
 
@@ -82,6 +87,7 @@ impl Dialect {
                 call.name, call.arguments
             ),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_call(call),
+            Self::SimpleToolTag => crate::dialect_simple::render_tool_call(call),
         }
     }
 
@@ -91,6 +97,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => (strip_tool_calls(text), extract_tool_calls(text)),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::parse_tool_calls(text),
+            Self::SimpleToolTag => crate::dialect_simple::parse_tool_calls(text),
         }
     }
 
@@ -99,6 +106,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => inject_tool_descriptions("", tools),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::tools_block(tools),
+            Self::SimpleToolTag => crate::dialect_simple::tools_block(tools),
         }
     }
 
@@ -107,6 +115,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => periodic_reminder(),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::reminder(),
+            Self::SimpleToolTag => crate::dialect_simple::reminder(),
         }
     }
 
@@ -115,6 +124,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => format!("Tool result (id={name}):\n{content}"),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_result(name, content),
+            Self::SimpleToolTag => crate::dialect_dsml::render_tool_result(name, content),
         }
     }
 
@@ -126,6 +136,10 @@ impl Dialect {
                 name: "tool_name".into(),
                 arguments: "{\"param1\": \"value1\", \"count\": 5}".into(),
             }),
+            Self::SimpleToolTag => crate::dialect_simple::render_tool_call(&ToolCall {
+                name: "tool_name".into(),
+                arguments: "{\"param1\":\"value1\",\"count\":5}".into(),
+            }),
         }
     }
 
@@ -134,6 +148,7 @@ impl Dialect {
         match self {
             Self::JsonInvoke => scan(text),
             Self::DeepSeekV4Dsml => crate::dialect_dsml::scan(text),
+            Self::SimpleToolTag => crate::dialect_simple::scan(text),
         }
     }
 }
@@ -328,7 +343,7 @@ pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
         }
 
         rest = &body_and_rest[close_rel + INVOKE_CLOSE.len()..];
-                rest = strip_stray_closers(rest);
+        rest = strip_stray_closers(rest);
     }
 
     out
@@ -428,7 +443,12 @@ pub fn strip_tool_calls(text: &str) -> String {
 ///
 /// History is flattened as text, so without this a replayed assistant turn
 /// loses the arguments it actually sent.
+#[allow(dead_code)] // compatibility wrapper for the original json dialect
 pub fn format_tool_calls_for_history(calls: &[serde_json::Value]) -> String {
+    format_tool_calls_for_history_with(calls, Dialect::JsonInvoke)
+}
+
+pub fn format_tool_calls_for_history_with(calls: &[serde_json::Value], wire: Dialect) -> String {
     let mut blocks = Vec::new();
     for call in calls {
         let Some(func) = call.get("function") else {
@@ -447,7 +467,7 @@ pub fn format_tool_calls_for_history(calls: &[serde_json::Value]) -> String {
         };
         // History replay must round-trip the exact bytes the model sent, so
         // the body is inserted verbatim rather than re-serialised.
-        blocks.push(Dialect::JsonInvoke.render_tool_call(&ToolCall {
+        blocks.push(wire.render_tool_call(&ToolCall {
             name: name.to_string(),
             arguments: body,
         }));
@@ -1397,6 +1417,7 @@ pub struct StreamToolFilter {
 enum FilterInner {
     Json(Parser),
     Dsml(crate::dialect_dsml::DsmlStreamFilter),
+    Simple(crate::dialect_simple::StreamFilter),
 }
 
 impl Default for StreamToolFilter {
@@ -1409,7 +1430,12 @@ impl StreamToolFilter {
     pub fn new(dialect: Dialect) -> Self {
         let inner = match dialect {
             Dialect::JsonInvoke => FilterInner::Json(Parser::new()),
-            Dialect::DeepSeekV4Dsml => FilterInner::Dsml(crate::dialect_dsml::DsmlStreamFilter::new()),
+            Dialect::DeepSeekV4Dsml => {
+                FilterInner::Dsml(crate::dialect_dsml::DsmlStreamFilter::new())
+            }
+            Dialect::SimpleToolTag => {
+                FilterInner::Simple(crate::dialect_simple::StreamFilter::new())
+            }
         };
         Self {
             inner,
@@ -1431,6 +1457,12 @@ impl StreamToolFilter {
                 self.malformed = filter.malformed.clone();
                 prose
             }
+            FilterInner::Simple(filter) => {
+                let prose = filter.feed(text);
+                self.calls = filter.calls.clone();
+                self.malformed = filter.malformed.clone();
+                prose
+            }
         }
     }
 
@@ -1443,6 +1475,12 @@ impl StreamToolFilter {
                 self.collect(events)
             }
             FilterInner::Dsml(filter) => {
+                let prose = filter.finish();
+                self.calls = filter.calls.clone();
+                self.malformed = filter.malformed.clone();
+                prose
+            }
+            FilterInner::Simple(filter) => {
                 let prose = filter.finish();
                 self.calls = filter.calls.clone();
                 self.malformed = filter.malformed.clone();

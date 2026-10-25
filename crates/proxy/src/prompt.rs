@@ -47,18 +47,18 @@ pub struct Turn<'a> {
 /// 4. protocol reminder — at the tail of every turn;
 /// 5. the `tool_choice` directive last of all.
 pub fn for_turn(turn: &Turn<'_>) -> Prompt {
-    let transcript = flatten_transcript(turn.messages, crate::dialect::Dialect::JsonInvoke);
+    for_turn_with_dialect(turn, crate::dialect::Dialect::JsonInvoke)
+}
+
+pub fn for_turn_with_dialect(turn: &Turn<'_>, wire: crate::dialect::Dialect) -> Prompt {
+    let transcript = flatten_transcript(turn.messages, wire);
     let mut replay = if turn.system_extra.is_empty() {
         transcript
     } else {
         format!("{transcript}\n\n{}", turn.system_extra)
     };
     let mut delta = if turn.continuation {
-        continuation_prompt(
-            delta_messages(turn.messages),
-            crate::dialect::Dialect::JsonInvoke,
-        )
-        .unwrap_or_default()
+        continuation_prompt(delta_messages(turn.messages), wire).unwrap_or_default()
     } else {
         replay.clone()
     };
@@ -123,7 +123,6 @@ pub fn for_turn_dsml(turn: &Turn<'_>, tools: &[Value], thinking: bool) -> Prompt
 
     Prompt { delta, replay }
 }
-
 
 ///
 /// Port of the block at the top of `ChatService.events()`. `offered` is whether

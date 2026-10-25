@@ -62,7 +62,9 @@ pub async fn prepare(
     // The DSML dialect folds the tools block into its BOS/system prefix, so it
     // needs no post-transcript extra.
     let system_extra = match wire {
-        dialect::Dialect::JsonInvoke => wire.system_extra(&req.tools),
+        dialect::Dialect::JsonInvoke | dialect::Dialect::SimpleToolTag => {
+            wire.system_extra(&req.tools)
+        }
         dialect::Dialect::DeepSeekV4Dsml => String::new(),
     };
     let (specs, required) = resolve_tools(req);
