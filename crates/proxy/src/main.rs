@@ -25,6 +25,7 @@
 mod cli;
 mod config;
 mod dialect;
+mod dialect_dsml;
 mod dialect_simple;
 mod images;
 mod log;
@@ -2269,6 +2270,10 @@ async fn stream_response(live: LiveTurn) -> Response {
         // edited/alternate messages).
 
         let max = turn_settings.tool_repair_max_retries;
+        // `begin_repair` clears the pending failures, so a repair that dies on
+        // the wire must be remembered separately: otherwise the loop exits with
+        // nothing pending and the turn is delivered as an empty success.
+        let mut repair_aborted = false;
         for attempt in 1..=max {
             if tx.is_closed() {
                 return;
@@ -2317,6 +2322,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!("thread {key}: repair completion failed: {e}");
+                    repair_aborted = true;
                     break;
                 }
             };
@@ -2324,6 +2330,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Some(Ok(text)) => text,
                 Some(Err(e)) => {
                     tracing::error!("thread {key}: repair body failed: {e}");
+                    repair_aborted = true;
                     break;
                 }
                 None => return,
@@ -2356,7 +2363,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         }
 
         // Python raises here rather than returning a turn with no usable calls.
-        if recovery.has_pending() {
+        if recovery.has_pending() || repair_aborted {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
             fail_turn(
                 &state,

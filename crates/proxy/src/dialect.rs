@@ -5,9 +5,8 @@
 //! injection, and extraction of `<invoke name="t">{...}</invoke>` blocks from
 //! model output.
 //!
-//! Not ported: the repair/healing machinery for malformed blocks, and the
-//! `xml_params` / legacy `dsml` dialects. Only the json_invoke spelling is
-//! parsed; anything else falls through as plain text.
+//! Only the json_invoke spelling is parsed here; `dialect_simple` and
+//! `dialect_dsml` hold the `simple_tool_tag` grammar and its DSML recovery.
 
 /// A parsed tool call.
 ///
@@ -110,12 +109,10 @@ impl Dialect {
         }
     }
 
-    /// How one tool result is shown to the model.
-    pub fn render_tool_result(&self, name: &str, content: &str) -> String {
-        match self {
-            Self::JsonInvoke => format!("Tool result (id={name}):\n{content}"),
-            Self::SimpleToolTag => format!("<tool_result>{content}</tool_result>"),
-        }
+    /// How one tool result is shown to the model: attributed by call id in
+    /// both dialects, so reordered or batched results pair with the right call.
+    pub fn render_tool_result(&self, id: &str, content: &str) -> String {
+        format!("Tool result (id={id}):\n{content}")
     }
 
     /// Concrete wire shape restated by repair tiers.
@@ -682,6 +679,21 @@ pub fn build_repair_prompt_for(
             name,
             reason
         ));
+    }
+    // A DSML region that could not be parsed gets a plain account of what the
+    // model did, not just a reason code.
+    for (i, m) in malformed.iter().enumerate() {
+        if let Some(detail) = m
+            .reason
+            .strip_prefix(crate::dialect_dsml::UNPARSABLE)
+            .and_then(|r| r.strip_prefix(':'))
+        {
+            out.push_str(&format!(
+                "\nFailure {} explained: {}",
+                i + 1,
+                crate::dialect_dsml::explanation(detail)
+            ));
+        }
     }
     if !specs.is_empty() {
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();

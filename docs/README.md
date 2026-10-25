@@ -60,3 +60,4 @@ yours.
 | T-18 | Optional TLS and open-exposure guard | planned |
 | T-21 | Forced rebind: move a live thread to another account | done (flag + admin route + CLI) |
 | T-22 | One interface for thread identity changes | done |
+| T-23 | `json_invoke` vs `simple_tool_tag` wire dialects | done ([note](features/T-23-tool-dialects.md)) |

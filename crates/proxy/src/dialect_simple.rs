@@ -1,24 +1,29 @@
-//! Minimal tool wire format: one `<tool>` marker, one JSON call, then `</tool>`.
+//! Minimal tool wire format: `<tool>` marker, one JSON call, then `</tool>`.
 //!
-//! The marker is a separator, not an XML element. Everything between the marker
-//! and the closing tag must be the call JSON; there is no trailing assistant
-//! text. The closing tag is what terminates the call, so the parser accepts a
-//! missing one only for compatibility with models that omit it.
+//! The JSON object itself delimits the call (it is read with a real JSON
+//! parser), so the closing tag is optional and text after the call is prose.
+//! Several blocks in one reply are several calls. The DSML spelling the backend
+//! drifts into is parsed by `dialect_dsml` and, when it cannot be, reported
+//! with an explanation instead of being dropped.
 
 use serde_json::Value;
 
 use crate::dialect::{MalformedCall, ScanEvent, ToolCall};
+use crate::dialect_dsml;
 
 pub const TOOL_MARKER: &str = "<tool>";
 pub const TOOL_CLOSE: &str = "</tool>";
 
 pub fn render_tool_call(call: &ToolCall) -> String {
-    let args = serde_json::from_str::<Value>(&call.arguments)
-        .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+    // History replay keeps the arguments exactly as the model sent them when
+    // they are a JSON object; anything else is carried as a string.
+    let args = match serde_json::from_str::<Value>(&call.arguments) {
+        Ok(Value::Object(_)) => call.arguments.trim().to_string(),
+        _ => Value::String(call.arguments.clone()).to_string(),
+    };
     format!(
-        "{TOOL_MARKER}{{\"name\":{},\"arguments\":{}}}{TOOL_CLOSE}",
+        "{TOOL_MARKER}{{\"name\":{},\"arguments\":{args}}}{TOOL_CLOSE}",
         serde_json::to_string(&call.name).unwrap_or_else(|_| "\"\"".into()),
-        args
     )
 }
 
@@ -27,7 +32,7 @@ pub fn tools_block(tools: &[Value]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, with no text after the closing tag. Output at most one tool call per response. Otherwise answer normally. Do not use any XML-style wrapper such as tool_calls, invoke or parameter; the tool marker is the only syntax.\n\nAvailable tools:\n",
+        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, and keep the JSON valid. You may emit several complete blocks back to back only for short, independent, read-only calls; otherwise emit one call per response and wait for its result. Otherwise answer normally. Do not use any XML-style wrapper such as tool_calls, invoke or parameter; the tool marker is the only syntax.\n\nRules:\n1. Do not wrap the call in a code fence.\n2. Use only the parameters in the tool's schema and never invent values.\n3. After a tool result arrives, continue the task; do not repeat the same call.\n4. If no tool fits, answer directly without a call.\n\nAvailable tools:\n",
     );
     for tool in tools {
         if let Some(function) = tool.get("function") {
@@ -39,64 +44,128 @@ pub fn tools_block(tools: &[Value]) -> String {
 }
 
 pub fn reminder() -> String {
-    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`, then close it with `</tool>`; put no text after the closing tag. Emit at most one such block. Never use the DSML dialect: no DSML calls wrapper, no DSML invoke, no DSML parameter, and no tool_calls block. The tool marker is the only tool-call syntax.".into()
+    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`, then close it with `</tool>`; keep the JSON valid. Batch only short, independent, read-only calls. Never use the DSML dialect: no DSML calls wrapper, no DSML invoke, no DSML parameter, and no tool_calls block. The tool marker is the only tool-call syntax.".into()
 }
 
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
-    let calls = scan(text)
-        .into_iter()
-        .filter_map(|event| match event {
-            ScanEvent::Tool(call) => Some(call),
-            _ => None,
-        })
-        .collect();
-    let prose = text
-        .split_once(TOOL_MARKER)
-        .map_or(text, |(before, _)| before)
-        .to_string();
+    let mut prose = String::new();
+    let mut calls = Vec::new();
+    for event in scan(text) {
+        match event {
+            ScanEvent::Text(t) => prose.push_str(&t),
+            ScanEvent::Tool(call) => calls.push(call),
+            ScanEvent::Malformed(_) => {}
+        }
+    }
     (prose, calls)
 }
 
+/// Ordered events for one complete reply.
+///
+/// Every marker that is followed by a JSON object starts a call; the object is
+/// read with a real JSON parser, so a closing tag inside a string value cannot
+/// end it early, and text after the closing tag is prose, not part of the call.
+/// A marker that is not followed by `{` is ordinary prose (the model mentioned
+/// the tag), so it no longer swallows the rest of the reply.
 pub fn scan(text: &str) -> Vec<ScanEvent> {
-    let Some((prose, body)) = text.split_once(TOOL_MARKER) else {
-        return vec![ScanEvent::Text(text.to_string())];
-    };
     let mut out = Vec::new();
-    if !prose.is_empty() {
-        out.push(ScanEvent::Text(prose.to_string()));
+    let mut prose = String::new();
+    let mut rest = text;
+    loop {
+        let marker = rest.find(TOOL_MARKER);
+        let dsml = dialect_dsml::find_start(rest);
+        if let Some(d) = dsml.filter(|d| marker.is_none_or(|m| *d < m)) {
+            prose.push_str(&rest[..d]);
+            if !prose.is_empty() {
+                out.push(ScanEvent::Text(std::mem::take(&mut prose)));
+            }
+            let region = dialect_dsml::parse_region(&rest[d..]);
+            for result in region.results {
+                out.push(match result {
+                    Ok(call) => ScanEvent::Tool(call),
+                    Err(f) => ScanEvent::Malformed(MalformedCall::new(
+                        f.name,
+                        f.body,
+                        &format!("{}:{}", dialect_dsml::UNPARSABLE, f.detail),
+                    )),
+                });
+            }
+            rest = &rest[d + region.consumed..];
+            continue;
+        }
+        let Some(i) = marker else { break };
+        prose.push_str(&rest[..i]);
+        let after = &rest[i + TOOL_MARKER.len()..];
+        let body = after.trim_start();
+        if !body.starts_with('{') {
+            prose.push_str(TOOL_MARKER);
+            rest = after;
+            continue;
+        }
+        if !prose.is_empty() {
+            out.push(ScanEvent::Text(std::mem::take(&mut prose)));
+        }
+        let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
+        match values.next() {
+            Some(Ok(value)) => {
+                let tail = &body[values.byte_offset()..];
+                rest = tail.trim_start().strip_prefix(TOOL_CLOSE).unwrap_or(tail);
+                match call_from_value(&value) {
+                    Ok(call) => out.push(ScanEvent::Tool(call)),
+                    Err((name, reason)) => out.push(ScanEvent::Malformed(MalformedCall::new(
+                        name,
+                        body[..body.len() - tail.len()].to_string(),
+                        reason,
+                    ))),
+                }
+            }
+            _ => {
+                // Cut off or invalid: the bad region ends at the closing tag or
+                // the next marker, whichever comes first.
+                let end = [body.find(TOOL_CLOSE), body.find(TOOL_MARKER)]
+                    .into_iter()
+                    .flatten()
+                    .min();
+                let (raw, tail) = match end {
+                    Some(e) => (&body[..e], &body[e..]),
+                    None => (body, ""),
+                };
+                rest = tail.strip_prefix(TOOL_CLOSE).unwrap_or(tail);
+                out.push(ScanEvent::Malformed(MalformedCall::new(
+                    salvage_name(raw),
+                    raw.trim().to_string(),
+                    "invalid_json_body",
+                )));
+            }
+        }
     }
-    let raw = body.trim();
-    match parse_call(raw) {
-        Ok(call) => out.push(ScanEvent::Tool(call)),
-        Err(name) => out.push(ScanEvent::Malformed(MalformedCall::new(
-            name,
-            raw.to_string(),
-            "invalid_arguments_json",
-        ))),
+    prose.push_str(rest);
+    if !prose.is_empty() {
+        out.push(ScanEvent::Text(prose));
     }
     out
 }
 
-fn parse_call(raw: &str) -> Result<ToolCall, Option<String>> {
-    let raw = raw
-        .trim()
-        .strip_suffix("</tool>")
-        .map(str::trim_end)
-        .unwrap_or_else(|| raw.trim());
-    let value: Value = serde_json::from_str(raw).map_err(|_| None)?;
-    let name = value
+/// Reasons are the `json_invoke` vocabulary, so `repair_schemas` re-sends the
+/// schema of a tool whose name is known.
+fn call_from_value(value: &Value) -> Result<ToolCall, (Option<String>, &'static str)> {
+    let Some(name) = value
         .get("name")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let arguments = value.get("arguments");
-    let Some(name) = name else { return Err(None) };
-    let Some(arguments) = arguments else {
-        return Err(Some(name.to_string()));
+        .filter(|s| !s.is_empty())
+    else {
+        return Err((None, "invalid_arguments_json"));
     };
-    let arguments = match arguments {
-        Value::Object(_) => arguments.to_string(),
-        Value::String(s) if serde_json::from_str::<Value>(s).is_ok() => s.clone(),
-        _ => return Err(Some(name.to_string())),
+    let fail = |reason| Err((Some(name.to_string()), reason));
+    let arguments = match value.get("arguments") {
+        Some(args @ Value::Object(_)) => args.to_string(),
+        // Double-encoded arguments are tolerated, but only an object is a call.
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(_)) => s.clone(),
+            Ok(_) => return fail("body_not_object"),
+            Err(_) => return fail("invalid_json_body"),
+        },
+        _ => return fail("body_not_object"),
     };
     Ok(ToolCall {
         name: name.to_string(),
@@ -104,11 +173,31 @@ fn parse_call(raw: &str) -> Result<ToolCall, Option<String>> {
     })
 }
 
-/// Incremental filter: stream prose before `<tool>`, but hold the call body
-/// until end-of-stream so trailing text cannot accidentally be accepted.
+/// Best-effort tool name from a body that does not parse: a `"name"` string
+/// that appears before `"arguments"`, so a parameter called `name` is not
+/// mistaken for the tool.
+fn salvage_name(raw: &str) -> Option<String> {
+    let key = raw.find("\"name\"")?;
+    if raw.find("\"arguments\"").is_some_and(|a| a < key) {
+        return None;
+    }
+    let after = raw[key + "\"name\"".len()..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let name = serde_json::Deserializer::from_str(after)
+        .into_iter::<String>()
+        .next()?
+        .ok()?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Incremental filter: stream prose before the first `<tool>` (or DSML tag), then hold
+/// everything from the marker on and parse it with [`scan`] at end-of-stream.
+/// Prose that follows a call is returned by `finish`.
 pub struct StreamFilter {
     pending: String,
-    call_body: Option<String>,
+    held: Option<String>,
     pub calls: Vec<ToolCall>,
     pub malformed: Vec<MalformedCall>,
 }
@@ -117,45 +206,53 @@ impl StreamFilter {
     pub fn new() -> Self {
         Self {
             pending: String::new(),
-            call_body: None,
+            held: None,
             calls: Vec::new(),
             malformed: Vec::new(),
         }
     }
 
     pub fn feed(&mut self, chunk: &str) -> String {
-        if let Some(body) = &mut self.call_body {
-            body.push_str(chunk);
+        if let Some(held) = &mut self.held {
+            held.push_str(chunk);
             return String::new();
         }
         self.pending.push_str(chunk);
-        if let Some((before, after)) = self.pending.split_once(TOOL_MARKER) {
-            let prose = before.to_string();
-            self.call_body = Some(after.to_string());
+        let start = [
+            self.pending.find(TOOL_MARKER),
+            dialect_dsml::find_start(&self.pending),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if let Some(i) = start {
+            let prose = self.pending[..i].to_string();
+            self.held = Some(self.pending[i..].to_string());
             self.pending.clear();
             return prose;
         }
         let hold = (1..TOOL_MARKER.len())
             .rev()
             .find(|&n| self.pending.ends_with(&TOOL_MARKER[..n]))
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(dialect_dsml::partial_len(&self.pending));
         let safe = self.pending.len() - hold;
         self.pending.drain(..safe).collect()
     }
 
     pub fn finish(&mut self) -> String {
-        let Some(body) = self.call_body.take() else {
+        let Some(held) = self.held.take() else {
             return std::mem::take(&mut self.pending);
         };
-        match parse_call(body.trim()) {
-            Ok(call) => self.calls.push(call),
-            Err(name) => self.malformed.push(MalformedCall::new(
-                name,
-                body.trim().to_string(),
-                "invalid_arguments_json",
-            )),
+        let mut tail = String::new();
+        for event in scan(&held) {
+            match event {
+                ScanEvent::Text(t) => tail.push_str(&t),
+                ScanEvent::Tool(call) => self.calls.push(call),
+                ScanEvent::Malformed(m) => self.malformed.push(m),
+            }
         }
-        String::new()
+        tail
     }
 }
 
@@ -213,24 +310,164 @@ mod tests {
     }
 
     #[test]
-    fn trailing_text_is_malformed_and_streamed_tag_is_held() {
+    fn trailing_text_is_prose_and_streamed_tag_is_held() {
+        let events = scan("<tool>{\"name\":\"x\",\"arguments\":{}}</tool> extra");
+        assert!(matches!(&events[0], ScanEvent::Tool(c) if c.name == "x"));
+        assert!(matches!(&events[1], ScanEvent::Text(t) if t == " extra"));
+        // A missing closer is tolerated.
         assert!(matches!(
-            scan("<tool>{\"name\":\"x\",\"arguments\":{}}</tool> extra").last(),
-            Some(ScanEvent::Malformed(_))
-        ));
-        assert!(matches!(
-            scan("<tool>{\"name\":\"x\",\"arguments\":{}}oops").last(),
-            Some(ScanEvent::Malformed(_))
+            scan("<tool>{\"name\":\"x\",\"arguments\":{}}").as_slice(),
+            [ScanEvent::Tool(_)]
         ));
         let mut filter = StreamFilter::new();
         assert_eq!(filter.feed("hello <to"), "hello ");
         assert_eq!(
             filter
-                .feed("ol>{\"name\":\"bash\",\"arguments\":{}}</tool>")
+                .feed("ol>{\"name\":\"bash\",\"arguments\":{}}</tool> done")
                 .as_str(),
             ""
         );
-        assert_eq!(filter.finish(), "");
+        assert_eq!(filter.finish(), " done");
         assert_eq!(filter.calls.len(), 1);
+    }
+
+    #[test]
+    fn closing_tag_inside_a_string_value_does_not_end_the_call() {
+        let raw = "<tool>{\"name\":\"write\",\"arguments\":{\"text\":\"a </tool> b\"}}</tool>";
+        let (_, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].json().unwrap()["text"], "a </tool> b");
+    }
+
+    #[test]
+    fn code_fence_after_the_call_does_not_lose_it() {
+        let raw = "```\n<tool>{\"name\":\"x\",\"arguments\":{}}</tool>\n```";
+        let (prose, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(prose, "```\n\n```");
+    }
+
+    // The differences documented in `docs/features/T-23-tool-dialects.md` are
+    // behaviour, not prose: these tests pin the ones a change could silently
+    // "fix" into disagreeing with the docs.
+
+    /// A marker that is not followed by a JSON object is just prose, so
+    /// mentioning the tag no longer swallows the rest of the reply.
+    #[test]
+    fn marker_in_prose_stays_prose() {
+        let raw = "Emit `<tool>` to call a tool. Then write more prose.";
+        assert!(matches!(scan(raw).as_slice(), [ScanEvent::Text(t)] if t == raw));
+        assert!(parse_tool_calls(raw).1.is_empty());
+    }
+
+    /// `arguments` may be a JSON object or a *string* that itself parses as
+    /// JSON. The json dialect rejects the second form as `body_not_object`, and
+    /// the accepted value is re-serialised, so it is not byte-identical to what
+    /// the model emitted.
+    #[test]
+    fn accepts_double_encoded_arguments_and_reserialises_them() {
+        let raw = "<tool>{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}</tool>";
+        let (_, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].arguments, "{\"command\": \"ls\"}");
+        assert_eq!(calls[0].json().unwrap()["command"], "ls");
+    }
+
+    /// There is no `normalize_dsml` here. A model that drifts into the other
+    /// syntax produces ordinary text: nothing executes, and the failure is not
+    /// even recorded for repair.
+    #[test]
+    fn does_not_fall_back_to_the_invoke_syntax() {
+        let raw = "<invoke name=\"bash\">{\"command\":\"ls\"}</invoke>";
+        let (prose, calls) = parse_tool_calls(raw);
+        assert!(calls.is_empty());
+        assert_eq!(prose, raw, "unparsed output stays plain text");
+        assert!(matches!(scan(raw).as_slice(), [ScanEvent::Text(_)]));
+    }
+
+    /// Every block is its own call, in order, with prose kept around them.
+    #[test]
+    fn several_blocks_are_several_calls() {
+        let raw = concat!(
+            "one <tool>{\"name\":\"a\",\"arguments\":{}}</tool>",
+            " two <tool>{\"name\":\"b\",\"arguments\":{}}</tool> three"
+        );
+        let (prose, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(prose, "one  two  three");
+    }
+
+    #[test]
+    fn a_broken_block_does_not_poison_the_next() {
+        let raw = "<tool>{\"name\":\"a\",\"arguments\":{</tool><tool>{\"name\":\"b\",\"arguments\":{}}</tool>";
+        let events = scan(raw);
+        assert!(matches!(&events[0], ScanEvent::Malformed(_)));
+        assert!(matches!(&events[1], ScanEvent::Tool(c) if c.name == "b"));
+    }
+
+    #[test]
+    fn failures_use_json_reasons_and_keep_the_tool_name() {
+        let reasons = |raw: &str| match scan(raw).pop() {
+            Some(ScanEvent::Malformed(m)) => (m.name, m.reason),
+            other => panic!("expected malformed, got {other:?}"),
+        };
+        let named = |r: &str| (Some("bash".to_string()), r.to_string());
+        assert_eq!(reasons("<tool>{\"name\":\"bash\"}</tool>"), named("body_not_object"));
+        assert_eq!(
+            reasons("<tool>{\"name\":\"bash\",\"arguments\":[1]}</tool>"),
+            named("body_not_object")
+        );
+        assert_eq!(
+            reasons("<tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"ls"),
+            named("invalid_json_body")
+        );
+        // A parameter called `name` is not the tool name.
+        assert_eq!(
+            reasons("<tool>{\"arguments\":{\"name\":\"x\"").0,
+            None
+        );
+    }
+
+    #[test]
+    fn dsml_is_parsed_when_it_can_be_and_explained_when_it_cannot() {
+        let ok = "Let me look.\n<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>";
+        let (prose, calls) = parse_tool_calls(ok);
+        assert_eq!(prose, "Let me look.\n");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].json().unwrap()["command"], "ls");
+
+        let bad = "<｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\">ls";
+        let Some(ScanEvent::Malformed(m)) = scan(bad).pop() else { panic!() };
+        assert_eq!(m.name.as_deref(), Some("bash"));
+        assert!(m.reason.starts_with("dsml_unparsable:"), "{}", m.reason);
+    }
+
+    #[test]
+    fn streamed_dsml_is_held_and_parsed_at_the_end() {
+        let mut f = StreamFilter::new();
+        assert_eq!(f.feed("go <｜｜DS"), "go ");
+        assert_eq!(f.feed("ML｜｜ calls><｜｜DSML｜｜ invoke name=\"a\">"), "");
+        assert_eq!(f.feed("</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>"), "");
+        assert_eq!(f.finish(), "");
+        assert_eq!(f.calls.len(), 1);
+    }
+
+    #[test]
+    fn replay_keeps_the_argument_bytes_the_model_sent() {
+        let call = ToolCall {
+            name: "bash".into(),
+            arguments: "{ \"z\": 1.0,  \"a\": \"\\u003c\" }".into(),
+        };
+        let out = render_tool_call(&call);
+        assert!(out.contains(&call.arguments), "{out}");
+        let (_, calls) = parse_tool_calls(&out);
+        assert_eq!(calls[0].name, "bash");
+    }
+
+    #[test]
+    fn results_are_attributed_by_call_id() {
+        let out = crate::dialect::Dialect::SimpleToolTag.render_tool_result("call_1", "ok </tool>");
+        assert_eq!(out, "Tool result (id=call_1):\nok </tool>");
     }
 }

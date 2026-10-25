@@ -12,6 +12,8 @@ host = "0.0.0.0"
 port = 9174
 dialect = "simple_tool_tag"
 
+# dialect = "json_invoke"
+
 [storage]
 # SQLite file holding thread resume state and API-key hashes.
 #
@@ -105,3 +107,4 @@ rate_limit_backoff_secs = 10.0
 # Mirrors the Python proxy's TOOL_REPAIR_MAX_RETRIES.
 tool_repair_max_retries = 5
 
+DEEPSEEK_LOG="debug"
