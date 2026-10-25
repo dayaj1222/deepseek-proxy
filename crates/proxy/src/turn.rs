@@ -59,14 +59,7 @@ pub async fn prepare(
 
     // Tool definitions are taught once, on the first turn of a thread. Later
     // turns ride on the server-side conversation, like the Python proxy.
-    // The DSML dialect folds the tools block into its BOS/system prefix, so it
-    // needs no post-transcript extra.
-    let system_extra = match wire {
-        dialect::Dialect::JsonInvoke | dialect::Dialect::SimpleToolTag => {
-            wire.system_extra(&req.tools)
-        }
-        dialect::Dialect::DeepSeekV4Dsml => String::new(),
-    };
+    let system_extra = wire.system_extra(&req.tools);
     let (specs, required) = resolve_tools(req);
 
     // Image intake runs before the prompt is built because a turn carrying

@@ -25,7 +25,6 @@
 mod cli;
 mod config;
 mod dialect;
-mod dialect_dsml;
 mod dialect_simple;
 mod images;
 mod log;
@@ -361,10 +360,6 @@ fn build_prompts_with(
     };
     let out = match wire {
         dialect::Dialect::JsonInvoke => prompt::for_turn(&turn),
-        dialect::Dialect::DeepSeekV4Dsml => {
-            let offered: Vec<Value> = specs.iter().map(|s| s.raw.clone()).collect();
-            prompt::for_turn_dsml(&turn, &offered, thinking)
-        }
         dialect::Dialect::SimpleToolTag => {
             prompt::for_turn_with_dialect(&turn, dialect::Dialect::SimpleToolTag)
         }

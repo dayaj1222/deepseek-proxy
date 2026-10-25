@@ -90,40 +90,6 @@ pub fn for_turn_with_dialect(turn: &Turn<'_>, wire: crate::dialect::Dialect) -> 
     Prompt { delta, replay }
 }
 
-/// DSML dialect prompt assembly.
-///
-/// Same ordering contract as [`for_turn`] — image note, then the tail reminder,
-/// then the `tool_choice` directive — but the transcript shape is the V4
-/// template's, and the generation tail is structural, so it goes last.
-pub fn for_turn_dsml(turn: &Turn<'_>, tools: &[Value], thinking: bool) -> Prompt {
-    let mut replay = crate::dialect_dsml::render_prompt(turn.messages, tools);
-    let mut delta = if turn.continuation {
-        crate::dialect_dsml::render_delta(turn.messages)
-    } else {
-        replay.clone()
-    };
-
-    if let Some(note) = turn.image_note {
-        delta = format!("{note}\n\n{delta}");
-        replay = format!("{note}\n\n{replay}");
-    }
-    if let Some(reminder) = turn.reminder {
-        delta.push_str("\n\n");
-        delta.push_str(reminder);
-        replay.push_str("\n\n");
-        replay.push_str(reminder);
-    }
-    if let Some(directive) = &turn.directive {
-        delta.push_str(directive);
-        replay.push_str(directive);
-    }
-    let tail = crate::dialect_dsml::generation_tail(thinking);
-    delta.push_str(&tail);
-    replay.push_str(&tail);
-
-    Prompt { delta, replay }
-}
-
 ///
 /// Port of the block at the top of `ChatService.events()`. `offered` is whether
 /// the *filtered* tool list is non-empty, so `tool_choice: "none"` takes the

@@ -27,7 +27,7 @@ pub fn tools_block(tools: &[Value]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, with no text after the closing tag. Output at most one tool call per response. Otherwise answer normally.\n\nAvailable tools:\n",
+        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, with no text after the closing tag. Output at most one tool call per response. Otherwise answer normally. Do not use any XML-style wrapper such as tool_calls, invoke or parameter; the tool marker is the only syntax.\n\nAvailable tools:\n",
     );
     for tool in tools {
         if let Some(function) = tool.get("function") {
@@ -39,7 +39,7 @@ pub fn tools_block(tools: &[Value]) -> String {
 }
 
 pub fn reminder() -> String {
-    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`, then close it with `</tool>`; put no text after the closing tag. Emit at most one such block.".into()
+    "Tool-call reminder: for exactly one call, write `<tool>` followed by one JSON object with `name` and `arguments`, then close it with `</tool>`; put no text after the closing tag. Emit at most one such block. Never use the DSML dialect: no DSML calls wrapper, no DSML invoke, no DSML parameter, and no tool_calls block. The tool marker is the only tool-call syntax.".into()
 }
 
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
@@ -183,6 +183,19 @@ mod tests {
         assert!(tools_block(&tools).contains("</tool>`"));
         assert!(reminder().contains("</tool>"));
         assert!(!reminder().contains("Do not add a closing tag"));
+    }
+
+    #[test]
+    fn teaches_that_the_dsml_dialect_is_forbidden() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "bash", "description": "run", "parameters": {}}
+        })];
+        // Both the one-time block and the per-turn reminder must rule it out,
+        // because the backend tends to fall back to DSML on its own.
+        assert!(tools_block(&tools).contains("Do not use any XML-style wrapper"));
+        assert!(reminder().contains("Never use the DSML dialect"));
+        assert!(reminder().contains("no tool_calls block"));
     }
 
     #[test]

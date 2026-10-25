@@ -35,12 +35,11 @@ impl ToolCall {
 ///
 /// Selected once at startup (`[proxy] dialect` or `DIALECT`) and threaded
 /// through prompt assembly, streaming and repair. `JsonInvoke` is the original
-/// behaviour and must stay byte-identical; `DeepSeekV4Dsml` renders and parses
-/// DeepSeek V4's native `｜DSML｜` tool format.
+/// behaviour and must stay byte-identical; `SimpleToolTag` is the one-marker
+/// `<tool>{json}` format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     JsonInvoke,
-    DeepSeekV4Dsml,
     SimpleToolTag,
 }
 
@@ -52,7 +51,6 @@ impl Default for Dialect {
 
 impl Dialect {
     pub const JSON_INVOKE: &'static str = "json_invoke";
-    pub const DEEPSEEK_V4_DSML: &'static str = "deepseek_v4_dsml";
     pub const SIMPLE_TOOL_TAG: &'static str = "simple_tool_tag";
 
     /// Parse a configured dialect name. Unknown values are a hard error: a
@@ -60,12 +58,10 @@ impl Dialect {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim() {
             Self::JSON_INVOKE => Ok(Self::JsonInvoke),
-            Self::DEEPSEEK_V4_DSML => Ok(Self::DeepSeekV4Dsml),
             Self::SIMPLE_TOOL_TAG => Ok(Self::SimpleToolTag),
             other => Err(format!(
-                "unknown dialect {other:?}; expected \"{}\", \"{}\" or \"{}\"",
+                "unknown dialect {other:?}; expected \"{}\" or \"{}\"",
                 Self::JSON_INVOKE,
-                Self::DEEPSEEK_V4_DSML,
                 Self::SIMPLE_TOOL_TAG
             )),
         }
@@ -74,7 +70,6 @@ impl Dialect {
     pub fn name(&self) -> &'static str {
         match self {
             Self::JsonInvoke => Self::JSON_INVOKE,
-            Self::DeepSeekV4Dsml => Self::DEEPSEEK_V4_DSML,
             Self::SimpleToolTag => Self::SIMPLE_TOOL_TAG,
         }
     }
@@ -86,7 +81,6 @@ impl Dialect {
                 "{INVOKE_OPEN} name=\"{}\">{}</invoke>",
                 call.name, call.arguments
             ),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_call(call),
             Self::SimpleToolTag => crate::dialect_simple::render_tool_call(call),
         }
     }
@@ -96,7 +90,6 @@ impl Dialect {
     pub fn parse_tool_calls(&self, text: &str) -> (String, Vec<ToolCall>) {
         match self {
             Self::JsonInvoke => (strip_tool_calls(text), extract_tool_calls(text)),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::parse_tool_calls(text),
             Self::SimpleToolTag => crate::dialect_simple::parse_tool_calls(text),
         }
     }
@@ -105,7 +98,6 @@ impl Dialect {
     pub fn system_extra(&self, tools: &[serde_json::Value]) -> String {
         match self {
             Self::JsonInvoke => inject_tool_descriptions("", tools),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::tools_block(tools),
             Self::SimpleToolTag => crate::dialect_simple::tools_block(tools),
         }
     }
@@ -114,7 +106,6 @@ impl Dialect {
     pub fn reminder(&self) -> String {
         match self {
             Self::JsonInvoke => periodic_reminder(),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::reminder(),
             Self::SimpleToolTag => crate::dialect_simple::reminder(),
         }
     }
@@ -123,8 +114,7 @@ impl Dialect {
     pub fn render_tool_result(&self, name: &str, content: &str) -> String {
         match self {
             Self::JsonInvoke => format!("Tool result (id={name}):\n{content}"),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_result(name, content),
-            Self::SimpleToolTag => crate::dialect_dsml::render_tool_result(name, content),
+            Self::SimpleToolTag => format!("<tool_result>{content}</tool_result>"),
         }
     }
 
@@ -132,10 +122,6 @@ impl Dialect {
     pub fn wire_shape(&self) -> String {
         match self {
             Self::JsonInvoke => TEMPLATE.to_string(),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_call(&ToolCall {
-                name: "tool_name".into(),
-                arguments: "{\"param1\": \"value1\", \"count\": 5}".into(),
-            }),
             Self::SimpleToolTag => crate::dialect_simple::render_tool_call(&ToolCall {
                 name: "tool_name".into(),
                 arguments: "{\"param1\":\"value1\",\"count\":5}".into(),
@@ -147,7 +133,6 @@ impl Dialect {
     pub fn scan(&self, text: &str) -> Vec<ScanEvent> {
         match self {
             Self::JsonInvoke => scan(text),
-            Self::DeepSeekV4Dsml => crate::dialect_dsml::scan(text),
             Self::SimpleToolTag => crate::dialect_simple::scan(text),
         }
     }
@@ -1416,7 +1401,6 @@ pub struct StreamToolFilter {
 /// Dialect-specific streaming grammar.
 enum FilterInner {
     Json(Parser),
-    Dsml(crate::dialect_dsml::DsmlStreamFilter),
     Simple(crate::dialect_simple::StreamFilter),
 }
 
@@ -1430,9 +1414,6 @@ impl StreamToolFilter {
     pub fn new(dialect: Dialect) -> Self {
         let inner = match dialect {
             Dialect::JsonInvoke => FilterInner::Json(Parser::new()),
-            Dialect::DeepSeekV4Dsml => {
-                FilterInner::Dsml(crate::dialect_dsml::DsmlStreamFilter::new())
-            }
             Dialect::SimpleToolTag => {
                 FilterInner::Simple(crate::dialect_simple::StreamFilter::new())
             }
@@ -1451,12 +1432,6 @@ impl StreamToolFilter {
                 let events = parser.feed(text);
                 self.collect(events)
             }
-            FilterInner::Dsml(filter) => {
-                let prose = filter.feed(text);
-                self.calls = filter.calls.clone();
-                self.malformed = filter.malformed.clone();
-                prose
-            }
             FilterInner::Simple(filter) => {
                 let prose = filter.feed(text);
                 self.calls = filter.calls.clone();
@@ -1473,12 +1448,6 @@ impl StreamToolFilter {
             FilterInner::Json(parser) => {
                 let events = parser.finish();
                 self.collect(events)
-            }
-            FilterInner::Dsml(filter) => {
-                let prose = filter.finish();
-                self.calls = filter.calls.clone();
-                self.malformed = filter.malformed.clone();
-                prose
             }
             FilterInner::Simple(filter) => {
                 let prose = filter.finish();

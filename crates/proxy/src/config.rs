@@ -24,7 +24,7 @@ pub struct FileConfig {
 pub struct ProxySection {
     pub host: String,
     pub port: u16,
-    /// Wire dialect: `json_invoke` (default), `deepseek_v4_dsml`, or `simple_tool_tag`.
+    /// Wire dialect: `json_invoke` (default) or `simple_tool_tag`.
     pub dialect: Option<String>,
 }
 
@@ -466,8 +466,8 @@ mod tests {
 
     #[test]
     fn dialect_key_is_read_from_the_proxy_section() {
-        let f: FileConfig = toml::from_str("[proxy]\ndialect = \"deepseek_v4_dsml\"\n").unwrap();
-        assert_eq!(f.proxy.dialect.as_deref(), Some("deepseek_v4_dsml"));
+        let f: FileConfig = toml::from_str("[proxy]\ndialect = \"simple_tool_tag\"\n").unwrap();
+        assert_eq!(f.proxy.dialect.as_deref(), Some("simple_tool_tag"));
     }
 
     #[test]
@@ -476,10 +476,6 @@ mod tests {
         assert_eq!(
             Dialect::parse("json_invoke").unwrap(),
             Dialect::JsonInvoke
-        );
-        assert_eq!(
-            Dialect::parse("deepseek_v4_dsml").unwrap(),
-            Dialect::DeepSeekV4Dsml
         );
         assert_eq!(
             Dialect::parse("simple_tool_tag").unwrap(),
