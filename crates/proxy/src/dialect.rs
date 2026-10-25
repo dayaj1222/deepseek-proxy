@@ -31,6 +31,113 @@ impl ToolCall {
     }
 }
 
+/// Which wire dialect the proxy speaks to the backend.
+///
+/// Selected once at startup (`[proxy] dialect` or `DIALECT`) and threaded
+/// through prompt assembly, streaming and repair. `JsonInvoke` is the original
+/// behaviour and must stay byte-identical; `DeepSeekV4Dsml` renders and parses
+/// DeepSeek V4's native `｜DSML｜` tool format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    JsonInvoke,
+    DeepSeekV4Dsml,
+}
+
+impl Default for Dialect {
+    fn default() -> Self {
+        Self::JsonInvoke
+    }
+}
+
+impl Dialect {
+    pub const JSON_INVOKE: &'static str = "json_invoke";
+    pub const DEEPSEEK_V4_DSML: &'static str = "deepseek_v4_dsml";
+
+    /// Parse a configured dialect name. Unknown values are a hard error: a
+    /// silent fallback would teach one format and parse another.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            Self::JSON_INVOKE => Ok(Self::JsonInvoke),
+            Self::DEEPSEEK_V4_DSML => Ok(Self::DeepSeekV4Dsml),
+            other => Err(format!(
+                "unknown dialect {other:?}; expected \"{}\" or \"{}\"",
+                Self::JSON_INVOKE,
+                Self::DEEPSEEK_V4_DSML
+            )),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::JsonInvoke => Self::JSON_INVOKE,
+            Self::DeepSeekV4Dsml => Self::DEEPSEEK_V4_DSML,
+        }
+    }
+
+    /// One tool call as the model reads it (history replay and repair).
+    pub fn render_tool_call(&self, call: &ToolCall) -> String {
+        match self {
+            Self::JsonInvoke => format!(
+                "{INVOKE_OPEN} name=\"{}\">{}</invoke>",
+                call.name, call.arguments
+            ),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_call(call),
+        }
+    }
+
+    /// Extract calls plus the prose with their blocks removed.
+    #[allow(dead_code)] // public dialect surface; exercised by tests
+    pub fn parse_tool_calls(&self, text: &str) -> (String, Vec<ToolCall>) {
+        match self {
+            Self::JsonInvoke => (strip_tool_calls(text), extract_tool_calls(text)),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::parse_tool_calls(text),
+        }
+    }
+
+    /// Teaching text appended for the offered tools (`""` when none).
+    pub fn system_extra(&self, tools: &[serde_json::Value]) -> String {
+        match self {
+            Self::JsonInvoke => inject_tool_descriptions("", tools),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::tools_block(tools),
+        }
+    }
+
+    /// Per-turn re-anchoring reminder.
+    pub fn reminder(&self) -> String {
+        match self {
+            Self::JsonInvoke => periodic_reminder(),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::reminder(),
+        }
+    }
+
+    /// How one tool result is shown to the model.
+    pub fn render_tool_result(&self, name: &str, content: &str) -> String {
+        match self {
+            Self::JsonInvoke => format!("Tool result (id={name}):\n{content}"),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_result(name, content),
+        }
+    }
+
+    /// Concrete wire shape restated by repair tiers.
+    pub fn wire_shape(&self) -> String {
+        match self {
+            Self::JsonInvoke => TEMPLATE.to_string(),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::render_tool_call(&ToolCall {
+                name: "tool_name".into(),
+                arguments: "{\"param1\": \"value1\", \"count\": 5}".into(),
+            }),
+        }
+    }
+
+    /// Ordered text / tool / malformed events for one complete reply.
+    pub fn scan(&self, text: &str) -> Vec<ScanEvent> {
+        match self {
+            Self::JsonInvoke => scan(text),
+            Self::DeepSeekV4Dsml => crate::dialect_dsml::scan(text),
+        }
+    }
+}
+
 /// `(name, canonical json)` — the port of Python's `fingerprint()`.
 ///
 /// `serde_json::Map` is a `BTreeMap` (the workspace does not enable
@@ -340,7 +447,10 @@ pub fn format_tool_calls_for_history(calls: &[serde_json::Value]) -> String {
         };
         // History replay must round-trip the exact bytes the model sent, so
         // the body is inserted verbatim rather than re-serialised.
-        blocks.push(format!("<invoke name=\"{name}\">{body}</invoke>"));
+        blocks.push(Dialect::JsonInvoke.render_tool_call(&ToolCall {
+            name: name.to_string(),
+            arguments: body,
+        }));
     }
     blocks.join("\n")
 }
@@ -517,12 +627,24 @@ fn repair_tier(attempt: usize) -> usize {
 /// and reason across retries: an earlier version replaced everything with a
 /// nameless `repair_omitted_call`, so attempts two and three told the model
 /// nothing about what it had got wrong.
+#[allow(dead_code)] // json wrapper; the live path selects a dialect
 pub fn build_repair_prompt(
     malformed: &[MalformedCall],
     specs: &[ToolSpec],
     attempt: usize,
 ) -> String {
+    build_repair_prompt_for(&Dialect::JsonInvoke, malformed, specs, attempt)
+}
+
+/// Dialect-aware repair prompt; [`build_repair_prompt`] is the json wrapper.
+pub fn build_repair_prompt_for(
+    dialect: &Dialect,
+    malformed: &[MalformedCall],
+    specs: &[ToolSpec],
+    attempt: usize,
+) -> String {
     let tier = repair_tier(attempt);
+    let wire_shape = dialect.wire_shape();
     let mut out = String::new();
 
     match tier {
@@ -573,16 +695,16 @@ pub fn build_repair_prompt(
             // modes (legacy marker tags, doubled closing tag); a first repair turn
             // needs the same warning, not a weaker one.
             out.push_str("\n\n");
-            out.push_str(&periodic_reminder());
+            out.push_str(&dialect.reminder());
             out.push_str("\n\nOnly fix the listed failures. Do not repeat calls already accepted.");
         }
         1 => {
             out.push_str("\n\nReminder of the wire shape:\n");
-            out.push_str(TEMPLATE);
+            out.push_str(&wire_shape);
         }
         _ => {
             out.push_str("\n\n");
-            out.push_str(TEMPLATE);
+            out.push_str(&wire_shape);
         }
     }
 
@@ -1264,23 +1386,33 @@ mod tests {
 /// precedes an opening tag is released immediately; a trailing partial tag
 /// (e.g. `...<inv`) is held back so it is never emitted half-formed.
 pub struct StreamToolFilter {
-    parser: Parser,
+    inner: FilterInner,
     /// Completed calls, in discovery order.
     pub calls: Vec<ToolCall>,
     /// Blocks that failed to parse, in discovery order.
     pub malformed: Vec<MalformedCall>,
 }
 
+/// Dialect-specific streaming grammar.
+enum FilterInner {
+    Json(Parser),
+    Dsml(crate::dialect_dsml::DsmlStreamFilter),
+}
+
 impl Default for StreamToolFilter {
     fn default() -> Self {
-        Self::new()
+        Self::new(Dialect::JsonInvoke)
     }
 }
 
 impl StreamToolFilter {
-    pub fn new() -> Self {
+    pub fn new(dialect: Dialect) -> Self {
+        let inner = match dialect {
+            Dialect::JsonInvoke => FilterInner::Json(Parser::new()),
+            Dialect::DeepSeekV4Dsml => FilterInner::Dsml(crate::dialect_dsml::DsmlStreamFilter::new()),
+        };
         Self {
-            parser: Parser::new(),
+            inner,
             calls: Vec::new(),
             malformed: Vec::new(),
         }
@@ -1288,15 +1420,35 @@ impl StreamToolFilter {
 
     /// Feed a text chunk; returns prose that is safe to emit as content now.
     pub fn feed(&mut self, text: &str) -> String {
-        let events = self.parser.feed(text);
-        self.collect(events)
+        match &mut self.inner {
+            FilterInner::Json(parser) => {
+                let events = parser.feed(text);
+                self.collect(events)
+            }
+            FilterInner::Dsml(filter) => {
+                let prose = filter.feed(text);
+                self.calls = filter.calls.clone();
+                self.malformed = filter.malformed.clone();
+                prose
+            }
+        }
     }
 
     /// Flush at end of stream. A trailing partial tag is prose; an unterminated
     /// block is malformed, so it reaches repair instead of the client.
     pub fn finish(&mut self) -> String {
-        let events = self.parser.finish();
-        self.collect(events)
+        match &mut self.inner {
+            FilterInner::Json(parser) => {
+                let events = parser.finish();
+                self.collect(events)
+            }
+            FilterInner::Dsml(filter) => {
+                let prose = filter.finish();
+                self.calls = filter.calls.clone();
+                self.malformed = filter.malformed.clone();
+                prose
+            }
+        }
     }
 
     fn collect(&mut self, events: Vec<ScanEvent>) -> String {
@@ -1492,7 +1644,7 @@ mod stream_tests {
 
     #[test]
     fn passes_plain_text_through() {
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         assert_eq!(f.feed("hello "), "hello ");
         assert_eq!(f.feed("world"), "world");
         assert_eq!(f.finish(), "");
@@ -1501,7 +1653,7 @@ mod stream_tests {
 
     #[test]
     fn extracts_block_split_across_chunks() {
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         assert_eq!(f.feed("Sure. <inv"), "Sure. ");
         assert_eq!(f.feed("oke name=\"bash\">{\"command\":"), "");
         assert_eq!(f.feed("\"ls\"}</invoke>"), "");
@@ -1515,7 +1667,7 @@ mod stream_tests {
 
     #[test]
     fn holds_back_partial_tag_until_finish() {
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         assert_eq!(f.feed("text <inv"), "text ");
         // "<invoke" is still an incomplete opening tag: hold it, do not emit.
         assert_eq!(f.feed("oke"), "");
@@ -1525,7 +1677,7 @@ mod stream_tests {
 
     #[test]
     fn unterminated_block_is_malformed_at_finish() {
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         assert_eq!(f.feed("a <invoke name=\"x\">{"), "a ");
         assert_eq!(f.finish(), "");
         assert!(f.calls.is_empty());
@@ -1536,7 +1688,7 @@ mod stream_tests {
     #[test]
     fn swallows_two_extra_closing_tags() {
         let c = INVOKE_CLOSE;
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         let out = f.feed(&format!("<invoke name=\"t\">{{\"a\":1}}{c}{c}{c} ok"));
         assert_eq!(out, " ok");
         assert_eq!(f.calls.len(), 1);
@@ -1545,7 +1697,7 @@ mod stream_tests {
     #[test]
     fn leaves_closing_tags_beyond_the_limit() {
         let c = INVOKE_CLOSE;
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         let out = f.feed(&format!("<invoke name=\"t\">{{\"a\":1}}{c}{c}{c}{c}x"));
         assert_eq!(out, format!("{c}x"));
         assert_eq!(f.calls.len(), 1);
@@ -1553,7 +1705,7 @@ mod stream_tests {
 
     #[test]
     fn prose_after_block_is_emitted() {
-        let mut f = StreamToolFilter::new();
+        let mut f = StreamToolFilter::new(Dialect::JsonInvoke);
         let out = f.feed("<invoke name=\"t\">{\"a\":1}</invoke> done");
         assert_eq!(out, " done");
         assert_eq!(f.calls.len(), 1);

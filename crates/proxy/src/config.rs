@@ -23,6 +23,8 @@ pub struct FileConfig {
 pub struct ProxySection {
     pub host: String,
     pub port: u16,
+    /// Wire dialect: `json_invoke` (default) or `deepseek_v4_dsml`.
+    pub dialect: Option<String>,
 }
 
 impl Default for ProxySection {
@@ -30,6 +32,7 @@ impl Default for ProxySection {
         Self {
             host: "0.0.0.0".into(),
             port: 9174,
+            dialect: None,
         }
     }
 }
@@ -140,6 +143,8 @@ impl Default for LimitsSection {
 pub struct Config {
     pub host: String,
     pub port: u16,
+    /// Selected wire dialect, resolved and validated at load time.
+    pub dialect: crate::dialect::Dialect,
     pub db_path: String,
     pub model: String,
     pub thinking: bool,
@@ -167,9 +172,16 @@ impl Config {
         let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| default_config_path());
         let file = Self::read_file(&path)?;
 
+        let dialect_name = env_str("DIALECT").or(file.proxy.dialect);
+        let dialect = match dialect_name {
+            Some(name) => crate::dialect::Dialect::parse(&name)?,
+            None => crate::dialect::Dialect::default(),
+        };
+
         Ok(Self {
             host: env_str("PROXY_HOST").unwrap_or(file.proxy.host),
             port: env_num("PROXY_PORT").unwrap_or(file.proxy.port),
+            dialect,
             db_path: env_str("DB_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| anchor_path(&path, &file.storage.db_path))
@@ -306,5 +318,37 @@ mod tests {
     fn missing_file_is_not_an_error() {
         let f = Config::read_file("/nonexistent/config.toml").unwrap();
         assert_eq!(f.proxy.port, 9174);
+    }
+
+    #[test]
+    fn dialect_defaults_to_json_invoke() {
+        use crate::dialect::Dialect;
+        let f: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(f.proxy.dialect, None);
+        assert_eq!(Dialect::default(), Dialect::JsonInvoke);
+    }
+
+    #[test]
+    fn dialect_key_is_read_from_the_proxy_section() {
+        let f: FileConfig = toml::from_str("[proxy]\ndialect = \"deepseek_v4_dsml\"\n").unwrap();
+        assert_eq!(f.proxy.dialect.as_deref(), Some("deepseek_v4_dsml"));
+    }
+
+    #[test]
+    fn dialect_names_parse_and_unknown_is_a_hard_error() {
+        use crate::dialect::Dialect;
+        assert_eq!(
+            Dialect::parse("json_invoke").unwrap(),
+            Dialect::JsonInvoke
+        );
+        assert_eq!(
+            Dialect::parse("deepseek_v4_dsml").unwrap(),
+            Dialect::DeepSeekV4Dsml
+        );
+        let err = Dialect::parse("dsml").unwrap_err();
+        assert!(
+            err.contains("unknown dialect"),
+            "unknown values must not fall back: {err}"
+        );
     }
 }

@@ -25,6 +25,7 @@
 mod cli;
 mod config;
 mod dialect;
+mod dialect_dsml;
 mod images;
 mod log;
 mod pool;
@@ -74,6 +75,8 @@ struct Settings {
     image_max_bytes: usize,
     /// SSE keep-alive interval in seconds (`HEARTBEAT_INTERVAL`).
     heartbeat_interval_secs: f64,
+    /// Wire dialect selected at startup (`dialect` / `DIALECT`).
+    dialect: dialect::Dialect,
 }
 
 impl Settings {
@@ -93,6 +96,7 @@ impl Settings {
             request_timeout_secs: cfg.request_timeout_secs,
             image_max_bytes: cfg.image_max_bytes,
             heartbeat_interval_secs: cfg.heartbeat_interval_secs,
+            dialect: cfg.dialect,
         }
     }
 }
@@ -162,6 +166,9 @@ fn restart_only_keys(old: &config::Config, new: &config::Config) -> Vec<&'static
     }
     if old.image_max_bytes != new.image_max_bytes {
         changed.push("image_max_bytes");
+    }
+    if old.dialect != new.dialect {
+        changed.push("dialect");
     }
     changed
 }
@@ -307,27 +314,57 @@ struct Msg {
 /// flattened transcript used to rebuild the session when it overflows.
 ///
 /// Mirrors the Python proxy's `prompt` / `replay_prompt` pair.
+#[allow(dead_code)] // json-only wrapper kept for the prompt golden tests
 fn build_prompts(
     req: &ChatRequest,
     existing: Option<&ThreadState>,
     system_extra: &str,
     image_note: Option<&str>,
 ) -> (String, String) {
+    build_prompts_with(
+        req,
+        existing,
+        system_extra,
+        image_note,
+        dialect::Dialect::JsonInvoke,
+        false,
+    )
+}
+
+/// Dialect-aware prompt builder. `json_invoke` keeps the original path
+/// byte-for-byte; the DSML dialect owns its whole transcript shape (BOS,
+/// system prefix, folded user turns, generation tail).
+fn build_prompts_with(
+    req: &ChatRequest,
+    existing: Option<&ThreadState>,
+    system_extra: &str,
+    image_note: Option<&str>,
+    wire: dialect::Dialect,
+    thinking: bool,
+) -> (String, String) {
     let (specs, required) = resolve_tools(req);
-    let reminder = prompt::reminder(&req.tools);
-    let out = prompt::for_turn(&prompt::Turn {
+    let reminder = prompt::reminder(&req.tools, wire);
+    let directive = prompt::directive(
+        !specs.is_empty(),
+        required,
+        req.parallel_tool_calls,
+        prompt::choice_none(req.tool_choice.as_ref()),
+    );
+    let turn = prompt::Turn {
         messages: &req.messages,
         continuation: existing.is_some(),
         system_extra,
         image_note,
         reminder: reminder.as_deref(),
-        directive: prompt::directive(
-            !specs.is_empty(),
-            required,
-            req.parallel_tool_calls,
-            prompt::choice_none(req.tool_choice.as_ref()),
-        ),
-    });
+        directive,
+    };
+    let out = match wire {
+        dialect::Dialect::JsonInvoke => prompt::for_turn(&turn),
+        dialect::Dialect::DeepSeekV4Dsml => {
+            let offered: Vec<Value> = specs.iter().map(|s| s.raw.clone()).collect();
+            prompt::for_turn_dsml(&turn, &offered, thinking)
+        }
+    };
     (out.delta, out.replay)
 }
 
@@ -502,6 +539,11 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// UUID keeps one DeepSeek conversation across compaction), and only then a
 /// hash of the messages. The old message-only hash stranded a conversation on
 /// a fresh remote session every time the first message changed.
+/// The part of an email before the `@`, for log lines.
+fn short_account(email: &str) -> &str {
+    email.split('@').next().unwrap_or(email)
+}
+
 fn thread_key(headers: &HeaderMap, req: &ChatRequest) -> String {
     if let Some(v) = req
         .thread_id
@@ -547,7 +589,7 @@ fn thread_key(headers: &HeaderMap, req: &ChatRequest) -> String {
 /// The role prefixes are byte-identical to Python's `[prompts]` table: the
 /// model was anchored on this framing, so `[user]:` instead of `User: ` is a
 /// real behavioural difference, not cosmetics.
-fn render_message(m: &Msg) -> Option<String> {
+fn render_message(m: &Msg, wire: dialect::Dialect) -> Option<String> {
     let body = content_text(&m.content);
     match m.role.as_str() {
         "system" | "developer" => {
@@ -586,7 +628,7 @@ fn render_message(m: &Msg) -> Option<String> {
         }
         "tool" => {
             let id = m.tool_call_id.as_deref().unwrap_or("");
-            Some(format!("Tool result (id={id}):\n{body}"))
+            Some(wire.render_tool_result(id, &body))
         }
         _ => {
             if body.is_empty() {
@@ -612,8 +654,11 @@ const LOST_REPLY_NOTE: &str = "[proxy] The previous assistant reply was lost on 
 
 /// Fresh thread: flatten the whole conversation, then the continuation line
 /// when the last message is a tool result (Python's `last_role == "tool"`).
-fn flatten_transcript(messages: &[Msg]) -> String {
-    let blocks: Vec<String> = messages.iter().filter_map(render_message).collect();
+fn flatten_transcript(messages: &[Msg], wire: dialect::Dialect) -> String {
+    let blocks: Vec<String> = messages
+        .iter()
+        .filter_map(|m| render_message(m, wire))
+        .collect();
     let mut out = blocks.join("\n\n");
     if last_non_system_role(messages) == Some("tool") {
         out.push_str("\n\n");
@@ -652,8 +697,11 @@ fn last_non_system_role(messages: &[Msg]) -> Option<&str> {
 /// tool result. Rendering the whole delta (rather than just the newest user
 /// message) is what makes the tool round trip work: the `role: "tool"`
 /// messages carry the results the model's call returned.
-fn continuation_prompt(delta: &[Msg]) -> Option<String> {
-    let blocks: Vec<String> = delta.iter().filter_map(render_message).collect();
+fn continuation_prompt(delta: &[Msg], wire: dialect::Dialect) -> Option<String> {
+    let blocks: Vec<String> = delta
+        .iter()
+        .filter_map(|m| render_message(m, wire))
+        .collect();
     if blocks.is_empty() {
         return None;
     }
@@ -1364,6 +1412,8 @@ async fn completion_with_retry(
 /// forwarded to the client.
 struct Recovery {
     specs: Vec<dialect::ToolSpec>,
+    /// Wire dialect; repair restates the matching block shape.
+    dialect: dialect::Dialect,
     calls: Vec<dialect::ToolCall>,
     pending: Vec<dialect::MalformedCall>,
     required: bool,
@@ -1379,9 +1429,15 @@ struct Recovery {
 }
 
 impl Recovery {
-    fn new(specs: Vec<dialect::ToolSpec>, required: bool, parallel: bool) -> Self {
+    fn new(
+        specs: Vec<dialect::ToolSpec>,
+        required: bool,
+        parallel: bool,
+        dialect: dialect::Dialect,
+    ) -> Self {
         Self {
             specs,
+            dialect,
             calls: Vec::new(),
             pending: Vec::new(),
             required,
@@ -1458,7 +1514,8 @@ impl Recovery {
     /// counters. `previous` snapshots every call accepted so far, so the next
     /// repair cannot re-accept an echo of one of them.
     fn begin_repair(&mut self, attempt: usize) -> String {
-        let mut prompt = dialect::build_repair_prompt(&self.pending, &self.specs, attempt);
+        let mut prompt =
+            dialect::build_repair_prompt_for(&self.dialect, &self.pending, &self.specs, attempt);
         // Schemas only on the first attempt. They are the expensive part of a
         // repair prompt, and they answer "what shape were the arguments?" -
         // a question the model has already been given the answer to by the time
@@ -1623,8 +1680,10 @@ async fn chat_completions(
         .with_param("model")
         .into_response();
     }
+    let bound = state.store.get_binding(&key).ok().flatten();
     tracing::info!(
         thread = %key,
+        account = %bound.as_deref().map_or("new", short_account),
         model = %model,
         stream = req.stream,
         messages = req.messages.len(),
@@ -1661,6 +1720,7 @@ async fn chat_completions(
         thinking,
         specs,
         required,
+        dialect: wire,
     } = prepared;
 
     let id = format!("chatcmpl-{}", uuid_like());
@@ -1693,6 +1753,7 @@ async fn chat_completions(
         required,
         parallel: req.parallel_tool_calls,
         stream: req.stream,
+        dialect: wire,
     })
     .await
 }
@@ -1766,6 +1827,8 @@ struct LiveTurn {
     parallel: bool,
     /// `false` collects the same chunks into one `chat.completion` body.
     stream: bool,
+    /// Wire dialect; selects the streaming tool-call grammar.
+    dialect: dialect::Dialect,
 }
 
 async fn stream_response(live: LiveTurn) -> Response {
@@ -1787,6 +1850,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         required,
         parallel,
         stream,
+        dialect: wire,
     } = live;
     let (tx, rx) = tokio::sync::mpsc::channel::<sse::Chunk>(32);
 
@@ -1852,7 +1916,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 .saturating_sub(started.elapsed());
             let pumped = match tokio::time::timeout(
                 budget,
-                pump(resp, &tx, &id, &model, created, idle, include_usage),
+                pump(resp, &tx, &id, &model, created, idle, include_usage, wire),
             )
             .await
             {
@@ -2182,8 +2246,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         // the same text) and the separate `extract_malformed` pass, so the
         // policy sees each event exactly once.
         filter.calls.clear();
-        let mut recovery = Recovery::new(specs, required, parallel);
-        for event in dialect::scan(&text) {
+        let mut recovery = Recovery::new(specs, required, parallel, wire);
+        for event in wire.scan(&text) {
             match recovery.accept(event) {
                 Ok(_) => {}
                 Err(e) => {
@@ -2254,7 +2318,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             if let Some(mid) = repair_mid {
                 cursor = Some(mid);
             }
-            for event in dialect::scan(&repair_text) {
+            for event in wire.scan(&repair_text) {
                 match recovery.accept(event) {
                     Ok(_) => {}
                     Err(e) => {
@@ -2340,7 +2404,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         let turn_usage = usage_block(prompt_tokens, &prose, &filter.calls);
         tracing::info!(
             thread = %key,
-            account = %account,
+            account = %short_account(&account),
             status = 200,
             finish_reason,
             tool_calls = filter.calls.len(),
@@ -2741,6 +2805,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         db_path = %cfg.db_path,
         model = %settings.model_name,
+        dialect = cfg.dialect.name(),
         thinking = settings.thinking_default,
         search = settings.search_enabled,
         "settings loaded"
@@ -2861,8 +2926,9 @@ async fn reload(state: &AppState) {
         .collect();
     let accounts_changed = wanted != old_pool.configured_emails();
 
+    let dialect = fresh.dialect.name();
     let generation = state.settings.replace(fresh.clone());
-    tracing::info!(generation, "config reloaded");
+    tracing::info!(generation, dialect, "config reloaded");
 
     if pool_changed || accounts_changed {
         rebuild_pool(state, fresh, old_pool).await;
@@ -3092,7 +3158,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_empty_messages_and_unknown_tool_choice() {
-        let mut req = request(vec![], vec![]);
+        let req = request(vec![], vec![]);
         assert_eq!(validate_request(&req).unwrap_err().code, "invalid_request");
 
         let mut req = request(vec![msg_with("user", "hi")], vec![]);
@@ -3188,7 +3254,7 @@ mod tests {
     #[test]
     fn recovery_rejects_unknown_tool_and_dumps_schemas() {
         let specs = dialect::tool_specs(&[tool_with_schema()]);
-        let mut recovery = Recovery::new(specs, false, true);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::JsonInvoke);
         let produced = recovery
             .accept(dialect::ScanEvent::Tool(dialect::ToolCall {
                 name: "nope".into(),
@@ -3205,7 +3271,7 @@ mod tests {
     #[test]
     fn recovery_required_call_missing_becomes_a_failure() {
         let specs = dialect::tool_specs(&[tool_with_schema()]);
-        let mut recovery = Recovery::new(specs, true, true);
+        let mut recovery = Recovery::new(specs, true, true, dialect::Dialect::JsonInvoke);
         recovery.require_call();
         assert!(recovery.has_pending());
         assert_eq!(recovery.pending[0].reason, "required_tool_call_missing");
@@ -3214,7 +3280,7 @@ mod tests {
     #[test]
     fn recovery_rejects_parallel_calls_when_disabled() {
         let specs = dialect::tool_specs(&[tool_with_schema()]);
-        let mut recovery = Recovery::new(specs, false, false);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
         let ok = dialect::ScanEvent::Tool(dialect::ToolCall {
             name: "bash".into(),
             arguments: "{\"command\": \"ls\"}".into(),
@@ -3230,7 +3296,7 @@ mod tests {
             msg_with("system", "be nice"),
             msg_with("user", "hi"),
             msg_with("assistant", "hello"),
-        ]);
+        ], dialect::Dialect::JsonInvoke);
         assert_eq!(text, "System: be nice\n\nUser: hi\n\nAssistant: hello");
     }
 
@@ -3238,7 +3304,7 @@ mod tests {
     fn tool_message_is_labelled_with_its_name() {
         let mut m = msg_with("tool", "exit 0");
         m.name = Some("bash".into());
-        assert_eq!(render_message(&m).unwrap(), "Tool result (id=):\nexit 0");
+        assert_eq!(render_message(&m, dialect::Dialect::JsonInvoke).unwrap(), "Tool result (id=):\nexit 0");
     }
 
     #[test]
@@ -3249,7 +3315,7 @@ mod tests {
             "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
         })];
         assert_eq!(
-            render_message(&m).unwrap(),
+            render_message(&m, dialect::Dialect::JsonInvoke).unwrap(),
             "Assistant:\n<invoke name=\"bash\">{\"command\":\"ls\"}</invoke>"
         );
     }
@@ -3295,7 +3361,7 @@ mod tests {
             }
         });
         let specs = dialect::tool_specs(&[tool_with_schema(), other]);
-        let mut recovery = Recovery::new(specs, false, true);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::JsonInvoke);
         recovery.pending.push(dialect::MalformedCall::new(
             Some("bash".into()),
             "{}".into(),
@@ -3326,7 +3392,7 @@ mod tests {
             (None, "repair_omitted_call"),
             (Some("bash".to_string()), "unterminated_block"),
         ] {
-            let mut recovery = Recovery::new(specs.clone(), false, true);
+            let mut recovery = Recovery::new(specs.clone(), false, true, dialect::Dialect::JsonInvoke);
             recovery.pending.push(dialect::MalformedCall::new(
                 name.clone(),
                 String::new(),
@@ -3355,7 +3421,7 @@ mod tests {
         let not_object = concat!("<in", "voke name=\"bash\">[1,2]</in", "voke>");
         for text in [bad_json, not_object] {
             let specs = dialect::tool_specs(&[tool_with_schema()]);
-            let mut recovery = Recovery::new(specs, false, true);
+            let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::JsonInvoke);
             for event in dialect::scan(text) {
                 recovery.accept(event).expect("malformed is not an error");
             }

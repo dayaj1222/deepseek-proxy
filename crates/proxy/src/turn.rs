@@ -16,7 +16,7 @@ use crate::dialect;
 use crate::images;
 use crate::prompt;
 use crate::threads::ThreadState;
-use crate::{build_prompts, completion_body, delta_messages, resolve_tools, want_thinking};
+use crate::{completion_body, delta_messages, resolve_tools, want_thinking};
 use crate::{AppState, ChatRequest, ProxyError};
 
 /// Everything the streaming half needs, or a request-shaped error.
@@ -32,6 +32,8 @@ pub struct Prepared {
     pub thinking: bool,
     pub specs: Vec<dialect::ToolSpec>,
     pub required: bool,
+    /// Wire dialect this turn speaks (snapshot at turn start).
+    pub dialect: dialect::Dialect,
 }
 
 /// Prepare a turn: resume, prompts, session, image, body.
@@ -52,10 +54,17 @@ pub async fn prepare(
     // a continuation would send only the delta into an empty session and lose
     // everything said before it.
     let rebinding = rebind.is_some();
+    let wire = state.settings.get().dialect;
+    let thinking = want_thinking(req, state.settings.get().thinking_default);
 
     // Tool definitions are taught once, on the first turn of a thread. Later
     // turns ride on the server-side conversation, like the Python proxy.
-    let system_extra = dialect::inject_tool_descriptions("", &req.tools);
+    // The DSML dialect folds the tools block into its BOS/system prefix, so it
+    // needs no post-transcript extra.
+    let system_extra = match wire {
+        dialect::Dialect::JsonInvoke => wire.system_extra(&req.tools),
+        dialect::Dialect::DeepSeekV4Dsml => String::new(),
+    };
     let (specs, required) = resolve_tools(req);
 
     // Image intake runs before the prompt is built because a turn carrying
@@ -86,11 +95,13 @@ pub async fn prepare(
         );
     }
 
-    let (prompt, replay) = build_prompts(
+    let (prompt, replay) = crate::build_prompts_with(
         req,
         if rebinding { None } else { existing.as_ref() },
         &system_extra,
         image_note.as_deref(),
+        wire,
+        thinking,
     );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
@@ -105,6 +116,7 @@ pub async fn prepare(
         fresh = existing.is_none(),
         prompt_chars = prompt.len(),
         replay_chars = replay.len(),
+        dialect = wire.name(),
         "turn built"
     );
     // A brand-new thread has nothing to replay into, so a limit hit is final.
@@ -172,6 +184,7 @@ pub async fn prepare(
         thinking,
         specs,
         required,
+        dialect: wire,
     })
 }
 

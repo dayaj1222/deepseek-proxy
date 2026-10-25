@@ -9,7 +9,6 @@
 
 use serde_json::Value;
 
-use crate::dialect;
 use crate::{continuation_prompt, delta_messages, flatten_transcript, Msg};
 
 /// Both prompts for one turn.
@@ -48,14 +47,18 @@ pub struct Turn<'a> {
 /// 4. protocol reminder — at the tail of every turn;
 /// 5. the `tool_choice` directive last of all.
 pub fn for_turn(turn: &Turn<'_>) -> Prompt {
-    let transcript = flatten_transcript(turn.messages);
+    let transcript = flatten_transcript(turn.messages, crate::dialect::Dialect::JsonInvoke);
     let mut replay = if turn.system_extra.is_empty() {
         transcript
     } else {
         format!("{transcript}\n\n{}", turn.system_extra)
     };
     let mut delta = if turn.continuation {
-        continuation_prompt(delta_messages(turn.messages)).unwrap_or_default()
+        continuation_prompt(
+            delta_messages(turn.messages),
+            crate::dialect::Dialect::JsonInvoke,
+        )
+        .unwrap_or_default()
     } else {
         replay.clone()
     };
@@ -87,7 +90,41 @@ pub fn for_turn(turn: &Turn<'_>) -> Prompt {
     Prompt { delta, replay }
 }
 
-/// The extra prompt lines for `tool_choice` / `parallel_tool_calls`.
+/// DSML dialect prompt assembly.
+///
+/// Same ordering contract as [`for_turn`] — image note, then the tail reminder,
+/// then the `tool_choice` directive — but the transcript shape is the V4
+/// template's, and the generation tail is structural, so it goes last.
+pub fn for_turn_dsml(turn: &Turn<'_>, tools: &[Value], thinking: bool) -> Prompt {
+    let mut replay = crate::dialect_dsml::render_prompt(turn.messages, tools);
+    let mut delta = if turn.continuation {
+        crate::dialect_dsml::render_delta(turn.messages)
+    } else {
+        replay.clone()
+    };
+
+    if let Some(note) = turn.image_note {
+        delta = format!("{note}\n\n{delta}");
+        replay = format!("{note}\n\n{replay}");
+    }
+    if let Some(reminder) = turn.reminder {
+        delta.push_str("\n\n");
+        delta.push_str(reminder);
+        replay.push_str("\n\n");
+        replay.push_str(reminder);
+    }
+    if let Some(directive) = &turn.directive {
+        delta.push_str(directive);
+        replay.push_str(directive);
+    }
+    let tail = crate::dialect_dsml::generation_tail(thinking);
+    delta.push_str(&tail);
+    replay.push_str(&tail);
+
+    Prompt { delta, replay }
+}
+
+
 ///
 /// Port of the block at the top of `ChatService.events()`. `offered` is whether
 /// the *filtered* tool list is non-empty, so `tool_choice: "none"` takes the
@@ -122,11 +159,11 @@ pub fn choice_none(tool_choice: Option<&Value>) -> bool {
 }
 
 /// Reminder text to append, or `None` when the turn offers no tools.
-pub fn reminder(tools: &[Value]) -> Option<String> {
+pub fn reminder(tools: &[Value], wire: crate::dialect::Dialect) -> Option<String> {
     if tools.is_empty() {
         None
     } else {
-        Some(dialect::periodic_reminder())
+        Some(wire.reminder())
     }
 }
 
@@ -214,7 +251,8 @@ mod tests {
 
     #[test]
     fn no_tools_means_no_reminder() {
-        assert!(reminder(&[]).is_none());
-        assert!(reminder(&[json!({})]).is_some());
+        use crate::dialect::Dialect;
+        assert!(reminder(&[], Dialect::JsonInvoke).is_none());
+        assert!(reminder(&[json!({})], Dialect::JsonInvoke).is_some());
     }
 }

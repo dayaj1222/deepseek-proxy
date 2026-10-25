@@ -149,13 +149,14 @@ pub async fn pump(
     created: u64,
     idle: std::time::Duration,
     include_usage: bool,
+    dialect: dialect::Dialect,
 ) -> Pumped {
     let mut router = FragmentRouter::new();
     let mut events = Vec::new();
     let mut buf = String::new();
     let mut current_event = String::new();
     let mut parent: Option<i64> = None;
-    let mut filter = dialect::StreamToolFilter::new();
+    let mut filter = dialect::StreamToolFilter::new(dialect);
     let mut emitted = false;
     let mut text_all = String::new();
     let mut prose = String::new();
