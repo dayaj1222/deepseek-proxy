@@ -75,6 +75,11 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
 }
 
 fn parse_call(raw: &str) -> Result<ToolCall, Option<String>> {
+    let raw = raw
+        .trim()
+        .strip_suffix("</tool>")
+        .map(str::trim_end)
+        .unwrap_or_else(|| raw.trim());
     let value: Value = serde_json::from_str(raw).map_err(|_| None)?;
     let name = value
         .get("name")
@@ -168,7 +173,7 @@ mod tests {
 
     #[test]
     fn one_marker_routes_json_call_and_strips_it_from_prose() {
-        let raw = "Working. <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}";
+        let raw = "Working. <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}</tool>";
         let (prose, calls) = parse_tool_calls(raw);
         assert_eq!(prose, "Working. ");
         assert_eq!(
@@ -190,7 +195,7 @@ mod tests {
         assert_eq!(filter.feed("hello <to"), "hello ");
         assert_eq!(
             filter
-                .feed("ol>{\"name\":\"bash\",\"arguments\":{}}")
+                .feed("ol>{\"name\":\"bash\",\"arguments\":{}}</tool>")
                 .as_str(),
             ""
         );
