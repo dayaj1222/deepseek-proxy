@@ -160,7 +160,7 @@ fn env_val(key: &str) -> Option<String> {
 /// Accounts from `DEEPSEEK_EMAIL_<i>`/`PASSWORD_<i>`/`TOKEN_<i>`, falling back to
 /// unindexed names and then the project's `.env`.
 ///
-/// Indices listed in `[deepseek] disabled_accounts` (or the
+/// Addresses listed in `[deepseek] disabled_accounts` (or the
 /// `DEEPSEEK_DISABLED_ACCOUNTS` environment variable) are skipped before their
 /// spec is built, so they never reach the pool.
 pub fn env_accounts() -> Vec<pool::AccountSpec> {
@@ -178,12 +178,15 @@ pub fn env_accounts() -> Vec<pool::AccountSpec> {
         // never enters the pool, and never receives a thread binding. The
         // `continue` (not `break`) keeps later indices alive: disabling 1 must
         // not silently disable 2.
-        if disabled.contains(&i) {
-            tracing::debug!(index = i, "account disabled by config, skipping");
+        let email = email.unwrap_or_else(|| format!("token-account-{i}"));
+        // `.env` accounts are unnumbered, so only an email entry can disable
+        // one. Numbered entries address the database list.
+        if disabled.contains_email(&email) {
+            tracing::debug!(account = %email, "account disabled by config, skipping");
             continue;
         }
         out.push(pool::AccountSpec {
-            email: email.unwrap_or_else(|| format!("token-account-{i}")),
+            email,
             password: password.unwrap_or_default(),
             token,
         });
@@ -204,13 +207,36 @@ pub fn env_accounts() -> Vec<pool::AccountSpec> {
     out
 }
 
+/// Database accounts numbered from 1 in creation order.
+///
+/// This numbering is the contract `disabled_accounts` numbers refer to, and it
+/// is what `accounts list` prints, so the config line can be read straight off
+/// the CLI output. Deleting an account renumbers the ones added after it.
+pub fn db_accounts_numbered(store: &store::Store) -> Result<Vec<(usize, store::AccountRow)>, store::StoreError> {
+    Ok(store
+        .accounts()?
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| (i + 1, row))
+        .collect())
+}
+
 /// Every usable account: environment first (explicit wins), then accounts
 /// added with `deepseek-rs accounts add`, de-duplicated by email.
 pub fn load_accounts(store: &store::Store) -> Vec<pool::AccountSpec> {
     let mut out = env_accounts();
+    let disabled = config::disabled_accounts();
     let known: Vec<String> = out.iter().map(|a| a.email.clone()).collect();
-    for row in store.accounts().unwrap_or_default() {
+    for (number, row) in db_accounts_numbered(store).unwrap_or_default() {
         if known.contains(&row.email) {
+            continue;
+        }
+        if disabled.contains(number, &row.email) {
+            tracing::debug!(
+                number,
+                account = %row.email,
+                "account disabled by config, skipping"
+            );
             continue;
         }
         out.push(pool::AccountSpec {
@@ -864,23 +890,34 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
     match sub {
         "" | "list" | "ls" => {
             let env = env_accounts();
-            let db = store.accounts()?;
+            let db = db_accounts_numbered(&store)?;
             let disabled = config::disabled_accounts();
             if env.is_empty() && db.is_empty() && disabled.is_empty() {
                 println!("no accounts configured");
                 println!("add one:  deepseek-rs accounts add <email> <password>");
                 return Ok(0);
             }
-            println!("{:<32} {:<8} {:<9}  {}", "email", "source", "auth", "added");
+            println!(
+                "{:<4} {:<32} {:<8} {:<9}  {}",
+                "#", "email", "source", "auth", "added"
+            );
             for a in &env {
                 let auth = if a.token.is_some() {
                     "token"
                 } else {
                     "password"
                 };
-                println!("{:<32} {:<8} {:<9}  {}", a.email, "env", auth, "-");
+                let mark = if disabled.contains_email(&a.email) {
+                    "  (disabled)"
+                } else {
+                    ""
+                };
+                println!(
+                    "{:<4} {:<32} {:<8} {:<9}  {}{}",
+                    "-", a.email, "env", auth, "-", mark
+                );
             }
-            for a in &db {
+            for (number, a) in &db {
                 let auth = if a.token.is_some() {
                     "token"
                 } else if a.password.is_empty() {
@@ -888,12 +925,19 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 } else {
                     "password"
                 };
+                let mark = if disabled.contains(*number, &a.email) {
+                    "  (disabled)"
+                } else {
+                    ""
+                };
                 println!(
-                    "{:<32} {:<8} {:<9}  {}",
+                    "{:<4} {:<32} {:<8} {:<9}  {}{}",
+                    number,
                     a.email,
                     "db",
                     auth,
-                    human_age(a.created_at)
+                    human_age(a.created_at),
+                    mark
                 );
             }
             if !db.is_empty() {
@@ -904,13 +948,24 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
                 );
             }
             if !disabled.is_empty() {
-                let list = disabled
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("\ndisabled by config (index {list}): not loaded, not logged in");
-                println!("re-enable: remove from [deepseek] disabled_accounts in config.toml");
+                let mut parts: Vec<String> = Vec::new();
+                if !disabled.numbers.is_empty() {
+                    let list = disabled
+                        .numbers
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    parts.push(format!("#{list}"));
+                }
+                if !disabled.emails.is_empty() {
+                    parts.push(disabled.emails.join(", "));
+                }
+                println!(
+                    "\ndisabled by config ({}): not loaded, not logged in",
+                    parts.join("; ")
+                );
+                println!("re-enable: remove the entry from [deepseek] disabled_accounts");
             }
             Ok(0)
         }
