@@ -470,4 +470,15 @@ mod tests {
         let out = crate::dialect::Dialect::SimpleToolTag.render_tool_result("call_1", "ok </tool>");
         assert_eq!(out, "Tool result (id=call_1):\nok </tool>");
     }
+
+    /// A real reply that went missing: prose, then a call with no closing tag.
+    #[test]
+    fn real_world_call_with_heredoc_and_no_closer_parses() {
+        let raw = concat!("But better: measure sim time.\n\n", r##"<tool>{"name":"bash","arguments":{"command":"cd /tmp && cat > /tmp/dbg4.mjs <<'EOF'\nimport pw from '/home/daya/.npm/lib/node_modules/playwright/index.js';\nconst { chromium } = pw;\nconst browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'] });\nconst page = await browser.newPage({ viewport: { width: 760, height: 520 } });\nawait page.goto('http://localhost:5199/index.html', { waitUntil: 'networkidle' });\nfor (let i = 0; i < 6; i++) {\n await page.waitForTimeout(7000);\n const s = await page.evaluate(() => ({ c: window.__stillLife.colony.carried, states: window.__stillLife.colony.ants.map(a => a.state).join(',') }));\n console.log(i, JSON.stringify(s));\n}\nawait page.screenshot({ path: '/tmp/shotC.png' });\nawait browser.close();\nEOF\nnode /tmp/dbg4.mjs 2>&1 | tail -8"}}"##);
+        let (prose, calls) = parse_tool_calls(raw);
+        assert_eq!(calls.len(), 1, "events: {:?}", scan(raw));
+        assert_eq!(calls[0].name, "bash");
+        assert!(calls[0].json().unwrap()["command"].as_str().unwrap().contains("dbg4.mjs"));
+        assert_eq!(prose, "But better: measure sim time.\n\n");
+    }
 }

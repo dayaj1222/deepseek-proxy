@@ -141,6 +141,44 @@ pub fn usage_block(prompt_tokens: u64, text: &str, calls: &[dialect::ToolCall]) 
 ///   byte, and emits `: keep-alive` while we wait. Python does this with
 ///   `asyncio.wait_for(queue.get(), heartbeat_interval)`.
 /// - The caller bounds the whole turn with `request_timeout`.
+/// Debug capture of one upstream turn (`DEEPSEEK_SSE_DUMP=<dir>`).
+///
+/// `<id>.sse` is the raw bytes exactly as received; `<id>.routed` is what the
+/// fragment router made of them, one line per piece, so a lost reply can be
+/// found by comparing the two. Off unless the variable is set.
+struct SseDump {
+    raw: std::fs::File,
+    routed: std::fs::File,
+}
+
+impl SseDump {
+    fn open(id: &str) -> Option<Self> {
+        let dir = std::path::PathBuf::from(std::env::var_os("DEEPSEEK_SSE_DUMP")?);
+        std::fs::create_dir_all(&dir).ok()?;
+        let open = |ext: &str| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(format!("{id}.{ext}")))
+                .ok()
+        };
+        Some(Self {
+            raw: open("sse")?,
+            routed: open("routed")?,
+        })
+    }
+
+    fn raw(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        let _ = self.raw.write_all(bytes);
+    }
+
+    fn routed(&mut self, channel: &str, text: &str) {
+        use std::io::Write;
+        let _ = writeln!(self.routed, "{channel}\t{}", text.escape_debug());
+    }
+}
+
 pub async fn pump(
     resp: reqwest::Response,
     tx: &ChunkSender,
@@ -169,6 +207,7 @@ pub async fn pump(
     let mut raw_bytes: usize = 0;
     let mut raw_events: usize = 0;
     let mut head = String::new();
+    let mut dump = SseDump::open(id);
 
     let mut byte_stream = resp.bytes_stream();
     loop {
@@ -229,6 +268,9 @@ pub async fn pump(
             }
         };
         raw_bytes += bytes.len();
+        if let Some(d) = dump.as_mut() {
+            d.raw(&bytes);
+        }
         if head.len() < 1024 {
             head.push_str(&String::from_utf8_lossy(&bytes));
             if head.len() > 1024 {
@@ -270,6 +312,15 @@ pub async fn pump(
             events.clear();
             route_event(&value, &mut router, &mut events);
             for ev in &events {
+                if let Some(d) = dump.as_mut() {
+                    d.routed(
+                        match ev.channel {
+                            Channel::Text => "text",
+                            Channel::Reasoning => "reasoning",
+                        },
+                        &ev.text,
+                    );
+                }
                 let delta = match ev.channel {
                     Channel::Text => {
                         text_all.push_str(&ev.text);
