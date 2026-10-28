@@ -35,7 +35,10 @@ impl ToolCall {
 /// Selected once at startup (`[proxy] dialect` or `DIALECT`) and threaded
 /// through prompt assembly, streaming and repair. `JsonInvoke` is the original
 /// behaviour and must stay byte-identical; `SimpleToolTag` is the one-marker
-/// `<tool>{json}` format.
+/// no wire format at all: the model calls tools in its own native spelling
+/// (recovered by `dialect_simple` and `dialect_dsml`), and the prompt states
+/// only that tools exist and that one call goes out per response, so no
+/// particular syntax is ever taught to the backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     JsonInvoke,
