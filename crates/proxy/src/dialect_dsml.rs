@@ -336,6 +336,40 @@ pub fn explanation(detail: &str) -> String {
     )
 }
 
+/// The vertical-bar character the backend spells its marker with (U+FF5C).
+/// Written as an escape so the marker is built, never typed.
+const BAR: char = '\u{FF5C}';
+
+/// The full marker token, e.g. `<bar><bar>DSML<bar><bar>` without brackets.
+pub fn marker() -> String {
+    format!("{BAR}{BAR}DSML{BAR}{BAR}")
+}
+
+/// Render one tool call in the backend's own DSML spelling.
+///
+/// This is the format the model emits unprompted and what the parser above
+/// reads back, so history replay, repair and the `native` dialect all show
+/// calls exactly as the model would write them.
+pub fn render_tool_call(call: &ToolCall) -> String {
+    let m = marker();
+    let args: Value = serde_json::from_str(&call.arguments)
+        .unwrap_or_else(|_| Value::Object(Default::default()));
+    let mut out = format!("<{m} calls>\n <{m} invoke name=\"{}\">\n", call.name);
+    if let Value::Object(map) = args {
+        for (key, value) in map {
+            let (text, is_string) = match value {
+                Value::String(s) => (s, true),
+                other => (other.to_string(), false),
+            };
+            out.push_str(&format!(
+                " <{m} parameter name=\"{key}\" string=\"{is_string}\">{text}</{m} parameter>\n"
+            ));
+        }
+    }
+    out.push_str(&format!(" </{m} invoke>\n</{m} calls>"));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +420,33 @@ mod tests {
         assert!(matches!(empty.results.as_slice(), [Err(f)] if f.detail.contains("no invoke")));
         // A stray closer alone is swallowed without a failure.
         assert!(parse_region("</｜｜DSML｜｜ calls>").results.is_empty());
+    }
+
+    #[test]
+    fn a_rendered_call_round_trips_through_the_parser() {
+        let call = ToolCall {
+            name: "bash".into(),
+            arguments: "{\"command\":\"ls -la\",\"timeout\":5}".into(),
+        };
+        let text = render_tool_call(&call);
+        // The marker is built from an escape, never typed literally here.
+        assert!(text.contains(&marker()), "{text}");
+        let (prose, calls) = crate::dialect_simple::parse_tool_calls(&text);
+        assert_eq!(prose.trim(), "");
+        assert_eq!(calls.len(), 1, "{text}");
+        assert_eq!(calls[0].name, "bash");
+        let args: Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["command"], Value::String("ls -la".into()));
+        assert_eq!(args["timeout"], Value::from(5));
+    }
+
+    #[test]
+    fn marker_is_built_not_typed() {
+        // The literal character must not appear in the source as a tag; the
+        // marker itself is assembled from U+FF5C.
+        let m = marker();
+        assert_eq!(m.chars().filter(|c| *c == BAR).count(), 4);
+        assert!(m.contains("DSML"));
     }
 
     #[test]

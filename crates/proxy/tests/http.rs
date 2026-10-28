@@ -129,7 +129,10 @@ async fn a_non_streaming_tool_call_is_in_the_message() {
     let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
     let script = MockScript::new(vec![Step::Sse(sse_reply(3, 2, &[good.as_str()]))]);
     let (upstream, _script) = start_mock(script).await;
-    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+    // The response below is spelled in the taught `<invoke>` format, so this
+    // test pins the dialect that teaches it. The default (`native`) teaches no
+    // syntax and reads the backend's own spelling instead.
+    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke")]).await;
 
     let mut body = hello_turn();
     body["tools"] = json!([{
@@ -224,7 +227,7 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     let repaired = sse_reply(4, 3, &[good.as_str()]);
     let script = MockScript::new(vec![Step::Sse(malformed), Step::Sse(repaired)]);
     let (upstream, script) = start_mock(script).await;
-    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke")]).await;
     let body = json!({
         "model": "deepseek-chat",
         "stream": true,

@@ -1566,6 +1566,7 @@ ENVIRONMENT
   NO_COLOR                  disables colour
   PROXY_HOST / PROXY_PORT   bind address (default 0.0.0.0:9174); the
                             --port / --host flags win over both
+  DIALECT                   native (default) | json_invoke | simple_tool_tag
   DB_PATH                   sqlite file (default deepseek-rs.db)
   CONFIG_PATH               alternate config.toml
   DEEPSEEK_RUNTIME_DIR      pidfile + log location

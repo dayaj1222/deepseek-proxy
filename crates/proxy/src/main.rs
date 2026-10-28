@@ -361,9 +361,7 @@ fn build_prompts_with(
     };
     let out = match wire {
         dialect::Dialect::JsonInvoke => prompt::for_turn(&turn),
-        dialect::Dialect::SimpleToolTag => {
-            prompt::for_turn_with_dialect(&turn, dialect::Dialect::SimpleToolTag)
-        }
+        other => prompt::for_turn_with_dialect(&turn, other),
     };
     (out.delta, out.replay)
 }

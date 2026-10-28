@@ -31,38 +31,46 @@ impl ToolCall {
 }
 
 /// Which wire dialect the proxy speaks to the backend.
+/// Which wire dialect the proxy speaks to the backend.
 ///
 /// Selected once at startup (`[proxy] dialect` or `DIALECT`) and threaded
-/// through prompt assembly, streaming and repair. `JsonInvoke` is the original
-/// behaviour and must stay byte-identical; `SimpleToolTag` is the one-marker
-/// no wire format at all: the model calls tools in its own native spelling
-/// (recovered by `dialect_simple` and `dialect_dsml`), and the prompt states
-/// only that tools exist and that one call goes out per response, so no
-/// particular syntax is ever taught to the backend.
+/// through prompt assembly, streaming and repair.
+///
+/// * `Native` (default) — teaches no wire format at all. The prompt says only
+///   that tools exist and that one call goes out per response; the model emits
+///   calls in its own spelling (the backend's DSML tags), which the parser in
+///   `dialect_dsml` reads as the official format. Naming a format is what gets
+///   an account throttled, so this is the recommended mode.
+/// * `JsonInvoke` — the original behaviour, byte-identical; taught `<invoke>`.
+/// * `SimpleToolTag` — the taught one-marker `<tool>{json}</tool>` format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
+    Native,
     JsonInvoke,
     SimpleToolTag,
 }
 
 impl Default for Dialect {
     fn default() -> Self {
-        Self::JsonInvoke
+        Self::Native
     }
 }
 
 impl Dialect {
+    pub const NATIVE: &'static str = "native";
     pub const JSON_INVOKE: &'static str = "json_invoke";
     pub const SIMPLE_TOOL_TAG: &'static str = "simple_tool_tag";
 
     /// Parse a configured dialect name. Unknown values are a hard error: a
     /// silent fallback would teach one format and parse another.
     pub fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
+        match value.trim().to_ascii_lowercase().as_str() {
+            Self::NATIVE | "default" | "" => Ok(Self::Native),
             Self::JSON_INVOKE => Ok(Self::JsonInvoke),
             Self::SIMPLE_TOOL_TAG => Ok(Self::SimpleToolTag),
-            other => Err(format!(
-                "unknown dialect {other:?}; expected \"{}\" or \"{}\"",
+            _ => Err(format!(
+                "unknown dialect {value:?}; expected \"{}\", \"{}\" or \"{}\"",
+                Self::NATIVE,
                 Self::JSON_INVOKE,
                 Self::SIMPLE_TOOL_TAG
             )),
@@ -71,6 +79,7 @@ impl Dialect {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Native => Self::NATIVE,
             Self::JsonInvoke => Self::JSON_INVOKE,
             Self::SimpleToolTag => Self::SIMPLE_TOOL_TAG,
         }
@@ -79,6 +88,7 @@ impl Dialect {
     /// One tool call as the model reads it (history replay and repair).
     pub fn render_tool_call(&self, call: &ToolCall) -> String {
         match self {
+            Self::Native => crate::dialect_dsml::render_tool_call(call),
             Self::JsonInvoke => format!(
                 "{INVOKE_OPEN} name=\"{}\">{}</invoke>",
                 call.name, call.arguments
@@ -91,14 +101,16 @@ impl Dialect {
     #[allow(dead_code)] // public dialect surface; exercised by tests
     pub fn parse_tool_calls(&self, text: &str) -> (String, Vec<ToolCall>) {
         match self {
+            Self::Native => crate::dialect_simple::parse_tool_calls(text),
             Self::JsonInvoke => (strip_tool_calls(text), extract_tool_calls(text)),
             Self::SimpleToolTag => crate::dialect_simple::parse_tool_calls(text),
         }
     }
 
-    /// Teaching text appended for the offered tools (`""` when none).
+    /// Teaching text appended for the offered tools (empty when none).
     pub fn system_extra(&self, tools: &[serde_json::Value]) -> String {
         match self {
+            Self::Native => crate::dialect_simple::native_tools_block(tools),
             Self::JsonInvoke => inject_tool_descriptions("", tools),
             Self::SimpleToolTag => crate::dialect_simple::tools_block(tools),
         }
@@ -107,6 +119,7 @@ impl Dialect {
     /// Per-turn re-anchoring reminder.
     pub fn reminder(&self) -> String {
         match self {
+            Self::Native => crate::dialect_simple::native_reminder(),
             Self::JsonInvoke => periodic_reminder(),
             Self::SimpleToolTag => crate::dialect_simple::reminder(),
         }
@@ -121,6 +134,10 @@ impl Dialect {
     /// Concrete wire shape restated by repair tiers.
     pub fn wire_shape(&self) -> String {
         match self {
+            Self::Native => crate::dialect_dsml::render_tool_call(&ToolCall {
+                name: "tool_name".into(),
+                arguments: "{\"param1\":\"value1\",\"count\":5}".into(),
+            }),
             Self::JsonInvoke => TEMPLATE.to_string(),
             Self::SimpleToolTag => crate::dialect_simple::render_tool_call(&ToolCall {
                 name: "tool_name".into(),
@@ -132,6 +149,7 @@ impl Dialect {
     /// Ordered text / tool / malformed events for one complete reply.
     pub fn scan(&self, text: &str) -> Vec<ScanEvent> {
         match self {
+            Self::Native => crate::dialect_simple::scan(text),
             Self::JsonInvoke => scan(text),
             Self::SimpleToolTag => crate::dialect_simple::scan(text),
         }
@@ -1428,6 +1446,7 @@ impl Default for StreamToolFilter {
 impl StreamToolFilter {
     pub fn new(dialect: Dialect) -> Self {
         let inner = match dialect {
+            Dialect::Native => FilterInner::Simple(crate::dialect_simple::StreamFilter::new()),
             Dialect::JsonInvoke => FilterInner::Json(Parser::new()),
             Dialect::SimpleToolTag => {
                 FilterInner::Simple(crate::dialect_simple::StreamFilter::new())

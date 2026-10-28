@@ -27,7 +27,7 @@ pub fn render_tool_call(call: &ToolCall) -> String {
     )
 }
 
-pub fn tools_block(tools: &[Value]) -> String {
+pub fn native_tools_block(tools: &[Value]) -> String {
     if tools.is_empty() {
         return String::new();
     }
@@ -49,8 +49,29 @@ pub fn tools_block(tools: &[Value]) -> String {
     out
 }
 
-pub fn reminder() -> String {
+pub fn native_reminder() -> String {
     "Tool-call reminder: call a tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
+}
+
+/// Taught form: the `simple_tool_tag` dialect names the exact marker.
+pub fn tools_block(tools: &[Value]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "Tool calls use one opening tag, one JSON object and one closing tag. For a tool call, output `<tool>{\"name\":\"TOOL_NAME\",\"arguments\":{...}}</tool>`, and keep the JSON valid. Write the closing `</tool>` exactly ONCE per call: never repeat it or write it twice in a row, and never write it anywhere except directly after the call's JSON. Otherwise emit one call per response and wait for its result. Otherwise answer normally.\n\nRules:\n1. Do not wrap the call in a code fence.\n2. Use only the parameters in the tool's schema and never invent values.\n3. After a tool result arrives, continue the task; do not repeat the same call.\n4. If no tool fits, answer directly without a call.\n\nAvailable tools:\n",
+    );
+    for tool in tools {
+        if let Some(function) = tool.get("function") {
+            out.push_str(&serde_json::to_string(function).unwrap_or_default());
+            out.push('\n');
+        }
+    }
+    out
+}
+
+pub fn reminder() -> String {
+    "Tool-call reminder: to call a tool, write `<tool>` followed by one JSON object with `name` and `arguments`, then `</tool>`; keep the JSON valid. Write `</tool>` exactly ONCE per call: never repeat it or write it twice in a row, and never write it anywhere else. Batch only short, independent, read-only calls.".into()
 }
 
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
@@ -80,6 +101,23 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
     loop {
         let marker = rest.find(TOOL_MARKER);
         let dsml = dialect_dsml::find_start(rest);
+        // The model's own spellings, which the `native` dialect reads instead
+        // of teaching one: `<name>{json}</name>`, `<tool_call>{...}`, and a
+        // bare `{\"name\":...}` object. None of these are taught anywhere; they
+        // are what the backend writes unprompted.
+        let native = find_native(rest).filter(|(at, _)| {
+            marker.is_none_or(|m| *at < m) && dsml.is_none_or(|d| *at < d)
+        });
+        if let Some((at, event)) = native {
+            prose.push_str(&rest[..at]);
+            if !prose.is_empty() {
+                out.push(ScanEvent::Text(std::mem::take(&mut prose)));
+            }
+            let (consumed, event) = event;
+            out.push(event);
+            rest = &rest[at + consumed..];
+            continue;
+        }
         if let Some(d) = dsml.filter(|d| marker.is_none_or(|m| *d < m)) {
             prose.push_str(&rest[..d]);
             if !prose.is_empty() {
@@ -149,6 +187,146 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
         out.push(ScanEvent::Text(prose));
     }
     out
+}
+
+/// Earliest position in `text` where a native-spelling call may begin, for the
+/// streaming filter: a tag opener or a call-shaped `{` object.
+///
+/// Deliberately more eager than [`find_native`]: a half-received call must be
+/// held, not streamed as prose. A `{` is only reported when it could still turn
+/// into a `name`/`function` object, so ordinary JSON in the reply passes
+/// through untouched.
+fn native_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => {
+                let rest = &text[i + 1..];
+                let tag_like = rest
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+                if tag_like {
+                    return Some(i);
+                }
+            }
+            b'{' => {
+                let rest = &text[i..];
+                match parse_object(rest) {
+                    Some((value, used)) => {
+                        if value.as_object().is_some_and(|o| {
+                            o.contains_key("name") || o.contains_key("function")
+                        }) {
+                            return Some(i);
+                        }
+                        i += used;
+                        continue;
+                    }
+                    None if could_be_call_object(rest) => return Some(i),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether a truncated `{...` is still a prefix of a `name`/`function` object.
+fn could_be_call_object(rest: &str) -> bool {
+    let Some(after) = rest.strip_prefix('{') else {
+        return false;
+    };
+    let after = after.trim_start();
+    ["\"name\"", "\"function\""].iter().any(|key| {
+        if after.len() <= key.len() {
+            key.starts_with(after)
+        } else {
+            after.starts_with(key)
+        }
+    })
+}
+
+/// Earliest native-spelling tool call in `text`, with its byte offset.
+///
+/// The `native` dialect teaches no format, so the model writes whatever it
+/// likes; these are the shapes it actually produces. None is taught.
+fn find_native(text: &str) -> Option<(usize, (usize, ScanEvent))> {
+    for (i, c) in text.char_indices() {
+        if c != '<' && c != '{' {
+            continue;
+        }
+        if let Some(parsed) = native_at(&text[i..]) {
+            return Some((i, parsed));
+        }
+    }
+    None
+}
+
+/// One native spelling at the very start of `s`, and the bytes it covers.
+fn native_at(s: &str) -> Option<(usize, ScanEvent)> {
+    if let Some(rest) = s.strip_prefix('<') {
+        let name_end = rest.find(|c: char| {
+            !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        })?;
+        let tag = &rest[..name_end];
+        if tag.is_empty() || !rest[name_end..].starts_with('>') {
+            return None;
+        }
+        let body = &rest[name_end + 1..];
+        let trimmed = body.trim_start();
+        if !trimmed.starts_with('{') {
+            return None;
+        }
+        let (value, used) = parse_object(trimmed)?;
+        let after = &trimmed[used..];
+        let tail = after.trim_start();
+        let mut close = String::from("</");
+        close.push_str(tag);
+        close.push('>');
+        let close_len = match tail.strip_prefix(close.as_str()) {
+            Some(_) => (after.len() - tail.len()) + close.len(),
+            None => 0,
+        };
+        let consumed = 1 + name_end + 1 + (body.len() - trimmed.len()) + used + close_len;
+        let wrapper = matches!(
+            tag,
+            "tool_call" | "tool_calls" | "function_call" | "tool" | "invoke"
+        );
+        let call = if wrapper {
+            call_from_value(&value)
+        } else {
+            Ok(ToolCall {
+                name: tag.to_string(),
+                arguments: value.to_string(),
+            })
+        };
+        return Some(match call {
+            Ok(call) => (consumed, ScanEvent::Tool(call)),
+            Err((name, reason)) => (
+                consumed,
+                ScanEvent::Malformed(MalformedCall::new(
+                    name,
+                    trimmed[..used].to_string(),
+                    reason,
+                )),
+            ),
+        });
+    }
+    if s.starts_with('{') {
+        let (value, used) = parse_object(s)?;
+        let looks_like_call = value
+            .as_object()
+            .is_some_and(|o| o.contains_key("name") || o.contains_key("function"));
+        if !looks_like_call {
+            return None;
+        }
+        let call = call_from_value(&value).ok()?;
+        return Some((used, ScanEvent::Tool(call)));
+    }
+    None
 }
 
 /// First JSON object at the start of `body` and the bytes it occupies.
@@ -298,6 +476,7 @@ impl StreamFilter {
         let start = [
             self.pending.find(TOOL_MARKER),
             dialect_dsml::find_start(&self.pending),
+            native_start(&self.pending),
         ]
         .into_iter()
         .flatten()
@@ -354,8 +533,8 @@ mod tests {
             "type": "function",
             "function": {"name": "bash", "description": "run", "parameters": {}}
         })];
-        let block = tools_block(&tools);
-        let reminder = reminder();
+        let block = native_tools_block(&tools);
+        let reminder = native_reminder();
         // The point of this dialect: name no syntax. The model's own native
         // spelling is recovered by `scan` and `dialect_dsml`, and naming a
         // format is what gets an account throttled or banned. Only the prose

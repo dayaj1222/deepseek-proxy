@@ -10,9 +10,22 @@
 [proxy]
 host = "0.0.0.0"
 port = 9174
-dialect = "simple_tool_tag"
+
+# Wire dialect for tool calls. Precedence: DIALECT env > this file > "native".
+#
+#   native           (default) teach no wire format at all. The prompt states only
+#                    that tools exist and that one call goes out per response; the
+#                    model emits calls in its own spelling (the backend's DSML
+#                    tags) and `dialect_dsml` reads that back as the official
+#                    format. Naming a format is what pushes an account toward a
+#                    policy strike, so this is the recommended mode.
+#   json_invoke      the original behaviour: teach <invoke name="x">{json}</invoke>.
+#   simple_tool_tag  teach the one-marker <tool>{json}</tool> format.
+#
+dialect = "native"
 
 # dialect = "json_invoke"
+# dialect = "simple_tool_tag"
 
 [storage]
 # SQLite file holding thread resume state and API-key hashes.

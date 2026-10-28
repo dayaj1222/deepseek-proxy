@@ -24,7 +24,8 @@ pub struct FileConfig {
 pub struct ProxySection {
     pub host: String,
     pub port: u16,
-    /// Wire dialect: `json_invoke` (default) or `simple_tool_tag`.
+    /// Wire dialect: `native` (default, teaches no syntax), `json_invoke`
+    /// (taught `<invoke>` blocks) or `simple_tool_tag` (taught `<tool>` marker).
     pub dialect: Option<String>,
 }
 
@@ -476,11 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn dialect_defaults_to_json_invoke() {
+    fn dialect_defaults_to_native() {
         use crate::dialect::Dialect;
         let f: FileConfig = toml::from_str("").unwrap();
         assert_eq!(f.proxy.dialect, None);
-        assert_eq!(Dialect::default(), Dialect::JsonInvoke);
+        assert_eq!(Dialect::default(), Dialect::Native);
     }
 
     #[test]
@@ -492,15 +493,14 @@ mod tests {
     #[test]
     fn dialect_names_parse_and_unknown_is_a_hard_error() {
         use crate::dialect::Dialect;
-        assert_eq!(
-            Dialect::parse("json_invoke").unwrap(),
-            Dialect::JsonInvoke
-        );
+        assert_eq!(Dialect::parse("native").unwrap(), Dialect::Native);
+        assert_eq!(Dialect::default(), Dialect::Native);
+        assert_eq!(Dialect::parse("json_invoke").unwrap(), Dialect::JsonInvoke);
         assert_eq!(
             Dialect::parse("simple_tool_tag").unwrap(),
             Dialect::SimpleToolTag
         );
-        let err = Dialect::parse("dsml").unwrap_err();
+        let err = Dialect::parse("dsml_legacy").unwrap_err();
         assert!(
             err.contains("unknown dialect"),
             "unknown values must not fall back: {err}"
