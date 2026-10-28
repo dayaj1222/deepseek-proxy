@@ -1045,9 +1045,17 @@ mod tests {
     #[test]
     fn native_repair_prompts_never_spell_out_markup() {
         let bad = [MalformedCall::new(Some("bash".into()), "invalid_arguments_json".into(), "".into())];
-        for attempt in 0..4 {
-            let p = build_repair_prompt_for(&Dialect::Native, &bad, &[], attempt);
-            assert!(!p.contains('<') && !p.contains('>'), "attempt {attempt}: {p}");
+        let unparsable = [MalformedCall::new(
+            Some("bash".into()),
+            "".into(),
+            &format!("{}:the output ended before the invoke tag was closed", crate::dialect_dsml::UNPARSABLE),
+        )];
+        for calls in [&bad, &unparsable] {
+            for attempt in 0..4 {
+                let p = build_repair_prompt_for(&Dialect::Native, calls, &[], attempt);
+                assert!(!p.contains('<') && !p.contains('>'), "attempt {attempt}: {p}");
+                assert!(!p.contains("<tool>") && !p.contains("NOT the syntax"), "{p}");
+            }
         }
     }
     use super::*;

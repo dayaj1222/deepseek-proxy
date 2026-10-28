@@ -8,10 +8,10 @@
 //! </｜｜DSML｜｜ calls>
 //! ```
 //!
-//! It is not a dialect the proxy teaches; it is recovery for a model that
-//! ignores the teaching. A region that parses becomes ordinary calls. One that
-//! does not becomes a malformed call whose reason says exactly what was wrong,
-//! so the repair turn can tell the model what it did and not to do it again.
+//! This is the backend's own spelling and the official format the `native`
+//! dialect reads; the proxy never teaches it. A region that parses becomes
+//! ordinary calls. One that does not becomes a malformed call whose reason says
+//! exactly what was wrong, so the repair turn can say what to fix.
 //!
 //! Spelling is deliberately loose: pipes (`｜` or `|`), spaces and case inside
 //! the marker are ignored, and a tag may be split across lines.
@@ -328,12 +328,9 @@ pub fn parse_region(text: &str) -> Region {
 
 /// What the model is told when a DSML region could not be parsed.
 pub fn explanation(detail: &str) -> String {
-    format!(
-        "You wrote the DSML tool-call syntax (tags such as `<｜｜DSML｜｜ invoke>` and \
-         `<｜｜DSML｜｜ parameter>`). That is NOT the syntax for this conversation, and it \
-         could not be run because {detail}. Do not use DSML, calls, invoke or parameter \
-         tags again. Write the call as `<tool>{{\"name\":\"TOOL_NAME\",\"arguments\":{{...}}}}</tool>`."
-    )
+    // This is the backend's own format and the one the proxy reads, so the model
+    // is never told to abandon it, and no other format is named or shown (ADR-0014).
+    format!("That call could not be run because {detail}. Send it again, complete this time, in your native tool-call format.")
 }
 
 /// The vertical-bar character the backend spells its marker with (U+FF5C).

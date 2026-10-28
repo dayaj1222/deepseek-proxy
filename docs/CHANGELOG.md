@@ -31,6 +31,14 @@ prompting. Test: `native_repair_prompts_never_spell_out_markup`.
 emitting the old simple-tag spelling on threads that predate native. The word is
 an anchor; no tag is spelled (test `teaches_no_wire_format_at_all`).
 
+**Fixed: repair told the model to stop using DSML and write `<tool>` instead.**
+`dialect_dsml::explanation` predated DSML becoming the official format. When a
+DSML call failed to parse it said "That is NOT the syntax for this conversation
+... write the call as `<tool>...`", which taught the legacy tag in native mode
+and is the likely reason models drifted to `<tool>`. It now says only what went
+wrong and to resend in the native format. `native_repair_prompts_never_spell_out_markup`
+now covers the unparsable path too.
+
 Known gap left open: `deepseek-rs rebind --yes` without `--all` or a thread
 silently stays a dry run.
 
