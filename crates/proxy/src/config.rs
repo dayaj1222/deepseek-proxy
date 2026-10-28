@@ -182,6 +182,25 @@ impl Config {
     ///
     /// `CONFIG_PATH` selects a different file; a missing file is not an error.
     pub fn load() -> Result<Self, String> {
+        Self::load_with(None, None)
+    }
+
+    /// Like [`Config::load`], with bind overrides from the command line applied
+    /// last: an explicit `--port` / `--host` flag beats both the environment
+    /// and `config.toml`, and no flag leaves the resolved default in place.
+    pub fn load_with(host: Option<String>, port: Option<u16>) -> Result<Self, String> {
+        let mut cfg = Self::load_from_environment()?;
+        if let Some(host) = host {
+            cfg.host = host;
+        }
+        if let Some(port) = port {
+            cfg.port = port;
+        }
+        Ok(cfg)
+    }
+
+    /// Resolve config from `config.toml` and the environment only.
+    fn load_from_environment() -> Result<Self, String> {
         let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| default_config_path());
         let file = Self::read_file(&path)?;
 

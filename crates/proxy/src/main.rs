@@ -2803,7 +2803,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // instead of fighting over the DB lock.
     let _pid_guard = cli::PidGuard::claim()?;
 
-    let cfg = config::Config::load()?;
+    // `--port` / `--host` on `serve` (forwarded by `start`) beat the
+    // environment and `config.toml`; with neither, the resolved config's
+    // default (0.0.0.0:9174) stands.
+    let (host, port) = cli::bind_overrides(&args)?;
+    let cfg = config::Config::load_with(host, port)?;
     let store = store::Store::open_path(&cfg.db_path)?;
 
     let accounts = cli::load_accounts(&store);

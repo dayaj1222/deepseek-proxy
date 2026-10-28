@@ -396,12 +396,151 @@ fn follow(path: &Path) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn cfg_or_exit() -> config::Config {
-    match config::Config::load() {
+    let args: Vec<String> = std::env::args().collect();
+    let (host, port) = match bind_overrides(&args) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    match config::Config::load_with(host, port) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("config: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Command-line bind overrides: `--port <n>`, `-p <n>`, `--port=<n>`,
+/// `--host <addr>`, `--host=<addr>`.
+///
+/// The values are applied on top of the environment and `config.toml` by
+/// [`config::Config::load_with`], so an explicit flag always wins and no flag
+/// leaves the resolved default (`0.0.0.0:9174`) in place.
+pub fn bind_overrides(args: &[String]) -> Result<(Option<String>, Option<u16>), String> {
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut i = 1;
+    while i < args.len() {
+        let (flag, inline) = match args[i].split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (args[i].as_str(), None),
+        };
+        match flag {
+            "--port" | "-p" => {
+                let value = match inline {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        args.get(i).cloned()
+                    }
+                };
+                let Some(value) = value else {
+                    return Err(format!("{flag} needs a port number"));
+                };
+                port = Some(parse_port(&value)?);
+            }
+            "--host" => {
+                let value = match inline {
+                    Some(v) => Some(v),
+                    None => {
+                        i += 1;
+                        args.get(i).cloned()
+                    }
+                };
+                let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
+                    return Err("--host needs an address".into());
+                };
+                host = Some(value);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok((host, port))
+}
+
+fn parse_port(value: &str) -> Result<u16, String> {
+    match value.trim().parse::<u16>() {
+        Ok(0) => Err(format!("invalid port '{value}': must be 1-65535")),
+        Ok(port) => Ok(port),
+        Err(_) => Err(format!("invalid port '{value}': must be a number 1-65535")),
+    }
+}
+
+/// Bind flags from `args`, normalized for the `serve` child process.
+fn bind_args(args: &[String]) -> Vec<String> {
+    let Ok((host, port)) = bind_overrides(args) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(host) = host {
+        out.push("--host".to_string());
+        out.push(host);
+    }
+    if let Some(port) = port {
+        out.push("--port".to_string());
+        out.push(port.to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_flags_leaves_the_resolved_default() {
+        assert_eq!(bind_overrides(&args(&["serve"])).unwrap(), (None, None));
+        assert_eq!(bind_args(&args(&["serve"])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn port_is_accepted_in_every_spelling() {
+        for argv in [
+            vec!["serve", "--port", "8123"],
+            vec!["serve", "-p", "8123"],
+            vec!["serve", "--port=8123"],
+        ] {
+            assert_eq!(
+                bind_overrides(&args(&argv)).unwrap(),
+                (None, Some(8123)),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_and_port_combine() {
+        assert_eq!(
+            bind_overrides(&args(&["start", "--port=8123", "--host", "127.0.0.1"])).unwrap(),
+            (Some("127.0.0.1".into()), Some(8123))
+        );
+        assert_eq!(
+            bind_args(&args(&["start", "--host=127.0.0.1", "-p", "9000"])),
+            vec!["--host", "127.0.0.1", "--port", "9000"]
+        );
+    }
+
+    #[test]
+    fn a_bad_port_is_rejected() {
+        assert!(bind_overrides(&args(&["serve", "--port", "0"])).is_err());
+        assert!(bind_overrides(&args(&["serve", "--port", "nine"])).is_err());
+        assert!(bind_overrides(&args(&["serve", "--port"])).is_err());
+        assert!(bind_overrides(&args(&["serve", "--host"])).is_err());
+    }
+
+    #[test]
+    fn start_flags_do_not_mistake_bind_values_for_unknowns() {
+        let (bg, unknown) = start_flags(&args(&["start", "--port", "8123", "-b"]));
+        assert!(bg);
+        assert_eq!(unknown, None);
     }
 }
 
@@ -519,13 +658,19 @@ fn start_flags(args: &[String]) -> (bool, Option<String>) {
     let mut bg = false;
     let mut unknown = None;
     // Skip `start` (index 1) and any sub-word; scan everything after it.
-    for arg in args.iter().skip(2) {
-        match arg.as_str() {
+    let mut index = 2;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
             "-b" | "--bg" | "--background" => bg = true,
             "-f" | "--foreground" | "--fg" => bg = false,
+            // Bind flags and their value belong to `bind_overrides`.
+            "-p" | "--port" | "--host" => index += 1,
+            other if other.starts_with("--port=") || other.starts_with("--host=") => {}
             other if other.starts_with('-') => unknown = Some(other.to_string()),
             _ => {}
         }
+        index += 1;
     }
     (bg, unknown)
 }
@@ -542,8 +687,10 @@ async fn start(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
 
 /// `start` body. `bg == false` hands the terminal to the server.
 async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error::Error>> {
-    let _ = args;
     let cfg = cfg_or_exit();
+    // Forward an explicit `--port` / `--host` to the `serve` child so both the
+    // foreground exec and the detached daemon bind where the user asked.
+    let bind = bind_args(args);
     let rt = Runtime::resolve();
     rt.ensure()?;
 
@@ -560,7 +707,10 @@ async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error
         let exe = std::env::current_exe()?;
         let err = {
             use std::os::unix::process::CommandExt;
-            std::process::Command::new(exe).arg("serve").exec()
+            std::process::Command::new(exe)
+                .arg("serve")
+                .args(&bind)
+                .exec()
         };
         return Err(format!("exec serve: {err}").into());
     }
@@ -572,6 +722,7 @@ async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error
         .open(rt.logfile())?;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("serve")
+        .args(&bind)
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
@@ -1373,12 +1524,15 @@ USAGE
   deepseek-rs <command> [options]
 
 SERVER
-  serve                       run in the foreground (Ctrl-C to stop)
+  serve [--port N] [--host H]
+                              run in the foreground (Ctrl-C to stop)
   start [-b|--bg]             foreground by default (pretty logs, Ctrl-C stops);
                               -b/--bg detaches and waits until healthy
   stop                        SIGTERM the server (SIGKILL after grace + 5s)
   reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start (same flags as start)
+  --port N / --host H         bind override for serve/start/restart; wins
+                              over PROXY_PORT / PROXY_HOST and config.toml
   status                      pid, url, uptime, account count
   health                      one-shot health check (exit 1 when down)
   stats [--json]              live counters, per-account state, db counts
@@ -1410,7 +1564,8 @@ ENVIRONMENT
   RUST_LOG                  full filter override (blank is ignored)
   DEEPSEEK_LOG_ANSI         1/0 to force/disable colour
   NO_COLOR                  disables colour
-  PROXY_HOST / PROXY_PORT   bind address (default 0.0.0.0:9174)
+  PROXY_HOST / PROXY_PORT   bind address (default 0.0.0.0:9174); the
+                            --port / --host flags win over both
   DB_PATH                   sqlite file (default deepseek-rs.db)
   CONFIG_PATH               alternate config.toml
   DEEPSEEK_RUNTIME_DIR      pidfile + log location
