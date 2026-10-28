@@ -328,7 +328,6 @@ fn build_prompts(
         system_extra,
         image_note,
         dialect::Dialect::JsonInvoke,
-        false,
     )
 }
 
@@ -341,7 +340,6 @@ fn build_prompts_with(
     system_extra: &str,
     image_note: Option<&str>,
     wire: dialect::Dialect,
-    thinking: bool,
 ) -> (String, String) {
     let (specs, required) = resolve_tools(req);
     let reminder = prompt::reminder(&req.tools, wire);
@@ -398,20 +396,6 @@ fn upstream_model_type(model: &str) -> String {
         "deepseek-chat" | "deepseek-v3" | "deepseek-reasoner" | "" => "default".to_string(),
         other => other.to_string(),
     }
-}
-
-/// First fatal `hint` error in a fully-buffered SSE body, if any.
-#[allow(dead_code)] // used by tests; the live path classifies incrementally
-fn first_hint(raw: &str) -> Option<String> {
-    let mut current = String::new();
-    for line in raw.lines() {
-        if let protocol::LineKind::HintError { content } =
-            protocol::classify_line(line, &mut current)
-        {
-            return Some(content);
-        }
-    }
-    None
 }
 
 /// Replace the remote session after a context-limit rejection.
@@ -1618,18 +1602,6 @@ fn resolve_tools(req: &ChatRequest) -> (Vec<dialect::ToolSpec>, bool) {
 fn backoff_delay(settings: &Settings, attempt: u32) -> f64 {
     let max = settings.rate_limit_max_retries.max(1);
     settings.rate_limit_backoff_secs.max(0.5) * f64::from((attempt + 1).min(max))
-}
-
-/// HTTP 429 with a `retry-after` header, mirroring `BackendRateLimited`.
-#[allow(dead_code)] // kept for callers that build the response directly
-fn rate_limit_response(retry_after_s: u64, message: &str) -> Response {
-    let mut e = ProxyError::new(
-        message,
-        axum::http::StatusCode::TOO_MANY_REQUESTS,
-        "rate_limit_exceeded",
-    );
-    e.retry_after = Some(retry_after_s);
-    e.into_response()
 }
 
 /// HTTP response for a failed completion attempt, via `error_for()`.

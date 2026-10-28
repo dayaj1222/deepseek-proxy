@@ -446,11 +446,6 @@ pub fn strip_tool_calls(text: &str) -> String {
 ///
 /// History is flattened as text, so without this a replayed assistant turn
 /// loses the arguments it actually sent.
-#[allow(dead_code)] // compatibility wrapper for the original json dialect
-pub fn format_tool_calls_for_history(calls: &[serde_json::Value]) -> String {
-    format_tool_calls_for_history_with(calls, Dialect::JsonInvoke)
-}
-
 pub fn format_tool_calls_for_history_with(calls: &[serde_json::Value], wire: Dialect) -> String {
     let mut blocks = Vec::new();
     for call in calls {
@@ -971,27 +966,6 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
     with_orphans
 }
 
-/// Tool names offered to the model, in request order, deduplicated.
-///
-/// Superseded by [`tool_specs`] on the live path; kept for the ordering test.
-#[allow(dead_code)]
-pub fn tool_names(tools: &[serde_json::Value]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for tool in tools {
-        let Some(name) = tool
-            .get("function")
-            .and_then(|f| f.get("name"))
-            .and_then(|n| n.as_str())
-        else {
-            continue;
-        };
-        if !out.iter().any(|n| n == name) {
-            out.push(name.to_string());
-        }
-    }
-    out
-}
-
 /// Python's `json.dumps(value, ensure_ascii=False)` with default separators.
 ///
 /// Used for the `Available schemas:` dump so the repair prompt matches Python's
@@ -1265,16 +1239,6 @@ mod tests {
         assert_eq!(repair_tier(4), 0);
         // 0 saturates to 0, so it lands on tier 0 rather than underflowing.
         assert_eq!(repair_tier(0), 0, "0 must not panic or underflow");
-    }
-
-    #[test]
-    fn tool_names_are_deduped_in_order() {
-        let tools = vec![
-            json!({"type": "function", "function": {"name": "b"}}),
-            json!({"type": "function", "function": {"name": "a"}}),
-            json!({"type": "function", "function": {"name": "b"}}),
-        ];
-        assert_eq!(tool_names(&tools), vec!["b", "a"]);
     }
 
     fn bash_spec() -> ToolSpec {

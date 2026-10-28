@@ -14,7 +14,6 @@ use serde_json::Value;
 
 use crate::dialect;
 use crate::images;
-use crate::prompt;
 use crate::threads::ThreadState;
 use crate::{completion_body, delta_messages, resolve_tools, want_thinking};
 use crate::{AppState, ChatRequest, ProxyError};
@@ -55,7 +54,6 @@ pub async fn prepare(
     // everything said before it.
     let rebinding = rebind.is_some();
     let wire = state.settings.get().dialect;
-    let thinking = want_thinking(req, state.settings.get().thinking_default);
 
     // Tool definitions are taught once, on the first turn of a thread. Later
     // turns ride on the server-side conversation, like the Python proxy.
@@ -96,7 +94,6 @@ pub async fn prepare(
         &system_extra,
         image_note.as_deref(),
         wire,
-        thinking,
     );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
@@ -206,7 +203,3 @@ pub fn include_usage(options: Option<&Value>) -> bool {
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
-
-/// Silence the unused-import warning if prompt is only used for its side docs.
-#[allow(dead_code)]
-fn _prompt_module_is_linked(_: prompt::Prompt) {}
