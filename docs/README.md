@@ -38,5 +38,5 @@ give back.
 | [0011](adr/0011-swallow-stray-closing-tags.md) | Up to two stray closing tags after a block are swallowed |
 | [0012](adr/0012-501-for-unsupported-endpoints.md) | Unsupported OpenAI endpoints answer 501 |
 | [0013](adr/0013-one-interface-for-thread-identity.md) | One interface opens every remote session |
-| [0014](adr/0014-native-dialect-teaches-no-wire-format.md) | The default dialect teaches no tool wire format |
+| [0014](adr/0014-native-dialect-teaches-no-wire-format.md) | The default dialect teaches no tool wire format (on trial) |
 | [0015](adr/0015-admin-routes-take-no-key.md) | The admin routes take no API key |

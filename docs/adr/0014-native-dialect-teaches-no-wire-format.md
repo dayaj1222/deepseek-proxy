@@ -1,6 +1,6 @@
 # ADR-0014: The default dialect teaches no tool wire format
 
-**Status:** accepted (2026-10-28)
+**Status:** accepted (2026-10-28), on trial: the owner is running it for several days before committing to it fully
 
 ## Context
 
@@ -48,6 +48,13 @@ does not know the name.
   reminder ("emit the call in your native format") and the tier wording avoids
   tags. `native_repair_prompts_never_spell_out_markup` pins this.
 - Config reload cannot move a running turn between dialects (ADR-0005).
+
+## Trial
+
+Native is new and untested over long use. Until the owner closes the trial, do
+not remove `json_invoke` or `simple_tool_tag`, and do not build features that
+only work in native mode. To fall back: `DIALECT=json_invoke deepseek-rs restart`.
+Record the outcome here (or supersede this ADR) when the trial ends.
 
 ## Verification
 
