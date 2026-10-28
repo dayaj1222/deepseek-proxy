@@ -521,10 +521,6 @@ impl Pool {
         self.conns[0].clone()
     }
 
-    #[allow(dead_code)] // used by tests and future admin UI
-    pub fn is_empty(&self) -> bool {
-        self.conns.is_empty()
-    }
 
     /// Bind a thread to an account: honour an existing/persisted binding, else
     /// assign the least-crowded healthy account.
@@ -584,23 +580,18 @@ impl Pool {
     /// An `Email` target is refused rather than silently rerouted when the
     /// account is unhealthy: an operator who names an account must learn that it
     /// cannot serve, not get a different one.
-    #[allow(dead_code)] // Rebind lands with T-21
+
     pub async fn route_forced(
         &self,
         thread_id: &str,
         target: &AccountTarget,
     ) -> Result<Arc<Connection>, PoolError> {
-        if matches!(target, AccountTarget::Current) {
-            return Ok(self.route(thread_id).await);
-        }
-
         let current = {
             let owner = self.owner.lock().await;
             owner.get(thread_id).copied()
         };
 
         let chosen = match target {
-            AccountTarget::Current => unreachable!("handled above"),
             AccountTarget::Next => {
                 let counts = self.occupancy().await;
                 let mut best: Option<(usize, usize)> = None;
@@ -884,11 +875,9 @@ impl Pool {
 ///
 /// `Next` and `Email` are the T-21 / admin-route targets; `Current` is the
 /// identity case, which is exactly what `route` already does.
-#[allow(dead_code)] // Rebind lands with T-21
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountTarget {
-    /// Whatever account the thread is already bound to.
-    Current,
     /// Any healthy account other than the current one.
     Next,
     /// That specific account, refused when it is not healthy.

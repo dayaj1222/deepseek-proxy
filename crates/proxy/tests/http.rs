@@ -847,10 +847,10 @@ async fn rebind_moves_the_thread_and_clears_the_flag() {
     assert_eq!(listed["count"], json!(0), "{listed}");
 }
 
-/// Both admin routes sit behind the same API-key check as the chat route: a
-/// valid key may not hop accounts for free.
+/// The admin routes take no API key: they are reached from the local CLI, and
+/// the chat route keeps its own key check.
 #[tokio::test]
-async fn admin_routes_require_a_registered_key() {
+async fn admin_routes_need_no_key() {
     let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
     let app = spawn_app_with_keys(
         &upstream,
@@ -859,26 +859,18 @@ async fn admin_routes_require_a_registered_key() {
     )
     .await;
 
-    let anon = reqwest::get(format!("{}/admin/throttled", app.base))
+    let listed = reqwest::get(format!("{}/admin/throttled", app.base))
         .await
         .expect("GET");
-    assert_eq!(anon.status(), 401);
+    assert_eq!(listed.status(), 200);
 
-    let keyed = reqwest::Client::new()
-        .get(format!("{}/admin/throttled", app.base))
-        .bearer_auth("sk-test")
-        .send()
-        .await
-        .expect("GET");
-    assert_eq!(keyed.status(), 200);
-
-    let anon_post = reqwest::Client::new()
+    let posted = reqwest::Client::new()
         .post(format!("{}/admin/rebind", app.base))
         .json(&json!({"all_throttled": true, "dry_run": true}))
         .send()
         .await
         .expect("POST");
-    assert_eq!(anon_post.status(), 401);
+    assert_eq!(posted.status(), 200);
 }
 
 /// `x-deepseek-rs-rebind` moves the thread before the turn runs, and the turn

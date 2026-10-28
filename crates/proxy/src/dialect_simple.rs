@@ -74,6 +74,7 @@ pub fn reminder() -> String {
     "Tool-call reminder: to call a tool, write `<tool>` followed by one JSON object with `name` and `arguments`, then `</tool>`; keep the JSON valid. Write `</tool>` exactly ONCE per call: never repeat it or write it twice in a row, and never write it anywhere else. Batch only short, independent, read-only calls.".into()
 }
 
+#[cfg(test)]
 pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
     let mut prose = String::new();
     let mut calls = Vec::new();

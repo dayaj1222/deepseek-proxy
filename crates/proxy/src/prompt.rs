@@ -143,7 +143,6 @@ mod tests {
             content: Some(json!(content)),
             tool_calls: Vec::new(),
             tool_call_id: None,
-            name: None,
         }
     }
 

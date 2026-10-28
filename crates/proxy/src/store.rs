@@ -78,7 +78,7 @@ pub struct Store {
 }
 
 impl Store {
-    #[allow(dead_code)] // test helper
+    #[cfg(test)]
     pub fn open_memory() -> Result<Self, StoreError> {
         Self::open_path(":memory:")
     }

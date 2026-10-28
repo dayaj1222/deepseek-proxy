@@ -98,7 +98,7 @@ impl Dialect {
     }
 
     /// Extract calls plus the prose with their blocks removed.
-    #[allow(dead_code)] // public dialect surface; exercised by tests
+    #[cfg(test)]
     pub fn parse_tool_calls(&self, text: &str) -> (String, Vec<ToolCall>) {
         match self {
             Self::Native => crate::dialect_simple::parse_tool_calls(text),
@@ -301,7 +301,7 @@ pub fn inject_tool_descriptions(system_prompt: &str, tools: &[serde_json::Value]
 ///
 /// Returns calls in order. A block whose body is not a JSON object is skipped
 /// rather than mis-parsed — better to lose one call than send garbage args.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
     let normalized = normalize_dsml(text);
     let mut out = Vec::new();
@@ -422,7 +422,7 @@ fn attr_value(attrs: &str, key: &str) -> Option<String> {
 }
 
 /// Remove tool-call blocks, leaving the prose around them.
-#[allow(dead_code)] // kept for callers that render a single answer string
+#[cfg(test)]
 pub fn strip_tool_calls(text: &str) -> String {
     let normalized = normalize_dsml(text);
     let mut out = String::new();
@@ -497,8 +497,10 @@ impl MalformedCall {
 }
 
 /// Reasonable ceiling on how much of a bad body is kept for diagnostics.
+#[cfg(test)]
 const MAX_MALFORMED_BODY: usize = 1500;
 
+#[cfg(test)]
 fn truncate_body(s: &str) -> String {
     let t = s.trim();
     if t.len() <= MAX_MALFORMED_BODY {
@@ -537,7 +539,7 @@ fn classify_body(name: Option<&str>, body: &str) -> Option<&'static str> {
 ///
 /// Kept as the tested reference detector; the live path uses [`scan`], which
 /// reports the same failures in model-output order.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn extract_malformed(text: &str) -> Vec<MalformedCall> {
     let normalized = normalize_dsml(text);
     let mut out: Vec<MalformedCall> = Vec::new();
@@ -645,7 +647,7 @@ fn repair_tier(attempt: usize) -> usize {
 /// and reason across retries: an earlier version replaced everything with a
 /// nameless `repair_omitted_call`, so attempts two and three told the model
 /// nothing about what it had got wrong.
-#[allow(dead_code)] // json wrapper; the live path selects a dialect
+#[cfg(test)]
 pub fn build_repair_prompt(
     malformed: &[MalformedCall],
     specs: &[ToolSpec],

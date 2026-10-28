@@ -7,7 +7,7 @@
 //!
 //! [`open_session`] is now the only way a remote session is created, so the
 //! field list and the persistence rule live in one place instead of four.
-#![allow(dead_code)] // Rebind/Directive/Throttled land with T-21
+
 
 use std::sync::Arc;
 
@@ -22,10 +22,6 @@ pub enum RebuildReason {
     ContextLimit,
     /// The parent id was rejected and the rewind ring is exhausted (ADR-0008).
     StaleCursor,
-    /// An operator asked for it (`x-deepseek-rs-rebind`).
-    Directive,
-    /// The account is throttled and retries are exhausted (T-21).
-    Throttled,
     /// An admin route or CLI request.
     Manual,
 }
@@ -35,8 +31,6 @@ impl RebuildReason {
         match self {
             RebuildReason::ContextLimit => "context limit",
             RebuildReason::StaleCursor => "stale cursor",
-            RebuildReason::Directive => "rebind directive",
-            RebuildReason::Throttled => "throttled",
             RebuildReason::Manual => "manual rebind",
         }
     }

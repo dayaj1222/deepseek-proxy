@@ -107,13 +107,13 @@ impl Persist for SqlitePersist {
 
 /// Test adapter: nothing outlives the process. Two adapters behind [`Persist`]
 /// are what make the seam real rather than hypothetical.
+#[cfg(test)]
 #[derive(Default)]
-#[allow(dead_code)] // constructed by tests only
 pub struct MemoryPersist {
     rows: Mutex<HashMap<String, ThreadState>>,
 }
 
-#[allow(dead_code)] // constructed by tests only
+#[cfg(test)]
 impl MemoryPersist {
     pub fn new() -> Self {
         Self::default()
@@ -125,6 +125,7 @@ impl MemoryPersist {
     }
 }
 
+#[cfg(test)]
 impl Persist for MemoryPersist {
     fn load(&self, thread_id: &str) -> Option<ThreadState> {
         self.rows

@@ -19,11 +19,13 @@ port = 9174
 #                    tags) and `dialect_dsml` reads that back as the official
 #                    format. Naming a format is what pushes an account toward a
 #                    policy strike, so this is the recommended mode.
-#   json_invoke      the original behaviour: teach <invoke name="x">{json}</invoke>.
-#   simple_tool_tag  teach the one-marker <tool>{json}</tool> format.
+#   json_invoke      (optional) the original behaviour: teach <invoke name="x">{json}</invoke>.
+#   simple_tool_tag  (optional) teach the one-marker <tool>{json}</tool> format.
 #
-dialect = "native"
-
+# Leave this commented so each binary uses its own default: an older build
+# falls back to json_invoke, a build with the native dialect falls back to
+# native. Setting it explicitly breaks whichever binary does not know the name.
+# dialect = "native"
 # dialect = "json_invoke"
 # dialect = "simple_tool_tag"
 
