@@ -22,9 +22,13 @@ so `deepseek-rs rebind` works without `--key` (ADR-0015). The port binds
 Also: the pending dead-code cleanup in pool, session, store and threads landed
 with this change, and two test helpers stopped setting the removed `Msg.name`.
 
-Known gaps left open: `deepseek-rs rebind --yes` without `--all` or a thread
-silently stays a dry run; `wire_shape` still shows a DSML example during repair
-(ADR-0014).
+**Native repair no longer shows a format either.** Repair tiers used to restate
+a concrete DSML example; in native mode they now say only to emit the call in the
+model's own format, and the tier wording drops the "which tag opens the block"
+prompting. Test: `native_repair_prompts_never_spell_out_markup`.
+
+Known gap left open: `deepseek-rs rebind --yes` without `--all` or a thread
+silently stays a dry run.
 
 *Files:* `config.toml`, `crates/proxy/src/{main,dialect,pool,session,store,threads}.rs`,
 `crates/proxy/tests/http.rs`

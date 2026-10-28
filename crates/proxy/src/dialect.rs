@@ -134,10 +134,11 @@ impl Dialect {
     /// Concrete wire shape restated by repair tiers.
     pub fn wire_shape(&self) -> String {
         match self {
-            Self::Native => crate::dialect_dsml::render_tool_call(&ToolCall {
-                name: "tool_name".into(),
-                arguments: "{\"param1\":\"value1\",\"count\":5}".into(),
-            }),
+            // No example on purpose: showing a concrete call would teach a
+            // format (ADR-0014). Point the model back at its own native one.
+            Self::Native => "Emit the tool call in your native tool-call format, exactly as you normally do, \
+                 with valid arguments for the named tool."
+                .to_string(),
             Self::JsonInvoke => TEMPLATE.to_string(),
             Self::SimpleToolTag => crate::dialect_simple::render_tool_call(&ToolCall {
                 name: "tool_name".into(),
@@ -665,6 +666,7 @@ pub fn build_repair_prompt_for(
 ) -> String {
     let tier = repair_tier(attempt);
     let wire_shape = dialect.wire_shape();
+    let native = matches!(dialect, Dialect::Native);
     let mut out = String::new();
 
     match tier {
@@ -677,6 +679,9 @@ pub fn build_repair_prompt_for(
             "That tool call could not be run, so nothing happened. The problem is only \
              the call's format, not what you were trying to do. Send the same call again, \
              correctly, and nothing else.",
+        ),
+        _ if native => out.push_str(
+            "Still not usable. Send exactly one tool call, with no other text.",
         ),
         _ => out.push_str(
             "Still not usable. Send exactly one tool call, in the shape below, with no \
@@ -720,12 +725,19 @@ pub fn build_repair_prompt_for(
 
     match tier {
         0 => {
-            out.push_str(
-                "\nThink about the format before you emit anything. Which tag opens the block, what \
-                 goes between the tags, and which tag closes it? What does the JSON body look like, \
-                 and does the tool name you are about to use appear in the valid list above? Work \
-                 through that in your reasoning, then emit the call once.\n",
-            );
+            if native {
+                out.push_str(
+                    "\nCheck the tool name against the valid list above and that its arguments \
+                     are complete and valid, then emit the call once.\n",
+                );
+            } else {
+                out.push_str(
+                    "\nThink about the format before you emit anything. Which tag opens the block, what \
+                     goes between the tags, and which tag closes it? What does the JSON body look like, \
+                     and does the tool name you are about to use appear in the valid list above? Work \
+                     through that in your reasoning, then emit the call once.\n",
+                );
+            }
             // The per-turn reminder carries the wire shape and the concrete failure
             // modes (legacy marker tags, doubled closing tag); a first repair turn
             // needs the same warning, not a weaker one.
@@ -1028,6 +1040,16 @@ fn write_py_json(value: &serde_json::Value, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+
+    /// ADR-0014: in native mode no repair tier may show the model a tag.
+    #[test]
+    fn native_repair_prompts_never_spell_out_markup() {
+        let bad = [MalformedCall::new(Some("bash".into()), "invalid_arguments_json".into(), "".into())];
+        for attempt in 0..4 {
+            let p = build_repair_prompt_for(&Dialect::Native, &bad, &[], attempt);
+            assert!(!p.contains('<') && !p.contains('>'), "attempt {attempt}: {p}");
+        }
+    }
     use super::*;
     use serde_json::json;
 

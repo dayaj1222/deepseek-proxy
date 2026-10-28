@@ -44,13 +44,9 @@ does not know the name.
 - The parser is more tolerant than the taught dialects because it reads
   whatever the model chooses; malformed output is handled by the repair ladder
   rather than prevented by a rigid prompt.
-- **Known gap:** `Dialect::wire_shape` still returns a concrete DSML example for
-  `Native`, and repair tiers 1 and 2 send it. That is the backend's own spelling
-  rather than an invented one, but it is still a format shown to the model. Decide
-  deliberately whether repair should drop it; until then this ADR holds for the
-  normal prompt only.
-- If the backend changes its native spelling, the reader breaks silently until
-  repaired; the optional dialects are the escape hatch.
+- Repair in native mode also shows no format: `wire_shape` is a plain-language
+  reminder ("emit the call in your native format") and the tier wording avoids
+  tags. `native_repair_prompts_never_spell_out_markup` pins this.
 - Config reload cannot move a running turn between dialects (ADR-0005).
 
 ## Verification
