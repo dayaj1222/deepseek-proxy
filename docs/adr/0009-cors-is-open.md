@@ -1,6 +1,6 @@
 # ADR-0009: CORS is open; the bearer key is the boundary
 
-**Status:** accepted (2026-10-22)
+**Status:** accepted (2026-10-22); the admin routes were exempted by ADR-0015
 
 ## Context
 

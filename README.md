@@ -304,10 +304,9 @@ keeps the stream parser honest.
 
 | Where | What |
 |---|---|
+| [`AGENTS.md`](AGENTS.md) | rules for every contributor and AI agent |
 | [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | every landed change, with the reason |
 | [`docs/adr/`](docs/adr/) | why each design is the way it is |
-| [`docs/features/`](docs/features/) | one-page plans for what is not built yet |
-| [`PLAN.md`](PLAN.md) | task list, ground rules, and current status |
 | [`GLOSSARY.md`](GLOSSARY.md) | thread, turn, delta, cursor, repair turn, account, surface |
 
 ### Logging

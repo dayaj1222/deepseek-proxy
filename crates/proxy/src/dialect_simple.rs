@@ -608,9 +608,8 @@ mod tests {
         assert_eq!(prose, "```\n\n```");
     }
 
-    // The differences documented in `docs/features/T-23-tool-dialects.md` are
-    // behaviour, not prose: these tests pin the ones a change could silently
-    // "fix" into disagreeing with the docs.
+    // These pin dialect differences that are behaviour, not prose, so a change
+    // cannot silently "fix" them away.
 
     /// A marker that is not followed by a JSON object is just prose, so
     /// mentioning the tag no longer swallows the rest of the reply.
