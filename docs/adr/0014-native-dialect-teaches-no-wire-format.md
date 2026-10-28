@@ -49,6 +49,14 @@ does not know the name.
   tags. `native_repair_prompts_never_spell_out_markup` pins this.
 - Config reload cannot move a running turn between dialects (ADR-0005).
 
+## Amendment (2026-10-28): the per-turn reminder says "DSML"
+
+The model sometimes answered with the old `simple_tool_tag` spelling, most
+likely copying earlier turns of a thread that predates native. The reminder now
+says "call a DSML tool". That names the backend's own format as an anchor
+without spelling a tag, so it stays inside this ADR. Do not go further and name
+or quote the legacy tag as a thing to avoid.
+
 ## Trial
 
 Native is new and untested over long use. Until the owner closes the trial, do

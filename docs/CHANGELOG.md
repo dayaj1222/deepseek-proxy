@@ -27,6 +27,10 @@ a concrete DSML example; in native mode they now say only to emit the call in th
 model's own format, and the tier wording drops the "which tag opens the block"
 prompting. Test: `native_repair_prompts_never_spell_out_markup`.
 
+**The native per-turn reminder now says "DSML tool"**, because the model was
+emitting the old simple-tag spelling on threads that predate native. The word is
+an anchor; no tag is spelled (test `teaches_no_wire_format_at_all`).
+
 Known gap left open: `deepseek-rs rebind --yes` without `--all` or a thread
 silently stays a dry run.
 

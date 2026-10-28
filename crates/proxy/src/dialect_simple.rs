@@ -50,7 +50,7 @@ pub fn native_tools_block(tools: &[Value]) -> String {
 }
 
 pub fn native_reminder() -> String {
-    "Tool-call reminder: call a tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
+    "Tool-call reminder: call a DSML tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
 }
 
 /// Taught form: the `simple_tool_tag` dialect names the exact marker.
@@ -554,6 +554,10 @@ mod tests {
         assert!(block.contains("Available tools:"));
         assert!(block.contains("\"name\":\"bash\""));
         assert!(reminder.contains("one call per response"));
+        // The anchor is the word, never markup: `DSML` names the backend's own
+        // format without spelling a single tag.
+        assert!(reminder.contains("DSML tool"));
+        assert!(!reminder.contains('<'));
     }
 
     #[test]
