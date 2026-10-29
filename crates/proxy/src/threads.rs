@@ -236,8 +236,17 @@ impl Threads {
                     }
                 }
             }
+            let from = entry.parent_message_id;
             entry.parent_message_id = Some(mid);
             entry.session_id = session_id.to_string();
+            tracing::debug!(
+                thread = %key,
+                session = %session_id,
+                from = ?from,
+                to = mid,
+                ring = entry.prev_parents.len(),
+                "thread cursor committed"
+            );
             entry.clone()
         };
         self.persist.save(key, &merged);
@@ -255,6 +264,13 @@ impl Threads {
             let mut cache = self.cache.lock().expect("threads lock poisoned");
             let entry = cache.get_mut(key)?;
             let prev = entry.prev_parents.pop()?;
+            tracing::debug!(
+                thread = %key,
+                from = ?entry.parent_message_id,
+                to = prev,
+                ring = entry.prev_parents.len(),
+                "thread cursor rewound"
+            );
             entry.parent_message_id = Some(prev);
             entry.clone()
         };

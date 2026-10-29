@@ -103,6 +103,15 @@ pub async fn prepare(
             "invalid_request",
         ));
     }
+    let delta = delta_messages(&req.messages);
+    tracing::debug!(
+        thread = %key,
+        total_messages = req.messages.len(),
+        delta_messages = delta.len(),
+        delta_roles = %delta.iter().map(|m| m.role.as_str()).collect::<Vec<_>>().join(","),
+        cursor = ?existing.as_ref().and_then(|t| t.parent_message_id),
+        "turn delta"
+    );
     tracing::debug!(
         thread = %key,
         fresh = existing.is_none(),
@@ -151,7 +160,11 @@ pub async fn prepare(
                 }
                 // Python degrades to text-only rather than failing the turn.
                 Err(e) => {
-                    tracing::warn!(thread = %key, error = %e, "image upload failed; continuing text-only");
+                    tracing::warn!(
+                        thread = %key,
+                        cause = %crate::log::error_chain(&e),
+                        "image upload failed; continuing text-only"
+                    );
                     Vec::new()
                 }
             }

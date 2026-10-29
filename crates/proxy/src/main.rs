@@ -1401,6 +1401,17 @@ struct Recovery {
     last_failures: Vec<dialect::MalformedCall>,
 }
 
+/// Failure reason codes of the pending malformed calls, comma-joined for logs.
+/// `reason` is `code` or `code:detail`; only the code is kept so the log stays
+/// free of call bodies and argument detail.
+fn reason_codes(pending: &[dialect::MalformedCall]) -> String {
+    pending
+        .iter()
+        .map(|m| m.reason.split(':').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl Recovery {
     fn new(
         specs: Vec<dialect::ToolSpec>,
@@ -1529,8 +1540,14 @@ impl Recovery {
     /// why. Restating the same list is bounded (`expected` is set from it, not
     /// accumulated), so the growth the original guarded against cannot happen.
     fn end_repair(&mut self) {
-        if self.resolved < self.expected {
-            let unresolved = self.expected - self.resolved;
+        // A call the repair reply got wrong again is already in `pending` (it
+        // was fed through `accept`), so it accounts for one unresolved call.
+        // Carrying the old failure as well would make the list grow by one per
+        // failed attempt, and the model would be told to fix more calls than
+        // it ever sent.
+        let accounted = self.resolved + self.pending.len();
+        if accounted < self.expected {
+            let unresolved = self.expected - accounted;
             let mut carried: Vec<dialect::MalformedCall> = self
                 .last_failures
                 .iter()
@@ -1753,9 +1770,17 @@ async fn fail_turn(
     state.threads.commit(key, session_id, cursor);
     tracing::info!(
         thread = %key,
+        session = %session_id,
+        cursor = ?cursor,
         status = err.status.as_u16(),
         code = err.code,
         "turn failed"
+    );
+    tracing::debug!(
+        thread = %key,
+        session = %session_id,
+        cursor = ?cursor,
+        "thread state committed after failed turn"
     );
     send_stream_error(tx, err).await;
 }
@@ -2213,17 +2238,29 @@ async fn stream_response(live: LiveTurn) -> Response {
         // policy sees each event exactly once.
         filter.calls.clear();
         let mut recovery = Recovery::new(specs, required, parallel, wire);
+        // The cursor this turn came in with. A turn that fails after its
+        // correction exchanges must commit THIS, never the advanced `cursor`:
+        // the client retries the same delta, and a retry parented to the failed
+        // turn's own repair replies resends that delta on a branch that already
+        // holds it, with the junk exchanges in between. Same rule as a
+        // throttled or rejected turn ("keep the cursor we came in with").
+        let start_cursor = body.parent_message_id;
         for event in wire.scan(&text) {
             match recovery.accept(event) {
                 Ok(_) => {}
                 Err(e) => {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
-                    fail_turn(&state, &key, &session_id, cursor, &tx, e).await;
+                    fail_turn(&state, &key, &session_id, start_cursor, &tx, e).await;
                     return;
                 }
             }
         }
         recovery.require_call();
+        if recovery.has_pending() {
+            // The exact bytes the model sent, escaped so a look-alike bar or a
+            // hidden character is visible. Debug only: it can hold user text.
+            tracing::debug!(thread = %key, reply = ?text, "malformed tool call: raw reply");
+        }
 
         // Chain correction turns after the reply we just received: the cursor
         // already points at it, so the repair continues the conversation instead
@@ -2235,6 +2272,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         // the wire must be remembered separately: otherwise the loop exits with
         // nothing pending and the turn is delivered as an empty success.
         let mut repair_aborted = false;
+        // Log-only: whether any correction turn ran, for the "turn done" line.
+        let mut repaired = false;
         for attempt in 1..=max {
             if tx.is_closed() {
                 return;
@@ -2242,9 +2281,14 @@ async fn stream_response(live: LiveTurn) -> Response {
             if !recovery.has_pending() {
                 break;
             }
+            // `begin_repair` clears `pending`, so capture what this attempt is
+            // repairing before it runs.
+            let pending = recovery.pending.len();
+            let reasons = reason_codes(&recovery.pending);
+            repaired = true;
             let prompt = recovery.begin_repair(attempt as usize);
             let expected = recovery.expected;
-            tracing::warn!(thread = %key, attempt, expected, "tool repair");
+            tracing::warn!(thread = %key, attempt, expected, pending, reasons = %reasons, "tool repair");
 
             // The repair goes to whichever session is live right now, parented
             // to the newest message — including a rebuilt one.
@@ -2282,7 +2326,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             let (resp, _slot) = match completion {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::error!("thread {key}: repair completion failed: {e}");
+                    tracing::error!(thread = %key, attempt, error = %e, "repair completion failed");
                     repair_aborted = true;
                     break;
                 }
@@ -2290,13 +2334,35 @@ async fn stream_response(live: LiveTurn) -> Response {
             let raw = match until_client_disconnect(&tx, resp.text()).await {
                 Some(Ok(text)) => text,
                 Some(Err(e)) => {
-                    tracing::error!("thread {key}: repair body failed: {e}");
+                    tracing::error!(
+                        thread = %key,
+                        attempt,
+                        error = %e,
+                        cause = %crate::log::error_chain(&e),
+                        "repair body failed"
+                    );
                     repair_aborted = true;
                     break;
                 }
                 None => return,
             };
-            let (_, repair_text, repair_mid) = route_all(&raw);
+            let (_, mut repair_text, mut repair_mid) = route_all(&raw);
+            // A throttled or otherwise aborted correction still carries a
+            // `response_message_id` for a message the backend discarded. Parenting
+            // the next request to it is what DeepSeek rejects as "invalid message
+            // id". aiodeepseek's `ask` raises on the hint before it assigns the
+            // cursor, so the cursor stays and nothing is taken from the reply.
+            if let Some(hint) = sse::hint_in(&raw) {
+                tracing::warn!(
+                    thread = %key,
+                    attempt,
+                    hint = %hint,
+                    discarded_id = ?repair_mid,
+                    "repair reply was a backend error; cursor not advanced"
+                );
+                repair_text.clear();
+                repair_mid = None;
+            }
             // The correction answer is now the newest upstream message, so it —
             // not the malformed reply it fixed — becomes the parent of the
             // client's next turn. Saving `parent` here is what used to make
@@ -2309,16 +2375,20 @@ async fn stream_response(live: LiveTurn) -> Response {
                     Ok(_) => {}
                     Err(e) => {
                         state.stats.errors.fetch_add(1, Ordering::Relaxed);
-                        fail_turn(&state, &key, &session_id, cursor, &tx, e).await;
+                        fail_turn(&state, &key, &session_id, start_cursor, &tx, e).await;
                         return;
                     }
                 }
             }
             recovery.end_repair();
-            tracing::debug!(
+            tracing::debug!(thread = %key, attempt, reply = ?repair_text, "tool repair reply");
+            tracing::info!(
                 thread = %key,
                 attempt,
+                expected = recovery.expected,
+                resolved = recovery.resolved,
                 remaining = recovery.pending.len(),
+                reply_len = repair_text.len(),
                 "tool repair settled"
             );
         }
@@ -2330,7 +2400,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 &state,
                 &key,
                 &session_id,
-                cursor,
+                start_cursor,
                 &tx,
                 ProxyError::new(
                     "Could not recover a valid tool response",
@@ -2388,12 +2458,20 @@ async fn stream_response(live: LiveTurn) -> Response {
         // request id arrives through the `turn` span, so it is not repeated
         // here; `account` comes from the rate ticket that served the turn.
         let turn_usage = usage_block(prompt_tokens, &prose, &filter.calls);
+        let tool_names = filter
+            .calls
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
         tracing::info!(
             thread = %key,
             account = %short_account(&account),
             status = 200,
             finish_reason,
             tool_calls = filter.calls.len(),
+            tool_names = %tool_names,
+            repaired,
             ms = started.elapsed().as_millis() as u64,
             prompt_tokens = turn_usage["prompt_tokens"].as_u64().unwrap_or(0),
             completion_tokens = turn_usage["completion_tokens"].as_u64().unwrap_or(0),
@@ -2787,6 +2865,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         built = %build_id(),
         "starting deepseek-rs"
     );
+    cli::log_effective_settings(&cfg, accounts.len());
     tracing::info!(
         "connecting {} account(s), {}s between requests",
         accounts.len(),
@@ -3002,6 +3081,22 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reason_codes_keeps_only_the_code() {
+        let call = |reason: &str| dialect::MalformedCall {
+            name: None,
+            body: String::from("secret body must not appear"),
+            reason: reason.to_string(),
+        };
+        let pending = vec![
+            call("bad_json:unexpected token at 14"),
+            call("missing_name"),
+            call(""),
+        ];
+        assert_eq!(reason_codes(&pending), "bad_json,missing_name,");
+        assert_eq!(reason_codes(&[]), "");
+    }
 
     #[tokio::test]
     async fn disconnect_cancels_inflight_repair_future() {
@@ -3299,6 +3394,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_repair_does_not_grow_the_failure_list() {
+        // One bad call; every repair reply is bad too. The model must always be
+        // asked to fix exactly one call, not one more per failed attempt.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
+        let bad = || {
+            dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            ))
+        };
+        recovery.accept(bad()).unwrap();
+        for attempt in 1..=5 {
+            let _ = recovery.begin_repair(attempt);
+            assert_eq!(recovery.expected, 1, "attempt {attempt} must still expect one call");
+            recovery.accept(bad()).unwrap(); // the repair reply failed again
+            recovery.end_repair();
+            assert_eq!(recovery.pending.len(), 1, "attempt {attempt}: pending grew");
+        }
+    }
+
+    #[test]
     fn recovery_required_call_missing_becomes_a_failure() {
         let specs = dialect::tool_specs(&[tool_with_schema()]);
         let mut recovery = Recovery::new(specs, true, true, dialect::Dialect::JsonInvoke);
@@ -3476,14 +3594,15 @@ mod tests {
     }
 
     #[test]
-    fn route_all_keeps_the_last_message_id() {
-        // aiodeepseek's `ask_stream` keeps the final non-None message id; an
-        // early one must not win, or the next turn branches.
+    fn route_all_keeps_the_first_message_id() {
+        // aiodeepseek's `stream_chat` freezes `message_id` at the first id it
+        // extracts (`if message_id is None:`), so that is the id the next turn
+        // is parented to; a later id in the same stream never replaces it.
         let raw = concat!(
             "data: {\"response_message_id\": 10}\n\n",
             "data: {\"response_message_id\": 11}\n\n",
         );
-        assert_eq!(route_all(raw).2, Some(11));
+        assert_eq!(route_all(raw).2, Some(10));
     }
 
     #[test]

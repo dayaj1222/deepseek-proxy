@@ -95,7 +95,12 @@ async fn create_session(conn: &Arc<Connection>) -> Result<String, ProxyError> {
         .await
         .create_chat_session()
         .await
-        .map_err(|e| backend(&format!("create_session: {e}")))
+        .map_err(|e| {
+            backend(&format!(
+                "create_session: {}",
+                crate::log::error_chain(&e)
+            ))
+        })
 }
 
 fn queue(msg: &str) -> ProxyError {

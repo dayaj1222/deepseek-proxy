@@ -177,3 +177,53 @@ fn is_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
 }
+
+/// Render an error and every `source()` beneath it, joined with ": ".
+///
+/// `reqwest`'s own `Display` is only "error sending request for url (...)";
+/// the real cause (an expired certificate, a refused connection, a DNS
+/// failure) sits further down the chain. Logging just the top line hid a TLS
+/// failure that was only visible in the foreground terminal.
+pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let text = s.to_string();
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cur = s.source();
+    }
+    out
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::error_chain;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|l| l as _)
+        }
+    }
+
+    #[test]
+    fn walks_the_whole_source_chain() {
+        let e = Layer("error sending request", Some(Box::new(Layer("tls", Some(Box::new(Layer("certificate expired", None)))))));
+        assert_eq!(error_chain(&e), "error sending request: tls: certificate expired");
+    }
+
+    #[test]
+    fn single_error_is_unchanged() {
+        assert_eq!(error_chain(&Layer("boom", None)), "boom");
+    }
+}

@@ -374,6 +374,18 @@ mod tests {
     const SAMPLE: &str = "<｜｜DSML｜｜ calls>\n <｜｜DSML｜｜ invoke name=\"bash\">\n <｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls ~/x 2>/dev/null | head; echo '--- net ---';\n timeout 10 curl -sS</｜｜DSML｜｜\n parameter>\n </｜｜DSML｜｜ invoke>\n </｜｜DSML｜｜ calls>";
 
     #[test]
+    fn unclosed_parameter_before_invoke_closer_still_parses() {
+        // Seen in the wild: the model closes the invoke but never the parameter.
+        let t = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">cd /x && grep -rn \"vtop/login|loginForm|_csrf\" --include=\"*.py\" app/ scripts/ | head -20</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let r = parse_region(t);
+        let [Ok(call)] = r.results.as_slice() else {
+            panic!("{:?}", r.results)
+        };
+        assert_eq!(call.name, "bash");
+        assert!(call.json().unwrap()["command"].as_str().unwrap().ends_with("| head -20"));
+    }
+
+    #[test]
     fn parses_the_observed_spelling() {
         assert_eq!(find_start(SAMPLE), Some(0));
         let r = parse_region(SAMPLE);

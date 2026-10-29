@@ -548,6 +548,22 @@ fn open_store(cfg: &config::Config) -> Result<store::Store, String> {
     store::Store::open_path(&cfg.db_path).map_err(|e| format!("open {}: {e}", cfg.db_path))
 }
 
+/// One info line with the effective settings that matter when debugging a
+/// server log. Never includes credentials: no tokens, passwords or cookies.
+/// `accounts` is the number of usable accounts the pool was built with.
+pub fn log_effective_settings(cfg: &config::Config, accounts: usize) {
+    tracing::info!(
+        listen = %format!("{}:{}", cfg.host, cfg.port),
+        log_profile = ?crate::log::Profile::from_env(),
+        rust_log = %std::env::var("RUST_LOG").unwrap_or_default(),
+        accounts,
+        request_delay_secs = cfg.request_delay_secs,
+        heartbeat_interval_secs = cfg.heartbeat_interval_secs,
+        tool_repair_max_retries = cfg.tool_repair_max_retries,
+        "effective settings"
+    );
+}
+
 /// Run a non-server command. Returns the process exit code.
 pub async fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");

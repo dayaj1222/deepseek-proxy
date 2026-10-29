@@ -208,6 +208,22 @@ pub async fn pump(
     let mut raw_events: usize = 0;
     let mut head = String::new();
     let mut dump = SseDump::open(id);
+    // One debug summary per upstream stream, however it ends. Logging only:
+    // `finish` captures nothing mutable, so control flow is unchanged.
+    let started = std::time::Instant::now();
+    let mut saw_done = false;
+    // Assigned on every path that leaves the loop (a `break` or a `return`).
+    let ended: &'static str;
+    let finish = |ended: &'static str, bytes: usize, events: usize| {
+        tracing::debug!(
+            thread = %id,
+            bytes,
+            events,
+            duration_ms = started.elapsed().as_millis() as u64,
+            ended,
+            "upstream stream finished"
+        );
+    };
 
     let mut byte_stream = resp.bytes_stream();
     loop {
@@ -223,6 +239,7 @@ pub async fn pump(
             // effect from `producer.cancel()` in the stream's `finally`.
             _ = tx.closed() => {
                 tracing::info!(thread = %id, "client disconnected, stopping upstream read");
+                finish("client disconnected", raw_bytes, raw_events);
                 return Pumped {
                     parent,
                     filter,
@@ -237,13 +254,17 @@ pub async fn pump(
         };
         let chunk = match next {
             Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
+            Ok(None) => {
+                ended = if saw_done { "[DONE]" } else { "upstream closed" };
+                break;
+            }
             Err(_) => {
                 if tx
                     .send(Chunk::KeepAlive)
                     .await
                     .is_err()
                 {
+                    ended = "client disconnected";
                     break;
                 }
                 continue;
@@ -255,7 +276,12 @@ pub async fn pump(
         let bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
-                tracing::error!(thread = %id, error = %e, "upstream stream read failed");
+                tracing::error!(
+                    thread = %id,
+                    cause = %crate::log::error_chain(&e),
+                    "upstream stream read failed"
+                );
+                finish("read error", raw_bytes, raw_events);
                 return Pumped {
                     parent,
                     filter,
@@ -281,9 +307,14 @@ pub async fn pump(
         while let Some(pos) = buf.find('\n') {
             let line = buf[..pos].to_string();
             buf.drain(..=pos);
+            // classify_line drops `[DONE]` silently; note it for the summary.
+            if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
+                saw_done = true;
+            }
             let value = match protocol::classify_line(&line, &mut current_event) {
                 protocol::LineKind::Ignored => continue,
                 protocol::LineKind::HintError { content } => {
+                    finish("hint error", raw_bytes, raw_events);
                     return Pumped {
                         parent,
                         filter,
@@ -296,11 +327,14 @@ pub async fn pump(
                 }
                 protocol::LineKind::Event(value) => value,
             };
-            // Last id wins. aiodeepseek's `ask_stream` keeps the final
-            // non-None `message_id` it sees and parents the next turn to that,
-            // so an early id must not win here either.
-            if let Some(mid) = value.get("response_message_id").and_then(|v| v.as_i64()) {
-                parent = Some(mid);
+            // First id wins. aiodeepseek's `stream_chat` freezes `message_id`
+            // at the first id it extracts (`if message_id is None:`) and
+            // `Conversation.ask_stream` parents the next turn to that value, so
+            // a later id in the same stream must not replace it.
+            if parent.is_none() {
+                if let Some(mid) = value.get("response_message_id").and_then(|v| v.as_i64()) {
+                    parent = Some(mid);
+                }
             }
             // `accumulated_token_usage` is patched mid-stream, once as a plain
             // field and again as a BATCH child. Keep the latest value; Python
@@ -352,6 +386,7 @@ pub async fn pump(
                     .await
                     .is_err()
                 {
+                    finish("client disconnected", raw_bytes, raw_events);
                     return Pumped {
                         parent,
                         filter,
@@ -365,6 +400,8 @@ pub async fn pump(
             }
         }
     }
+
+    finish(ended, raw_bytes, raw_events);
 
     if text_all.is_empty() {
         tracing::error!(
@@ -397,6 +434,23 @@ pub async fn pump(
     }
 }
 
+/// The backend's fatal `event: hint` error in a fully buffered reply, if it sent
+/// one. The streaming pump stops at the first such hint; a buffered reply (a
+/// correction turn) has to be checked after the fact. aiodeepseek's `ask`
+/// raises on it before assigning the cursor, so the caller must treat the
+/// reply as discarded: no cursor move, nothing accepted from it.
+pub fn hint_in(raw: &str) -> Option<String> {
+    let mut current_event = String::new();
+    for line in raw.lines() {
+        if let protocol::LineKind::HintError { content } =
+            protocol::classify_line(line, &mut current_event)
+        {
+            return Some(content);
+        }
+    }
+    None
+}
+
 pub fn route_all(raw: &str) -> (String, String, Option<i64>) {
     let events = protocol::route_stream(raw);
     let mut reasoning = String::new();
@@ -412,7 +466,7 @@ pub fn route_all(raw: &str) -> (String, String, Option<i64>) {
         .filter_map(|l| l.trim().strip_prefix("data:"))
         .filter_map(|p| serde_json::from_str::<Value>(p.trim()).ok())
         .filter_map(|v| v.get("response_message_id").and_then(|x| x.as_i64()))
-        .last();
+        .next(); // first id wins, as in aiodeepseek's `stream_chat`
     (reasoning, answer, mid)
 }
 

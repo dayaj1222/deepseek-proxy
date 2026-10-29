@@ -244,6 +244,118 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     assert_eq!(script.completions(), 2, "one repair turn expected");
 }
 
+/// A turn whose repairs all fail answers 502, and the client then retries the
+/// same delta. The failed attempt (the malformed reply plus every correction
+/// exchange) must not stay in the conversation the retry builds on: the cursor
+/// of a failed turn is the one it came in with, exactly as for a throttled turn.
+/// Otherwise the retry resends its tool result on top of a branch that already
+/// holds it, with the junk repair exchanges between, and the model sees repeated
+/// outputs and a "broken" environment.
+#[tokio::test]
+async fn a_turn_whose_repairs_all_fail_leaves_the_cursor_where_it_started() {
+    let bad = format!("{TOOL_OPEN}{{oops}}{TOOL_CLOSE}");
+    let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &["ok"])),
+        // The failing turn: the main reply, then its one allowed correction.
+        Step::Sse(sse_reply(4, 3, &[bad.as_str()])),
+        Step::Sse(sse_reply(6, 5, &[bad.as_str()])),
+        // The client's retry.
+        Step::Sse(sse_reply(8, 7, &[good.as_str()])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke"), ("TOOL_REPAIR_MAX_RETRIES", "1")]).await;
+    let tools = json!([{"type": "function", "function": {
+        "name": "bash", "description": "run a command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    }}]);
+    let turn = |messages: serde_json::Value| {
+        json!({"model": "deepseek-chat", "stream": true, "thread_id": "repair-fail",
+               "messages": messages, "tools": tools})
+    };
+
+    let resp = complete(&app, turn(json!([{"role": "user", "content": "hi"}]))).await;
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+
+    let second = json!([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "list files"}
+    ]);
+    let resp = complete(&app, turn(second.clone())).await;
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("tool_repair_failed"), "the turn must fail: {text}");
+
+    // The client retries the same request.
+    let resp = complete(&app, turn(second)).await;
+    resp.text().await.unwrap();
+
+    assert_eq!(
+        script.parents(),
+        vec![None, Some(2), Some(4), Some(2)],
+        "the retry must resume from the cursor the failed turn started on (2), \
+         not from the failed turn's correction reply (6)"
+    );
+}
+
+/// A throttled correction turn carries a `response_message_id` for a message the
+/// backend then discards. aiodeepseek's `ask` raises on the hint before it
+/// assigns the cursor, so the next request keeps parenting to the last message
+/// that really exists. Parenting to the discarded one is what DeepSeek answers
+/// with `{"code":26,"biz_msg":"invalid message id"}` on the following request.
+#[tokio::test]
+async fn a_throttled_repair_reply_does_not_move_the_cursor() {
+    let bad = format!("{TOOL_OPEN}{{oops}}{TOOL_CLOSE}");
+    let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
+    // `ready` (so an id is on the wire) followed by the throttle hint.
+    let throttled = format!(
+        "{}event: hint\ndata: {}\n\n",
+        sse_reply(6, 5, &[]),
+        json!({"type": "error", "content": "Messages too frequent. Try again later."})
+    );
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &["ok"])),
+        Step::Sse(sse_reply(4, 3, &[bad.as_str()])),
+        Step::Sse(throttled),
+        Step::Sse(sse_reply(8, 7, &[good.as_str()])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("DIALECT", "json_invoke"), ("TOOL_REPAIR_MAX_RETRIES", "2")],
+    )
+    .await;
+    let tools = json!([{"type": "function", "function": {
+        "name": "bash", "description": "run a command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    }}]);
+    let turn = |messages: serde_json::Value| {
+        json!({"model": "deepseek-chat", "stream": true, "thread_id": "repair-throttle",
+               "messages": messages, "tools": tools})
+    };
+    let resp = complete(&app, turn(json!([{"role": "user", "content": "hi"}]))).await;
+    resp.text().await.unwrap();
+    let resp = complete(
+        &app,
+        turn(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "list files"}
+        ])),
+    )
+    .await;
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("tool_calls"), "the second repair should deliver: {text}");
+
+    assert_eq!(
+        script.parents(),
+        vec![None, Some(2), Some(4), Some(4)],
+        "the repair after a throttled one must parent to 4, not to the discarded 6"
+    );
+}
+
 /// The poisoned-cursor regression: DeepSeek answers `{"code":26}` when the
 /// saved parent no longer exists. The proxy must step back one commit and resend
 /// on the previous cursor rather than abandoning the session and replaying the

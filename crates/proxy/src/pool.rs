@@ -188,6 +188,11 @@ impl Connection {
         if let Some(deadline) = deadline {
             let wait = deadline.saturating_duration_since(now);
             if !wait.is_zero() {
+                tracing::debug!(
+                    account = %self.email,
+                    wait_ms = wait.as_millis() as u64,
+                    "waiting for account rate slot"
+                );
                 tokio::time::sleep(wait).await;
             }
         }
@@ -339,9 +344,21 @@ impl Connection {
         if !self.password.is_empty() {
             let client = Client::login(&self.email, &self.password, client::get_device_id())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    // The String error loses the source chain; log it here first.
+                    tracing::warn!(
+                        cause = %crate::log::error_chain(&e),
+                        "account {}: login failed",
+                        self.email
+                    );
+                    e.to_string()
+                })?;
             if let Err(e) = self.store.save_token(&self.email, client.token()) {
-                tracing::warn!("account {}: could not cache token: {e}", self.email);
+                tracing::warn!(
+                    cause = %crate::log::error_chain(&e),
+                    "account {}: could not cache token",
+                    self.email
+                );
             }
             return Ok(client);
         }
@@ -825,7 +842,11 @@ impl Pool {
                     let last = e.to_string();
 
                     if is_login_dead(&last) {
-                        tracing::warn!("account {} login-dead: {last}", conn.email);
+                        tracing::warn!(
+                            cause = %crate::log::error_chain(&e),
+                            "account {} login-dead: {last}",
+                            conn.email
+                        );
                         drop(slot);
                         match self.failover(thread_id).await {
                             Some(next) => {
