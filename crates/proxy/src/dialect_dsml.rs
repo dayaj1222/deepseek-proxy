@@ -47,6 +47,9 @@ enum Kind {
     Wrapper,
     Invoke,
     Parameter,
+    /// A marker with no element name at all (`</｜｜DSML｜｜>`). The model uses it
+    /// as a closer for whatever is open; see the parse loop.
+    Bare,
 }
 
 struct Tag<'a> {
@@ -61,7 +64,11 @@ struct Tag<'a> {
 /// The DSML tag starting at `at` (which must be a `<`), if it is one.
 fn tag_at(text: &str, at: usize) -> Option<Tag<'_>> {
     let body = &text[at + 1..];
-    let gt = body.char_indices().take(MAX_TAG).find(|(_, c)| *c == '>')?.0;
+    let gt = body
+        .char_indices()
+        .take(MAX_TAG)
+        .find(|(_, c)| *c == '>')?
+        .0;
     let inner = &body[..gt];
     let compact: String = inner
         .chars()
@@ -76,6 +83,8 @@ fn tag_at(text: &str, at: usize) -> Option<Tag<'_>> {
         Kind::Invoke
     } else if rest.starts_with("parameter") {
         Kind::Parameter
+    } else if closing && rest.is_empty() {
+        Kind::Bare
     } else {
         Kind::Wrapper
     };
@@ -107,7 +116,10 @@ pub fn partial_len(text: &str) -> usize {
         .filter(|c| !matches!(c, '｜' | '|') && !c.is_whitespace())
         .collect::<String>()
         .to_lowercase();
-    if compact.strip_prefix('/').unwrap_or(&compact).starts_with("dsml")
+    if compact
+        .strip_prefix('/')
+        .unwrap_or(&compact)
+        .starts_with("dsml")
         || "dsml".starts_with(compact.strip_prefix('/').unwrap_or(&compact))
     {
         tail.len()
@@ -125,18 +137,25 @@ fn attr(inner: &str, key: &str) -> Option<String> {
             .chars()
             .next_back()
             .is_none_or(|c| c.is_whitespace() || c == '｜' || c == '|');
+        if !before_ok {
+            continue;
+        }
         let Some(rest) = inner[at + key.len()..].trim_start().strip_prefix('=') else {
             continue;
         };
         let rest = rest.trim_start();
-        let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        let Some(first) = rest.chars().next() else {
             continue;
         };
-        if !before_ok {
-            continue;
+        if matches!(first, '"' | '\'') {
+            let inner_rest = &rest[1..];
+            return inner_rest.find(first).map(|e| inner_rest[..e].to_string());
         }
-        let inner_rest = &rest[1..];
-        return inner_rest.find(quote).map(|e| inner_rest[..e].to_string());
+        // Unquoted (`name=bash`): the value runs to the next whitespace.
+        let token: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+        if !token.is_empty() {
+            return Some(token);
+        }
     }
     None
 }
@@ -187,7 +206,7 @@ fn finish_call(call: Open, text: &str, end: usize) -> Result<ToolCall, Failure> 
         None => Err(Failure {
             name: None,
             body: clip(&text[call.start..end]),
-            detail: "an invoke tag had no name attribute".into(),
+            detail: "the block that names the tool had no name".into(),
         }),
     }
 }
@@ -241,29 +260,26 @@ pub fn parse_region(text: &str) -> Region {
             }
             (Kind::Wrapper, true) => {
                 consumed = tag.end;
+                // The wrapper closing is as good as the invoke closing.
+                if let Some(p) = param.take() {
+                    finish_param(p, call.as_mut());
+                }
                 if let Some(c) = call.take() {
-                    let _ = c; // unclosed invoke before the wrapper closed
-                    results.push(Err(Failure {
-                        name: None,
-                        body: clip(&text[..lt]),
-                        detail: "an invoke tag was never closed".into(),
-                    }));
+                    results.push(finish_call(c, text, lt));
                 }
                 break;
             }
             (Kind::Invoke, false) => {
                 saw_open = true;
                 saw_invoke = true;
-                if let Some(prev) = call.take() {
-                    results.push(Err(Failure {
-                        name: prev.name,
-                        body: clip(&text[prev.start..lt]),
-                        detail: "an invoke tag was never closed".into(),
-                    }));
+                if let Some(p) = param.take() {
+                    finish_param(p, call.as_mut());
                 }
-                param = None;
+                if let Some(prev) = call.take() {
+                    results.push(finish_call(prev, text, lt));
+                }
                 call = Some(Open {
-                    name: attr(tag.inner, "name"),
+                    name: attr(tag.inner, "name").or_else(|| attr(tag.inner, "invoke")),
                     args: Map::new(),
                     start: lt,
                 });
@@ -287,11 +303,11 @@ pub fn parse_region(text: &str) -> Region {
                     results.push(Err(Failure {
                         name: None,
                         body: clip(&text[lt..]),
-                        detail: "a parameter tag appeared outside any invoke tag".into(),
+                        detail: "an argument block appeared outside any tool block".into(),
                     }));
                 }
                 param = Some(Param {
-                    name: attr(tag.inner, "name"),
+                    name: attr(tag.inner, "name").or_else(|| attr(tag.inner, "parameter")),
                     string: attr(tag.inner, "string").is_some_and(|s| s == "true"),
                     value: String::new(),
                 });
@@ -303,6 +319,20 @@ pub fn parse_region(text: &str) -> Region {
                 }
                 consumed = tag.end;
             }
+            // A bare marker closes the open parameter, by position. With no
+            // parameter open it is a stray and is ignored: only an explicit
+            // invoke closer, the wrapper closer, a new invoke or the end of the
+            // text ends an invoke.
+            (Kind::Bare, closing) => {
+                if closing {
+                    if let Some(p) = param.take() {
+                        finish_param(p, call.as_mut());
+                    }
+                } else {
+                    saw_open = true;
+                }
+                consumed = tag.end;
+            }
         }
     }
 
@@ -311,13 +341,13 @@ pub fn parse_region(text: &str) -> Region {
         results.push(Err(Failure {
             name: c.name.filter(|n| !n.is_empty()),
             body: clip(&text[c.start..]),
-            detail: "the output ended before the invoke tag was closed".into(),
+            detail: "the output ended before the call was closed".into(),
         }));
     } else if saw_open && !saw_invoke && results.is_empty() {
         results.push(Err(Failure {
             name: None,
             body: clip(&text[..consumed.max(1).min(text.len())]),
-            detail: "the calls wrapper held no invoke tag".into(),
+            detail: "the outer call block held no tool block".into(),
         }));
     }
     Region {
@@ -349,8 +379,8 @@ pub fn marker() -> String {
 /// calls exactly as the model would write them.
 pub fn render_tool_call(call: &ToolCall) -> String {
     let m = marker();
-    let args: Value = serde_json::from_str(&call.arguments)
-        .unwrap_or_else(|_| Value::Object(Default::default()));
+    let args: Value =
+        serde_json::from_str(&call.arguments).unwrap_or_else(|_| Value::Object(Default::default()));
     let mut out = format!("<{m} calls>\n <{m} invoke name=\"{}\">\n", call.name);
     if let Value::Object(map) = args {
         for (key, value) in map {
@@ -373,6 +403,77 @@ mod tests {
 
     const SAMPLE: &str = "<｜｜DSML｜｜ calls>\n <｜｜DSML｜｜ invoke name=\"bash\">\n <｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls ~/x 2>/dev/null | head; echo '--- net ---';\n timeout 10 curl -sS</｜｜DSML｜｜\n parameter>\n </｜｜DSML｜｜ invoke>\n </｜｜DSML｜｜ calls>";
 
+    // The four replies below are the raw bytes from a production log: the model
+    // kept closing a parameter with a bare `</｜｜DSML｜｜>` (no `parameter`).
+    const SLIP_BARE_CLOSER: &str = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">cd /x; python3 - <<'PY'\nprint(1)\nPY</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"timeout\" string=\"false\">60</｜｜DSML｜｜>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    const SLIP_STRAY_CLOSER: &str = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">stat -c%s f</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ parameter name=\"timeout\" string=\"false\">30</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    const SLIP_PARAMETER_EQUALS: &str = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter=\"command\" string=\"true\">stat -c%s f</｜｜DSML｜｜>\n</｜｜DSML｜｜>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+
+    fn one_call(t: &str) -> (String, serde_json::Value) {
+        let r = parse_region(t);
+        let [Ok(call)] = r.results.as_slice() else {
+            panic!("expected exactly one call: {:?}", r.results)
+        };
+        (call.name.clone(), call.json().unwrap())
+    }
+
+    #[test]
+    fn a_bare_closer_closes_the_open_parameter() {
+        let (name, args) = one_call(SLIP_BARE_CLOSER);
+        assert_eq!(name, "bash");
+        assert!(args["command"].as_str().unwrap().contains("print(1)"));
+        assert_eq!(args["timeout"], 60);
+    }
+
+    #[test]
+    fn a_stray_bare_closer_with_no_parameter_open_is_ignored() {
+        let (name, args) = one_call(SLIP_STRAY_CLOSER);
+        assert_eq!(name, "bash");
+        assert_eq!(args["command"], "stat -c%s f");
+        assert_eq!(args["timeout"], 30);
+    }
+
+    #[test]
+    fn parameter_equals_name_and_bare_closers_still_parse() {
+        let (_, args) = one_call(SLIP_PARAMETER_EQUALS);
+        assert_eq!(args["command"], "stat -c%s f");
+    }
+
+    #[test]
+    fn unquoted_attribute_values_are_accepted() {
+        let t = "<｜｜DSML｜｜ invoke name=bash><｜｜DSML｜｜ parameter name=command string=true>ls</｜｜DSML｜｜ parameter></｜｜DSML｜｜ invoke>";
+        let (name, args) = one_call(t);
+        assert_eq!(name, "bash");
+        assert_eq!(args["command"], "ls");
+    }
+
+    #[test]
+    fn a_missing_invoke_closer_is_forgiven_when_the_wrapper_closes() {
+        let t = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter></｜｜DSML｜｜ calls>";
+        let (name, args) = one_call(t);
+        assert_eq!(name, "bash");
+        assert_eq!(args["command"], "ls");
+    }
+
+    #[test]
+    fn a_missing_invoke_closer_is_forgiven_before_the_next_invoke() {
+        let t = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"a\"><｜｜DSML｜｜ invoke name=\"b\"></｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>";
+        let r = parse_region(t);
+        assert!(
+            matches!(r.results.as_slice(), [Ok(a), Ok(b)] if a.name == "a" && b.name == "b"),
+            "{:?}",
+            r.results
+        );
+    }
+
+    #[test]
+    fn output_cut_off_inside_an_invoke_is_still_a_failure() {
+        let r = parse_region(
+            "<｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\">ls",
+        );
+        assert!(matches!(r.results.as_slice(), [Err(f)] if f.detail.contains("ended before")));
+    }
+
     #[test]
     fn unclosed_parameter_before_invoke_closer_still_parses() {
         // Seen in the wild: the model closes the invoke but never the parameter.
@@ -382,7 +483,10 @@ mod tests {
             panic!("{:?}", r.results)
         };
         assert_eq!(call.name, "bash");
-        assert!(call.json().unwrap()["command"].as_str().unwrap().ends_with("| head -20"));
+        assert!(call.json().unwrap()["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("| head -20"));
     }
 
     #[test]
@@ -395,7 +499,10 @@ mod tests {
         };
         assert_eq!(call.name, "bash");
         let args = call.json().unwrap();
-        assert!(args["command"].as_str().unwrap().starts_with("ls ~/x 2>/dev/null"));
+        assert!(args["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("ls ~/x 2>/dev/null"));
         assert!(args["command"].as_str().unwrap().ends_with("curl -sS"));
     }
 
@@ -403,7 +510,9 @@ mod tests {
     fn non_string_parameters_are_json_and_literal_lt_survives() {
         let t = "<|DSML| invoke name=\"w\"><|DSML| parameter name=\"n\">5</|DSML| parameter><|DSML| parameter name=\"s\" string=\"true\">a <<EOF b</|DSML| parameter></|DSML| invoke>";
         let r = parse_region(t);
-        let [Ok(call)] = r.results.as_slice() else { panic!("{:?}", r.results) };
+        let [Ok(call)] = r.results.as_slice() else {
+            panic!("{:?}", r.results)
+        };
         let args = call.json().unwrap();
         assert_eq!(args["n"], 5);
         assert_eq!(args["s"], "a <<EOF b");
@@ -419,14 +528,18 @@ mod tests {
 
     #[test]
     fn unparsable_regions_say_why() {
-        let cut = parse_region("<｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\">ls");
-        let [Err(f)] = cut.results.as_slice() else { panic!() };
+        let cut = parse_region(
+            "<｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\">ls",
+        );
+        let [Err(f)] = cut.results.as_slice() else {
+            panic!()
+        };
         assert_eq!(f.name.as_deref(), Some("bash"));
         assert!(f.detail.contains("ended before"));
         let nameless = parse_region("<｜｜DSML｜｜ invoke></｜｜DSML｜｜ invoke>");
         assert!(matches!(nameless.results.as_slice(), [Err(f)] if f.detail.contains("no name")));
         let empty = parse_region("<｜｜DSML｜｜ calls></｜｜DSML｜｜ calls>");
-        assert!(matches!(empty.results.as_slice(), [Err(f)] if f.detail.contains("no invoke")));
+        assert!(matches!(empty.results.as_slice(), [Err(f)] if f.detail.contains("no tool block")));
         // A stray closer alone is swallowed without a failure.
         assert!(parse_region("</｜｜DSML｜｜ calls>").results.is_empty());
     }
@@ -462,7 +575,10 @@ mod tests {
     fn partial_tags_are_held_for_streaming() {
         assert_eq!(partial_len("hi <"), 1);
         assert_eq!(partial_len("hi <｜｜DS"), "<｜｜DS".len());
-        assert_eq!(partial_len("hi <｜｜DSML｜｜ inv"), "<｜｜DSML｜｜ inv".len());
+        assert_eq!(
+            partial_len("hi <｜｜DSML｜｜ inv"),
+            "<｜｜DSML｜｜ inv".len()
+        );
         assert_eq!(partial_len("a < b"), 0);
         assert_eq!(partial_len("<b>bold"), 0);
     }

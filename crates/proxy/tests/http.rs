@@ -132,7 +132,12 @@ async fn a_non_streaming_tool_call_is_in_the_message() {
     // The response below is spelled in the taught `<invoke>` format, so this
     // test pins the dialect that teaches it. The default (`native`) teaches no
     // syntax and reads the backend's own spelling instead.
-    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke")]).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("DIALECT", "json_invoke")],
+    )
+    .await;
 
     let mut body = hello_turn();
     body["tools"] = json!([{
@@ -227,7 +232,12 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     let repaired = sse_reply(4, 3, &[good.as_str()]);
     let script = MockScript::new(vec![Step::Sse(malformed), Step::Sse(repaired)]);
     let (upstream, script) = start_mock(script).await;
-    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke")]).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("DIALECT", "json_invoke")],
+    )
+    .await;
     let body = json!({
         "model": "deepseek-chat",
         "stream": true,
@@ -242,6 +252,64 @@ async fn malformed_tool_call_is_repaired_and_delivered() {
     let text = resp.text().await.unwrap();
     assert!(text.contains("tool_calls"), "repaired call missing: {text}");
     assert_eq!(script.completions(), 2, "one repair turn expected");
+}
+
+/// Native (DSML) dialect: the first reply needs a correction turn (here: a
+/// well-formed call to a tool that does not exist), the correction gets it
+/// right, and the repaired call must reach the client. The streaming filter used
+/// to overwrite the repaired calls on `finish()`, so a successful repair was
+/// delivered as an empty `stop` turn: the client saw only thinking, its "no
+/// DONE" nudge fired, and the model was asked again, forever.
+#[tokio::test]
+async fn a_repaired_native_call_is_delivered_to_the_client() {
+    let bar = "\u{FF5C}\u{FF5C}";
+    let bad = format!(
+        "<{bar}DSML{bar} calls>\n<{bar}DSML{bar} invoke name=\"bsh\">\n\
+         <{bar}DSML{bar} parameter name=\"command\" string=\"true\">ls</{bar}DSML{bar} parameter>\n\
+         </{bar}DSML{bar} invoke>\n</{bar}DSML{bar} calls>"
+    );
+    let good = format!(
+        "<{bar}DSML{bar} calls>\n<{bar}DSML{bar} invoke name=\"bash\">\n\
+         <{bar}DSML{bar} parameter name=\"command\" string=\"true\">ls</{bar}DSML{bar} parameter>\n\
+         </{bar}DSML{bar} invoke>\n</{bar}DSML{bar} calls>"
+    );
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &[bad.as_str()])),
+        Step::Sse(sse_reply(4, 3, &[good.as_str()])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app(&upstream, &[("a@example.com", "pw")]).await;
+    let body = json!({
+        "model": "deepseek-chat",
+        "stream": true,
+        "messages": [{"role": "user", "content": "list files"}],
+        "tools": [{"type": "function", "function": {
+            "name": "bash", "description": "run a command",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+        }}]
+    });
+    let resp = complete(&app, body).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert_eq!(script.completions(), 2, "one repair turn expected");
+    assert!(
+        text.contains("\"tool_calls\":["),
+        "repaired call was not delivered: {text}"
+    );
+    assert!(
+        text.contains("\"finish_reason\":\"tool_calls\""),
+        "turn must finish with tool_calls, not stop: {text}"
+    );
+    // The REPAIRED call (bash) is what is delivered, not the first reply's
+    // unknown-tool call (bsh).
+    assert!(
+        text.contains("\"name\":\"bash\""),
+        "repaired tool missing: {text}"
+    );
+    assert!(
+        !text.contains("bsh"),
+        "the rejected call leaked to the client: {text}"
+    );
 }
 
 /// A turn whose repairs all fail answers 502, and the client then retries the
@@ -264,7 +332,12 @@ async fn a_turn_whose_repairs_all_fail_leaves_the_cursor_where_it_started() {
         Step::Sse(sse_reply(8, 7, &[good.as_str()])),
     ]);
     let (upstream, script) = start_mock(script).await;
-    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], &[("DIALECT", "json_invoke"), ("TOOL_REPAIR_MAX_RETRIES", "1")]).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[("DIALECT", "json_invoke"), ("TOOL_REPAIR_MAX_RETRIES", "1")],
+    )
+    .await;
     let tools = json!([{"type": "function", "function": {
         "name": "bash", "description": "run a command",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
@@ -285,7 +358,10 @@ async fn a_turn_whose_repairs_all_fail_leaves_the_cursor_where_it_started() {
     ]);
     let resp = complete(&app, turn(second.clone())).await;
     let text = resp.text().await.unwrap();
-    assert!(text.contains("tool_repair_failed"), "the turn must fail: {text}");
+    assert!(
+        text.contains("tool_repair_failed"),
+        "the turn must fail: {text}"
+    );
 
     // The client retries the same request.
     let resp = complete(&app, turn(second)).await;
@@ -347,7 +423,10 @@ async fn a_throttled_repair_reply_does_not_move_the_cursor() {
     )
     .await;
     let text = resp.text().await.unwrap();
-    assert!(text.contains("tool_calls"), "the second repair should deliver: {text}");
+    assert!(
+        text.contains("tool_calls"),
+        "the second repair should deliver: {text}"
+    );
 
     assert_eq!(
         script.parents(),
@@ -659,10 +738,16 @@ async fn cors_preflight_succeeds_and_responses_are_readable_by_browsers() {
     let client = reqwest::Client::new();
 
     let preflight = client
-        .request(reqwest::Method::OPTIONS, format!("{}/v1/chat/completions", app.base))
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/v1/chat/completions", app.base),
+        )
         .header("origin", "http://localhost:3000")
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "authorization,content-type")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
         .send()
         .await
         .unwrap();
@@ -698,7 +783,11 @@ async fn unsupported_endpoints_answer_501_not_404() {
             .unwrap();
         assert_eq!(resp.status(), 501, "{path} must be 501");
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["error"]["code"], json!("not_supported"), "{path}: {body}");
+        assert_eq!(
+            body["error"]["code"],
+            json!("not_supported"),
+            "{path}: {body}"
+        );
         assert_eq!(body["error"]["type"], json!("server_error"));
     }
 }
@@ -964,12 +1053,8 @@ async fn rebind_moves_the_thread_and_clears_the_flag() {
 #[tokio::test]
 async fn admin_routes_need_no_key() {
     let (upstream, _script) = start_mock(MockScript::new(vec![])).await;
-    let app = spawn_app_with_keys(
-        &upstream,
-        &[("a@example.com", "pw")],
-        &[("me", "sk-test")],
-    )
-    .await;
+    let app =
+        spawn_app_with_keys(&upstream, &[("a@example.com", "pw")], &[("me", "sk-test")]).await;
 
     let listed = reqwest::get(format!("{}/admin/throttled", app.base))
         .await

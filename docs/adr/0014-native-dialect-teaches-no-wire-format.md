@@ -57,6 +57,31 @@ says "call a DSML tool". That names the backend's own format as an anchor
 without spelling a tag, so it stays inside this ADR. Do not go further and name
 or quote the legacy tag as a thing to avoid.
 
+## Amendment (2026-10-29): repairs escalate from plain words to the call's shape
+
+The per-turn reminder no longer says "DSML" and names no structure at all. When a
+reply cannot be read, the repair prompts now give the model something to fill in
+instead of "emit it in your native format", which left it guessing the syntax
+after one slip and spiralling:
+
+- repairs 1 and 2: the structure in plain words (outer call block, block naming
+  the tool, block per argument, each closed by the closing marker of its own
+  kind). No tag names, no markup, no DSML.
+- repairs 3 and 4: the actual call shape for the actual tool, element words and
+  argument names taken from its schema, with the marker left out, plus a short
+  line telling the model to add the DSML tags itself.
+- repair 5 and later: the full literal call with the real marker, to repeat
+  verbatim. The last line of defence.
+
+The markerless shape is the only place a repair shows angle brackets, and the
+marker itself is built from `dialect_dsml::marker()`, never typed. The earlier
+"do not go further" note is superseded for repairs 3+ only. Internal reason
+codes (`dsml_unparsable`) and parser failure details are shown to the model in
+neutral words. The parser also reads the model's usual slips by structure (a
+bare closer closes the open parameter, `parameter="x"`, unquoted attributes,
+a forgiven invoke closer), but does NOT read markerless tags: the model is told
+to add the markers.
+
 ## Trial
 
 Native is new and untested over long use. Until the owner closes the trial, do

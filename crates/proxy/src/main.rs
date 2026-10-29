@@ -2411,10 +2411,15 @@ async fn stream_response(live: LiveTurn) -> Response {
             .await;
             return;
         }
+        // Flush any held-back prose FIRST, then install the validated calls.
+        // For the Native and SimpleToolTag dialects `finish()` replaces
+        // `filter.calls` with the streamed reply's own calls; installing the
+        // repaired calls before the flush let it overwrite them, so a repair
+        // that worked was delivered as an empty `stop` turn.
+        let tail = filter.finish();
         filter.calls = recovery.calls;
 
-        // Flush any held-back prose, then emit tool calls (if any).
-        let tail = filter.finish();
+        // Emit the held-back prose, then the tool calls (if any).
         if !tail.is_empty() {
             let chunk = json!({
                 "id": id, "object": "chat.completion.chunk",

@@ -50,7 +50,7 @@ pub fn native_tools_block(tools: &[Value]) -> String {
 }
 
 pub fn native_reminder() -> String {
-    "Tool-call reminder: call a DSML tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
+    "Tool-call reminder: call a tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
 }
 
 /// Taught form: the `simple_tool_tag` dialect names the exact marker.
@@ -106,9 +106,8 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
         // of teaching one: `<name>{json}</name>`, `<tool_call>{...}`, and a
         // bare `{\"name\":...}` object. None of these are taught anywhere; they
         // are what the backend writes unprompted.
-        let native = find_native(rest).filter(|(at, _)| {
-            marker.is_none_or(|m| *at < m) && dsml.is_none_or(|d| *at < d)
-        });
+        let native = find_native(rest)
+            .filter(|(at, _)| marker.is_none_or(|m| *at < m) && dsml.is_none_or(|d| *at < d));
         if let Some((at, event)) = native {
             prose.push_str(&rest[..at]);
             if !prose.is_empty() {
@@ -216,9 +215,10 @@ fn native_start(text: &str) -> Option<usize> {
                 let rest = &text[i..];
                 match parse_object(rest) {
                     Some((value, used)) => {
-                        if value.as_object().is_some_and(|o| {
-                            o.contains_key("name") || o.contains_key("function")
-                        }) {
+                        if value
+                            .as_object()
+                            .is_some_and(|o| o.contains_key("name") || o.contains_key("function"))
+                        {
                             return Some(i);
                         }
                         i += used;
@@ -269,9 +269,8 @@ fn find_native(text: &str) -> Option<(usize, (usize, ScanEvent))> {
 /// One native spelling at the very start of `s`, and the bytes it covers.
 fn native_at(s: &str) -> Option<(usize, ScanEvent)> {
     if let Some(rest) = s.strip_prefix('<') {
-        let name_end = rest.find(|c: char| {
-            !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-        })?;
+        let name_end =
+            rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))?;
         let tag = &rest[..name_end];
         if tag.is_empty() || !rest[name_end..].starts_with('>') {
             return None;
@@ -554,15 +553,16 @@ mod tests {
         assert!(block.contains("Available tools:"));
         assert!(block.contains("\"name\":\"bash\""));
         assert!(reminder.contains("one call per response"));
-        // The anchor is the word, never markup: `DSML` names the backend's own
-        // format without spelling a single tag.
-        assert!(reminder.contains("DSML tool"));
+        // The anchor is the call's STRUCTURE in plain words, never the backend's
+        // vocabulary or markup (no `DSML`, no angle brackets).
+        assert!(!reminder.to_lowercase().contains("dsml"));
         assert!(!reminder.contains('<'));
     }
 
     #[test]
     fn accepts_optional_closing_tool_tag_after_call_json() {
-        let raw = "Working. <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}</tool>";
+        let raw =
+            "Working. <tool>{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\"}}</tool>";
         let (prose, calls) = parse_tool_calls(raw);
         assert_eq!(prose, "Working. ");
         assert_eq!(
@@ -630,7 +630,8 @@ mod tests {
     /// the model emitted.
     #[test]
     fn accepts_double_encoded_arguments_and_reserialises_them() {
-        let raw = "<tool>{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}</tool>";
+        let raw =
+            "<tool>{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\": \\\"ls\\\"}\"}</tool>";
         let (_, calls) = parse_tool_calls(raw);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "bash");
@@ -658,7 +659,10 @@ mod tests {
             " two <tool>{\"name\":\"b\",\"arguments\":{}}</tool> three"
         );
         let (prose, calls) = parse_tool_calls(raw);
-        assert_eq!(calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         assert_eq!(prose, "one  two  three");
     }
 
@@ -677,7 +681,10 @@ mod tests {
             other => panic!("expected malformed, got {other:?}"),
         };
         let named = |r: &str| (Some("bash".to_string()), r.to_string());
-        assert_eq!(reasons("<tool>{\"name\":\"bash\"}</tool>"), named("body_not_object"));
+        assert_eq!(
+            reasons("<tool>{\"name\":\"bash\"}</tool>"),
+            named("body_not_object")
+        );
         assert_eq!(
             reasons("<tool>{\"name\":\"bash\",\"arguments\":[1]}</tool>"),
             named("body_not_object")
@@ -687,10 +694,7 @@ mod tests {
             named("invalid_json_body")
         );
         // A parameter called `name` is not the tool name.
-        assert_eq!(
-            reasons("<tool>{\"arguments\":{\"name\":\"x\"").0,
-            None
-        );
+        assert_eq!(reasons("<tool>{\"arguments\":{\"name\":\"x\"").0, None);
     }
 
     #[test]
@@ -702,7 +706,9 @@ mod tests {
         assert_eq!(calls[0].json().unwrap()["command"], "ls");
 
         let bad = "<｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\">ls";
-        let Some(ScanEvent::Malformed(m)) = scan(bad).pop() else { panic!() };
+        let Some(ScanEvent::Malformed(m)) = scan(bad).pop() else {
+            panic!()
+        };
         assert_eq!(m.name.as_deref(), Some("bash"));
         assert!(m.reason.starts_with("dsml_unparsable:"), "{}", m.reason);
     }
@@ -738,11 +744,17 @@ mod tests {
     /// A real reply that went missing: prose, then a call with no closing tag.
     #[test]
     fn real_world_call_with_heredoc_and_no_closer_parses() {
-        let raw = concat!("But better: measure sim time.\n\n", r##"<tool>{"name":"bash","arguments":{"command":"cd /tmp && cat > /tmp/dbg4.mjs <<'EOF'\nimport pw from '/home/daya/.npm/lib/node_modules/playwright/index.js';\nconst { chromium } = pw;\nconst browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'] });\nconst page = await browser.newPage({ viewport: { width: 760, height: 520 } });\nawait page.goto('http://localhost:5199/index.html', { waitUntil: 'networkidle' });\nfor (let i = 0; i < 6; i++) {\n await page.waitForTimeout(7000);\n const s = await page.evaluate(() => ({ c: window.__stillLife.colony.carried, states: window.__stillLife.colony.ants.map(a => a.state).join(',') }));\n console.log(i, JSON.stringify(s));\n}\nawait page.screenshot({ path: '/tmp/shotC.png' });\nawait browser.close();\nEOF\nnode /tmp/dbg4.mjs 2>&1 | tail -8"}}"##);
+        let raw = concat!(
+            "But better: measure sim time.\n\n",
+            r##"<tool>{"name":"bash","arguments":{"command":"cd /tmp && cat > /tmp/dbg4.mjs <<'EOF'\nimport pw from '/home/daya/.npm/lib/node_modules/playwright/index.js';\nconst { chromium } = pw;\nconst browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'] });\nconst page = await browser.newPage({ viewport: { width: 760, height: 520 } });\nawait page.goto('http://localhost:5199/index.html', { waitUntil: 'networkidle' });\nfor (let i = 0; i < 6; i++) {\n await page.waitForTimeout(7000);\n const s = await page.evaluate(() => ({ c: window.__stillLife.colony.carried, states: window.__stillLife.colony.ants.map(a => a.state).join(',') }));\n console.log(i, JSON.stringify(s));\n}\nawait page.screenshot({ path: '/tmp/shotC.png' });\nawait browser.close();\nEOF\nnode /tmp/dbg4.mjs 2>&1 | tail -8"}}"##
+        );
         let (prose, calls) = parse_tool_calls(raw);
         assert_eq!(calls.len(), 1, "events: {:?}", scan(raw));
         assert_eq!(calls[0].name, "bash");
-        assert!(calls[0].json().unwrap()["command"].as_str().unwrap().contains("dbg4.mjs"));
+        assert!(calls[0].json().unwrap()["command"]
+            .as_str()
+            .unwrap()
+            .contains("dbg4.mjs"));
         assert_eq!(prose, "But better: measure sim time.\n\n");
     }
 
@@ -751,7 +763,10 @@ mod tests {
         let raw = r##"<tool>{"name":"edit","arguments":{"edits":[{"path":"/home/daya/Development/legal-graphrag/code/db.py","old":"    con.executescript(GRAPH_SCHEMA)","new":"    con.executescript(GRAPH_SCHEMA); con.executescript(GRAPH_FTS_SCHEMA)"}]}}</tool>"##;
         let (_, calls) = parse_tool_calls(raw);
         assert_eq!(calls.len(), 1, "events: {:?}", scan(raw));
-        assert_eq!(calls[0].json().unwrap()["edits"][0]["old"], "    con.executescript(GRAPH_SCHEMA)");
+        assert_eq!(
+            calls[0].json().unwrap()["edits"][0]["old"],
+            "    con.executescript(GRAPH_SCHEMA)"
+        );
     }
 
     #[test]

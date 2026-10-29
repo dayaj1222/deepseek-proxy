@@ -136,8 +136,18 @@ impl Dialect {
         match self {
             // No example on purpose: showing a concrete call would teach a
             // format (ADR-0014). Point the model back at its own native one.
-            Self::Native => "Emit the tool call in your native tool-call format, exactly as you normally do, \
-                 with valid arguments for the named tool."
+            // The STRUCTURE of a call, in plain words and a fill-in order, so one
+            // slip leaves the model something concrete instead of a syntax to
+            // guess. No backend vocabulary, no tag names, no markup (ADR-0014).
+            Self::Native => "Send exactly one tool call, built like this: (1) an outer call block that \
+                 wraps everything; (2) inside it, one block that carries the tool's name; (3) inside that, \
+                 one block per argument, each carrying the argument's name and its value, saying whether \
+                 the value is plain text or a number, boolean or JSON. Close the blocks innermost first, and \
+                 close each one with the closing marker made for that kind of block: an argument's own \
+                 closing marker for an argument, the tool block's for the tool block, the outer block's for \
+                 the outer block. A closing marker that is generic, or that belongs to a different kind of \
+                 block, is not recognised. Use your native markers for all of it, give valid arguments for \
+                 the named tool, and put nothing else in the reply."
                 .to_string(),
             Self::JsonInvoke => TEMPLATE.to_string(),
             Self::SimpleToolTag => crate::dialect_simple::render_tool_call(&ToolCall {
@@ -642,6 +652,118 @@ fn repair_tier(attempt: usize) -> usize {
     attempt.saturating_sub(1) % 3
 }
 
+/// The tool a repair skeleton is built for: the one the failed call named, if
+/// the request offers it, otherwise the first offered tool.
+fn skeleton_target<'a>(malformed: &[MalformedCall], specs: &'a [ToolSpec]) -> Option<&'a ToolSpec> {
+    malformed
+        .iter()
+        .filter_map(|m| m.name.as_deref())
+        .find_map(|n| specs.iter().find(|s| s.name == n))
+        .or_else(|| specs.first())
+}
+
+/// A tool's arguments as (name, takes text), required ones first.
+fn tool_params(spec: &ToolSpec) -> Vec<(String, bool)> {
+    let params = spec.raw.pointer("/function/parameters");
+    let required: Vec<&str> = params
+        .and_then(|p| p.get("required"))
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let (mut first, mut rest) = (Vec::new(), Vec::new());
+    if let Some(props) = params
+        .and_then(|p| p.get("properties"))
+        .and_then(|p| p.as_object())
+    {
+        for (name, schema) in props {
+            // Text unless the schema says otherwise (number, boolean, object...).
+            let text = schema
+                .get("type")
+                .and_then(|t| t.as_str())
+                .is_none_or(|t| t == "string");
+            let entry = (name.clone(), text);
+            if required.contains(&name.as_str()) {
+                first.push(entry);
+            } else {
+                rest.push(entry);
+            }
+        }
+    }
+    first.extend(rest);
+    first
+}
+
+/// The shape of one call to `spec`, every value a placeholder. With a marker the
+/// tags carry it (the literal form); without, they are bare (the form shown on
+/// the third repair, which leaves the marker for the model to add).
+fn call_skeleton(spec: &ToolSpec, marker: Option<&str>) -> String {
+    let tag = |close: bool, element: &str, attrs: &str| {
+        let slash = if close { "/" } else { "" };
+        match marker {
+            Some(m) => format!("<{slash}{m} {element}{attrs}>"),
+            None => format!("<{slash}{element}{attrs}>"),
+        }
+    };
+    let mut out = String::new();
+    out.push_str(&tag(false, "calls", ""));
+    out.push('\n');
+    out.push_str(&format!(
+        "  {}\n",
+        tag(false, "invoke", &format!(" name=\"{}\"", spec.name))
+    ));
+    for (name, text) in tool_params(spec) {
+        out.push_str(&format!(
+            "    {}VALUE{}\n",
+            tag(
+                false,
+                "parameter",
+                &format!(" name=\"{name}\" string=\"{text}\"")
+            ),
+            tag(true, "parameter", "")
+        ));
+    }
+    out.push_str(&format!("  {}\n", tag(true, "invoke", "")));
+    out.push_str(&tag(true, "calls", ""));
+    out
+}
+
+/// What a native repair attempt escalates to once the plain structure has not
+/// worked: from the third attempt the actual call shape, marker left out; from
+/// the fifth the full literal, to repeat verbatim. `None` means stay plain
+/// (earlier attempts, or no tool to build a skeleton from).
+fn native_escalation(
+    attempt: usize,
+    malformed: &[MalformedCall],
+    specs: &[ToolSpec],
+) -> Option<(&'static str, String)> {
+    if attempt < 3 {
+        return None;
+    }
+    let spec = skeleton_target(malformed, specs)?;
+    if attempt >= 5 {
+        let literal = call_skeleton(spec, Some(&crate::dialect_dsml::marker()));
+        Some((
+            "Last attempt.",
+            format!(
+                "Repeat the following call VERBATIM, changing only each VALUE to the real value, \
+                 and send nothing else:\n\n{literal}"
+            ),
+        ))
+    } else {
+        let shape = call_skeleton(spec, None);
+        Some((
+            "Still not usable.",
+            format!(
+                "This is the exact shape of a call to {}, with the marker words left out. Add the \
+                 DSML tags yourself, in the same places, and fill in the values:\n\n{shape}\n\n\
+                 string=\"true\" is for text, \"false\" for numbers, booleans and JSON. Every closing \
+                 tag repeats its own element word. Send only this call, nothing else.",
+                spec.name
+            ),
+        ))
+    }
+}
+
 /// Build the repair prompt for `attempt` (1-based).
 ///
 /// `malformed` is the failure list for *this* attempt. It keeps the tool name
@@ -668,8 +790,16 @@ pub fn build_repair_prompt_for(
     let wire_shape = dialect.wire_shape();
     let native = matches!(dialect, Dialect::Native);
     let mut out = String::new();
+    let escalation = if native {
+        native_escalation(attempt, malformed, specs)
+    } else {
+        None
+    };
 
-    match tier {
+    if let Some((intro, _)) = &escalation {
+        out.push_str(intro);
+    } else {
+        match tier {
         0 => out.push_str(
             "Your previous response contained malformed tool call(s) that could not be executed. \
              Do not quote, copy, explain, or repeat it. Re-emit EACH corrected call now, \
@@ -687,6 +817,7 @@ pub fn build_repair_prompt_for(
             "Still not usable. Send exactly one tool call, in the shape below, with no \
              other text.",
         ),
+        }
     }
 
     for (i, m) in malformed.iter().enumerate() {
@@ -696,6 +827,13 @@ pub fn build_repair_prompt_for(
         };
         // Strip any detail after the category separator, mirroring Python.
         let reason = m.reason.split(':').next().unwrap_or("malformed_tool_call");
+        // The internal code names the backend's own format; the model is shown a
+        // neutral label (logs and tests keep the real code).
+        let reason = if reason == crate::dialect_dsml::UNPARSABLE {
+            "unreadable_call"
+        } else {
+            reason
+        };
         out.push_str(&format!(
             "\nFailure {}: name={} reason={}",
             i + 1,
@@ -723,6 +861,12 @@ pub fn build_repair_prompt_for(
         out.push_str(&format!("\nValid tool names: {}.", names.join(", ")));
     }
 
+    if let Some((_, body)) = escalation {
+        out.push_str("\n\n");
+        out.push_str(&body);
+        return out;
+    }
+
     match tier {
         0 => {
             if native {
@@ -742,7 +886,11 @@ pub fn build_repair_prompt_for(
             // modes (legacy marker tags, doubled closing tag); a first repair turn
             // needs the same warning, not a weaker one.
             out.push_str("\n\n");
-            out.push_str(&dialect.reminder());
+            if native {
+                out.push_str(&wire_shape);
+            } else {
+                out.push_str(&dialect.reminder());
+            }
             out.push_str("\n\nOnly fix the listed failures. Do not repeat calls already accepted.");
         }
         1 => {
@@ -1041,20 +1189,159 @@ fn write_py_json(value: &serde_json::Value, out: &mut String) {
 #[cfg(test)]
 mod tests {
 
+    fn bash_with_timeout() -> ToolSpec {
+        ToolSpec {
+            name: "bash".into(),
+            raw: json!({"type": "function", "function": {
+                "name": "bash", "description": "run",
+                "parameters": {"type": "object",
+                    "properties": {"timeout": {"type": "integer"}, "command": {"type": "string"}},
+                    "required": ["command"]}
+            }}),
+        }
+    }
+
+    fn unreadable() -> [MalformedCall; 1] {
+        [MalformedCall::new(
+            Some("bash".into()),
+            "".into(),
+            &format!(
+                "{}:a block was never closed",
+                crate::dialect_dsml::UNPARSABLE
+            ),
+        )]
+    }
+
+    /// The per-turn reminder stays short and names no structure at all; the
+    /// structure arrives only when a repair is needed.
+    #[test]
+    fn native_reminder_stays_short_and_vocabulary_free() {
+        let r = crate::dialect_simple::native_reminder().to_lowercase();
+        for banned in [
+            "dsml",
+            "invoke",
+            "parameter",
+            "<",
+            ">",
+            "\u{FF5C}",
+            "|",
+            "closing marker",
+        ] {
+            assert!(!r.contains(banned), "{banned:?} in: {r}");
+        }
+        assert!(r.contains("one call per response"));
+    }
+
+    /// Repairs 1 and 2: the structure in plain words (nesting, what each level
+    /// carries, each closer matches its own block). No vocabulary, no markup.
+    #[test]
+    fn native_first_repairs_describe_structure_without_vocabulary() {
+        let bad = unreadable();
+        let mut texts = vec![Dialect::Native.wire_shape()];
+        for attempt in 1..=2 {
+            texts.push(build_repair_prompt_for(
+                &Dialect::Native,
+                &bad,
+                &[bash_with_timeout()],
+                attempt,
+            ));
+        }
+        for t in &texts {
+            let lower = t.to_lowercase();
+            for banned in ["dsml", "invoke", "parameter", "<", ">", "\u{FF5C}", "|"] {
+                assert!(!lower.contains(banned), "{banned:?} in: {t}");
+            }
+            assert!(t.contains("closing marker"), "{t}");
+            assert!(t.contains("innermost"), "{t}");
+            assert!(t.contains("outer call block"), "{t}");
+        }
+    }
+
+    /// Repairs 3 and 4: the actual shape of a call to the actual tool, with the
+    /// marker left out, and a short note to add the DSML tags itself.
+    #[test]
+    fn native_third_and_fourth_repairs_show_the_markerless_skeleton() {
+        let bad = unreadable();
+        for attempt in [3, 4] {
+            let t =
+                build_repair_prompt_for(&Dialect::Native, &bad, &[bash_with_timeout()], attempt);
+            assert!(t.contains("<calls>"), "attempt {attempt}: {t}");
+            assert!(t.contains("<invoke name=\"bash\">"), "{t}");
+            // Required argument first, then the optional one; type decides `string`.
+            let cmd = t.find("<parameter name=\"command\" string=\"true\">VALUE</parameter>");
+            let timeout = t.find("<parameter name=\"timeout\" string=\"false\">VALUE</parameter>");
+            assert!(cmd.is_some() && timeout.is_some() && cmd < timeout, "{t}");
+            assert!(t.contains("</invoke>") && t.contains("</calls>"), "{t}");
+            assert!(t.contains("DSML tags yourself"), "{t}");
+            assert!(!t.contains('\u{FF5C}'), "the marker must be left out: {t}");
+        }
+    }
+
+    /// Repair 5 and later: the full literal call, marker included, to repeat
+    /// verbatim. The last line of defence.
+    #[test]
+    fn native_fifth_repair_sends_the_full_literal_to_repeat_verbatim() {
+        let bad = unreadable();
+        let t = build_repair_prompt_for(&Dialect::Native, &bad, &[bash_with_timeout()], 5);
+        let m = crate::dialect_dsml::marker();
+        assert!(t.contains(&format!("<{m} calls>")), "{t}");
+        assert!(t.contains(&format!("<{m} invoke name=\"bash\">")), "{t}");
+        assert!(
+            t.contains(&format!(
+                "<{m} parameter name=\"command\" string=\"true\">VALUE</{m} parameter>"
+            )),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!("</{m} invoke>")) && t.contains(&format!("</{m} calls>")),
+            "{t}"
+        );
+        assert!(t.to_lowercase().contains("verbatim"), "{t}");
+    }
+
+    /// With no tool to build a skeleton from, escalation degrades to the plain
+    /// structure instead of inventing a tool.
+    #[test]
+    fn native_escalation_without_a_tool_falls_back_to_plain_structure() {
+        let bad = unreadable();
+        for attempt in [3, 5] {
+            let t = build_repair_prompt_for(&Dialect::Native, &bad, &[], attempt);
+            assert!(
+                !t.contains('<') && !t.contains('>') && !t.contains('\u{FF5C}'),
+                "{t}"
+            );
+        }
+    }
+
     /// ADR-0014: in native mode no repair tier may show the model a tag.
     #[test]
     fn native_repair_prompts_never_spell_out_markup() {
-        let bad = [MalformedCall::new(Some("bash".into()), "invalid_arguments_json".into(), "".into())];
+        let bad = [MalformedCall::new(
+            Some("bash".into()),
+            "invalid_arguments_json".into(),
+            "".into(),
+        )];
         let unparsable = [MalformedCall::new(
             Some("bash".into()),
             "".into(),
-            &format!("{}:the output ended before the invoke tag was closed", crate::dialect_dsml::UNPARSABLE),
+            &format!(
+                "{}:the output ended before the call was closed",
+                crate::dialect_dsml::UNPARSABLE
+            ),
         )];
         for calls in [&bad, &unparsable] {
-            for attempt in 0..4 {
+            // Repairs 1 and 2 (and 0) stay plain; from the third the markerless
+            // skeleton is shown on purpose (see the escalation tests).
+            for attempt in 0..3 {
                 let p = build_repair_prompt_for(&Dialect::Native, calls, &[], attempt);
-                assert!(!p.contains('<') && !p.contains('>'), "attempt {attempt}: {p}");
-                assert!(!p.contains("<tool>") && !p.contains("NOT the syntax"), "{p}");
+                assert!(
+                    !p.contains('<') && !p.contains('>'),
+                    "attempt {attempt}: {p}"
+                );
+                assert!(
+                    !p.contains("<tool>") && !p.contains("NOT the syntax"),
+                    "{p}"
+                );
             }
         }
     }

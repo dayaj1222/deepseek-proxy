@@ -179,6 +179,62 @@ impl SseDump {
     }
 }
 
+/// Decodes a byte stream whose network chunks may split a multi-byte character.
+#[derive(Default)]
+struct Utf8Joiner {
+    pending: Vec<u8>,
+}
+
+impl Utf8Joiner {
+    /// Decode `bytes` after anything held back from the previous chunk. A
+    /// sequence cut off at the end of the chunk is kept for the next one; bytes
+    /// that can never be valid UTF-8 become U+FFFD, as `from_utf8_lossy` does.
+    fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::new();
+        let mut consumed = 0;
+        loop {
+            match std::str::from_utf8(&self.pending[consumed..]) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    consumed = self.pending.len();
+                    break;
+                }
+                Err(e) => {
+                    let end = consumed + e.valid_up_to();
+                    out.push_str(&String::from_utf8_lossy(&self.pending[consumed..end]));
+                    consumed = end;
+                    match e.error_len() {
+                        Some(bad) => {
+                            out.push('\u{FFFD}');
+                            consumed += bad;
+                        }
+                        // Incomplete character at the very end: wait for more.
+                        None => break,
+                    }
+                }
+            }
+        }
+        self.pending.drain(..consumed);
+        out
+    }
+}
+
+/// Append `text` to `head`, keeping at most `max` bytes without ever cutting a
+/// character in half (`String::truncate` panics on a non-boundary, which killed
+/// the worker whenever the first kilobyte of a stream straddled a multi-byte
+/// character).
+fn push_capped(head: &mut String, text: &str, max: usize) {
+    head.push_str(text);
+    if head.len() > max {
+        let mut end = max;
+        while !head.is_char_boundary(end) {
+            end -= 1;
+        }
+        head.truncate(end);
+    }
+}
+
 pub async fn pump(
     resp: reqwest::Response,
     tx: &ChunkSender,
@@ -207,6 +263,7 @@ pub async fn pump(
     let mut raw_bytes: usize = 0;
     let mut raw_events: usize = 0;
     let mut head = String::new();
+    let mut utf8 = Utf8Joiner::default();
     let mut dump = SseDump::open(id);
     // One debug summary per upstream stream, however it ends. Logging only:
     // `finish` captures nothing mutable, so control flow is unchanged.
@@ -297,13 +354,14 @@ pub async fn pump(
         if let Some(d) = dump.as_mut() {
             d.raw(&bytes);
         }
+        // Decode once, carrying an incomplete trailing character into the next
+        // chunk: decoding each chunk alone turned a character split across two
+        // chunks into two U+FFFD replacements, garbling text and tool calls.
+        let text = utf8.push(&bytes);
         if head.len() < 1024 {
-            head.push_str(&String::from_utf8_lossy(&bytes));
-            if head.len() > 1024 {
-                head.truncate(1024);
-            }
+            push_capped(&mut head, &text, 1024);
         }
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push_str(&text);
         while let Some(pos) = buf.find('\n') {
             let line = buf[..pos].to_string();
             buf.drain(..=pos);
@@ -485,4 +543,62 @@ pub fn unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The diagnostic head is capped in BYTES, but a stream is full of multi-byte
+    /// characters (CJK text, emoji, the fullwidth bar of the tool markers).
+    /// Cutting inside one panicked the worker and broke the stream.
+    #[test]
+    fn push_capped_never_splits_a_character() {
+        // 1023 bytes, then a 3-byte character that straddles byte 1024.
+        let mut head = "a".repeat(1023);
+        push_capped(&mut head, "\u{FF5C}\u{FF5C}", 1024);
+        assert!(head.len() <= 1024);
+        assert!(head.is_char_boundary(head.len()));
+        assert_eq!(head, "a".repeat(1023));
+    }
+
+    #[test]
+    fn push_capped_keeps_whole_characters_up_to_the_cap() {
+        let mut head = String::new();
+        push_capped(&mut head, &"\u{FF5C}".repeat(400), 1024);
+        // 341 whole 3-byte characters = 1023 bytes.
+        assert_eq!(head.len(), 1023);
+        let mut short = String::from("ab");
+        push_capped(&mut short, "cd", 1024);
+        assert_eq!(short, "abcd");
+    }
+
+    #[test]
+    fn a_character_split_across_chunks_is_decoded_whole() {
+        let bytes = "a\u{FF5C}b".as_bytes(); // 'a', EF BD 9C, 'b'
+        for split in 1..bytes.len() {
+            let mut j = Utf8Joiner::default();
+            let mut out = j.push(&bytes[..split]);
+            out.push_str(&j.push(&bytes[split..]));
+            assert_eq!(out, "a\u{FF5C}b", "split at {split}");
+        }
+    }
+
+    #[test]
+    fn one_byte_at_a_time_still_decodes_cjk_and_emoji() {
+        let text = "ok \u{4F60}\u{597D} \u{1F600} done";
+        let mut j = Utf8Joiner::default();
+        let mut out = String::new();
+        for b in text.as_bytes() {
+            out.push_str(&j.push(std::slice::from_ref(b)));
+        }
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn genuinely_invalid_bytes_are_still_replaced() {
+        let mut j = Utf8Joiner::default();
+        let out = j.push(b"a\xFFb");
+        assert_eq!(out, "a\u{FFFD}b");
+    }
 }
