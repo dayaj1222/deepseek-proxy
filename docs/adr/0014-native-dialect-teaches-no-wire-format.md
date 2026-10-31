@@ -1,6 +1,6 @@
 # ADR-0014: The default dialect teaches no tool wire format
 
-**Status:** accepted (2026-10-28), on trial: the owner is running it for several days before committing to it fully
+**Status:** accepted (2026-10-28), on trial: the owner is running it for several days before committing to it fully. Partly superseded by ADR-0017 (2026-10-31): the format may be named in words; the marker and markup stay forbidden.
 
 ## Context
 

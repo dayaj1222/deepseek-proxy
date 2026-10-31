@@ -38,5 +38,8 @@ give back.
 | [0011](adr/0011-swallow-stray-closing-tags.md) | Up to two stray closing tags after a block are swallowed |
 | [0012](adr/0012-501-for-unsupported-endpoints.md) | Unsupported OpenAI endpoints answer 501 |
 | [0013](adr/0013-one-interface-for-thread-identity.md) | One interface opens every remote session |
-| [0014](adr/0014-native-dialect-teaches-no-wire-format.md) | The default dialect teaches no tool wire format (on trial) |
+| [0014](adr/0014-native-dialect-teaches-no-wire-format.md) | The default dialect teaches no tool wire format (on trial; partly superseded by 0017) |
+| [0017](adr/0017-native-prompts-may-name-the-format-not-the-marker.md) | Native prompts may name the DSML format in words; the marker and markup stay out |
 | [0015](adr/0015-admin-routes-take-no-key.md) | The admin routes take no API key |
+| [0016](adr/0016-infer-tool-name-from-arguments.md) | A call that drops its tool name runs only if its arguments fit exactly one offered tool |
+| [0018](adr/0018-accept-a-call-cut-off-after-its-last-argument.md) | A call cut off after its last whole argument is accepted |

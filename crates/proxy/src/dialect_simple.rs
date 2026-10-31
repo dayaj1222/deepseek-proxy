@@ -82,7 +82,7 @@ pub fn parse_tool_calls(text: &str) -> (String, Vec<ToolCall>) {
         match event {
             ScanEvent::Text(t) => prose.push_str(&t),
             ScanEvent::Tool(call) => calls.push(call),
-            ScanEvent::Malformed(_) => {}
+            ScanEvent::Malformed(_) | ScanEvent::Nameless { .. } => {}
         }
     }
     (prose, calls)
@@ -127,11 +127,17 @@ pub fn scan(text: &str) -> Vec<ScanEvent> {
             for result in region.results {
                 out.push(match result {
                     Ok(call) => ScanEvent::Tool(call),
-                    Err(f) => ScanEvent::Malformed(MalformedCall::new(
-                        f.name,
-                        f.body,
-                        &format!("{}:{}", dialect_dsml::UNPARSABLE, f.detail),
-                    )),
+                    Err(f) => {
+                        let malformed = MalformedCall::new(
+                            f.name,
+                            f.body,
+                            &format!("{}:{}", dialect_dsml::UNPARSABLE, f.detail),
+                        );
+                        match f.args {
+                            Some(args) => ScanEvent::Nameless { args, malformed },
+                            None => ScanEvent::Malformed(malformed),
+                        }
+                    }
                 });
             }
             rest = &rest[d + region.consumed..];
@@ -506,6 +512,8 @@ impl StreamFilter {
                 ScanEvent::Text(t) => tail.push_str(&t),
                 ScanEvent::Tool(call) => self.calls.push(call),
                 ScanEvent::Malformed(m) => self.malformed.push(m),
+                // Inference needs the tool list, which only `Recovery` has.
+                ScanEvent::Nameless { malformed, .. } => self.malformed.push(malformed),
             }
         }
         tail
@@ -553,9 +561,9 @@ mod tests {
         assert!(block.contains("Available tools:"));
         assert!(block.contains("\"name\":\"bash\""));
         assert!(reminder.contains("one call per response"));
-        // The anchor is the call's STRUCTURE in plain words, never the backend's
-        // vocabulary or markup (no `DSML`, no angle brackets).
-        assert!(!reminder.to_lowercase().contains("dsml"));
+        // The format may be named in words (ADR-0017), but never its marker,
+        // which contains the fullwidth bar. No angle brackets either.
+        assert!(!reminder.contains('\u{FF5C}'));
         assert!(!reminder.contains('<'));
     }
 

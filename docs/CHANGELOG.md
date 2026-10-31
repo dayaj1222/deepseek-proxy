@@ -36,6 +36,45 @@ guessing.
 
 ---
 
+## 2026-10-31 - A call cut off after its last argument is accepted
+
+The backend often stops after its last argument and skips the closers. The
+arguments are whole, so the call is accepted, and the schema check still runs on
+it (ADR-0018). A cut-off inside an argument still fails, because the value may be
+partial. Of the 152 captured replies, 20 of the 24 with this shape now produce a
+call instead of a repair turn.
+
+Test: `a_cut_off_call_runs_only_if_its_arguments_are_complete`.
+
+---
+
+## 2026-10-31 - Native prompts may name the DSML format; the marker stays out
+
+The owner clarified ADR-0014: the risk is the exact marker spelling and concrete
+markup, not the word. Prompts may now name the format in words. The marker, the
+fullwidth bar and any tag example stay forbidden (ADR-0017). The two tests that
+banned the word "dsml" now ban the bar and angle brackets instead.
+
+---
+
+## 2026-10-31 - A call that drops its tool name runs when its arguments identify one tool
+
+**The backend often sends a call's arguments with no tool block naming the tool.**
+The parser had no name, so the reply went to repair, which costs a model turn and
+resolved nothing in 137 of 284 settled attempts. Now the proxy runs the call if
+exactly one offered tool's schema fits its argument names. Zero or several
+matches stay malformed, as before (ADR-0016). Of the 152 captured replies, about
+57 that used to need repair now produce a call. The probe used approximate
+schemas, so re-check against the real ones.
+
+A block that still cannot be run now gets the repair reason "the block that names
+the tool had no name", not "an argument block appeared outside any tool block".
+The model sees that wording in the repair turn.
+
+Test: `a_nameless_reply_runs_the_one_tool_its_arguments_fit`.
+
+---
+
 ## 2026-10-30 - A repair that drops the call delivers the answer
 
 **A correction turn that answered without a call looped to failure.** The
