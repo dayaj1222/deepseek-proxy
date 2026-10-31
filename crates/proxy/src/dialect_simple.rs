@@ -50,7 +50,7 @@ pub fn native_tools_block(tools: &[Value]) -> String {
 }
 
 pub fn native_reminder() -> String {
-    "Tool-call reminder: call a tool when it helps, one call per response, then wait for the result. If no tool fits, answer directly.".into()
+    "Tool-call reminder: call a tool when it helps, use dsml format, one call per response, then wait for the result. If no tool fits, answer directly.".into()
 }
 
 /// Taught form: the `simple_tool_tag` dialect names the exact marker.
