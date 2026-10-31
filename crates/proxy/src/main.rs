@@ -1449,6 +1449,20 @@ impl Recovery {
                 return Ok(None);
             }
             dialect::ScanEvent::Text(_) => return Ok(None),
+            dialect::ScanEvent::Nameless { args, malformed } => {
+                // The model dropped the tool name. Take the call only if its
+                // arguments fit exactly one offered tool; otherwise it stays a
+                // malformed call and the repair turn asks for the name.
+                let Some(name) = dialect::infer_tool_name(&self.specs, &args) else {
+                    self.pending.push(malformed);
+                    return Ok(None);
+                };
+                tracing::info!(tool = %name, "tool name inferred from arguments");
+                dialect::ToolCall {
+                    name,
+                    arguments: serde_json::Value::Object(args).to_string(),
+                }
+            }
             dialect::ScanEvent::Tool(c) => c,
         };
 
@@ -3396,6 +3410,78 @@ mod tests {
         let prompt = recovery.begin_repair(1);
         assert!(prompt.contains("unknown_or_disallowed_tool"));
         assert!(prompt.contains("Valid tool names: bash."));
+    }
+
+    /// Feed a whole reply through the same scan + accept path the stream uses.
+    fn accept_reply(recovery: &mut Recovery, reply: &str) -> Vec<dialect::ToolCall> {
+        let mut calls = Vec::new();
+        for event in dialect::Dialect::Native.scan(reply) {
+            calls.extend(recovery.accept(event).unwrap());
+        }
+        calls
+    }
+
+    #[test]
+    fn a_nameless_reply_runs_the_one_tool_its_arguments_fit() {
+        // The model sent `command` with no tool name; only bash takes it.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        let calls = accept_reply(&mut recovery, reply);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].json().unwrap()["command"], "ls");
+        assert!(!recovery.has_pending());
+    }
+
+    #[test]
+    fn a_nameless_reply_that_fits_no_tool_stays_malformed() {
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">a</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        assert!(accept_reply(&mut recovery, reply).is_empty());
+        assert!(recovery.has_pending());
+        assert_eq!(recovery.pending[0].name, None);
+        assert!(recovery.pending[0].reason.starts_with("dsml_unparsable:"));
+    }
+
+    #[test]
+    fn a_nameless_reply_matching_two_tools_is_not_run() {
+        let other = serde_json::json!({
+            "type": "function",
+            "function": {"name": "bg_run", "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }}
+        });
+        let specs = dialect::tool_specs(&[tool_with_schema(), other]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">rm x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        assert!(accept_reply(&mut recovery, reply).is_empty());
+        assert!(recovery.has_pending());
+    }
+
+    #[test]
+    fn a_cut_off_call_runs_only_if_its_arguments_are_complete() {
+        // Skipped closers after a whole `command` are fine; `timeout` alone is
+        // not, because bash requires `command`, so the schema check sends it on.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let whole = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>";
+        let calls = accept_reply(&mut recovery, whole);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+
+        let mut recovery = Recovery::new(
+            dialect::tool_specs(&[tool_with_schema()]),
+            false,
+            true,
+            dialect::Dialect::Native,
+        );
+        let missing = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"timeout\" string=\"false\">30</｜｜DSML｜｜ parameter>";
+        assert!(accept_reply(&mut recovery, missing).is_empty());
+        assert!(recovery.has_pending());
     }
 
     #[test]

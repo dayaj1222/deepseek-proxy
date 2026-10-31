@@ -20,10 +20,13 @@ downward; nothing below `proxy` knows about HTTP serving or SQLite).
 ## Hard constraints (the ones that cost us before)
 
 - **Never teach a tool wire format.** The default `native` dialect names no
-  syntax; the model uses its own and we read it back. Teaching the backend's
+  syntax: no marker spelling (the fullwidth-bar `DSML` token), no tag, no
+  example. Naming the format in words (for example "DSML tool call") is allowed.
+  The model uses its own spelling and we read it back. Teaching the backend's
   tag format is what risks an account strike. Do not add wording, examples or
   repair text that spells out a concrete format in `native` mode.
-  See [ADR-0014](docs/adr/0014-native-dialect-teaches-no-wire-format.md).
+  See [ADR-0014](docs/adr/0014-native-dialect-teaches-no-wire-format.md) and
+  its narrowing in [ADR-0017](docs/adr/0017-native-prompts-may-name-the-format-not-the-marker.md).
 - **One path opens a remote session:** `session::open_session`. Never build a
   `ThreadState` by hand. See ADR-0013.
 - **Do not hit the real DeepSeek in automated tests.** Use `corpus/` fixtures or

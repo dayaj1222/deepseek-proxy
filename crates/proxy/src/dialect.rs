@@ -1016,6 +1016,51 @@ pub enum ScanEvent {
     Text(String),
     Tool(ToolCall),
     Malformed(MalformedCall),
+    /// A block whose tool name is missing but whose arguments are intact.
+    /// `malformed` is what it becomes when `infer_tool_name` finds no tool.
+    Nameless {
+        args: serde_json::Map<String, serde_json::Value>,
+        malformed: MalformedCall,
+    },
+}
+
+/// The tool a nameless block was meant for, inferred from its argument names.
+///
+/// A tool qualifies when its schema declares every argument given, and every
+/// argument it requires is present. If more than one tool qualifies, or none
+/// does, nothing is inferred and the caller treats the block as malformed.
+pub fn infer_tool_name(
+    specs: &[ToolSpec],
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for spec in specs {
+        let Some(params) = spec.raw.get("function").and_then(|f| f.get("parameters")) else {
+            continue;
+        };
+        let Some(props) = params.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let required_present = params
+            .get("required")
+            .and_then(|r| r.as_array())
+            .is_none_or(|req| {
+                req.iter()
+                    .filter_map(|k| k.as_str())
+                    .all(|k| args.contains_key(k))
+            });
+        if !required_present || !args.keys().all(|k| props.contains_key(k)) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(spec.name.clone());
+    }
+    found
 }
 
 /// Split model text into ordered text / tool / malformed events.
@@ -1217,8 +1262,8 @@ mod tests {
     #[test]
     fn native_reminder_stays_short_and_vocabulary_free() {
         let r = crate::dialect_simple::native_reminder().to_lowercase();
+        // The format may be named in words (ADR-0017); the marker may not.
         for banned in [
-            "dsml",
             "invoke",
             "parameter",
             "<",
@@ -1782,6 +1827,8 @@ impl StreamToolFilter {
                 ScanEvent::Text(text) => prose.push_str(&text),
                 ScanEvent::Tool(call) => self.calls.push(call),
                 ScanEvent::Malformed(bad) => self.malformed.push(bad),
+                // Inference needs the tool list, which only `Recovery` has.
+                ScanEvent::Nameless { malformed, .. } => self.malformed.push(malformed),
             }
         }
         prose
@@ -2033,5 +2080,65 @@ mod stream_tests {
         let out = f.feed("<invoke name=\"t\">{\"a\":1}</invoke> done");
         assert_eq!(out, " done");
         assert_eq!(f.calls.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod infer_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool(name: &str, params: serde_json::Value) -> serde_json::Value {
+        json!({"type": "function", "function": {"name": name, "parameters": params}})
+    }
+
+    fn args(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn the_one_tool_whose_schema_fits_is_inferred() {
+        let specs = tool_specs(&[
+            tool(
+                "bash",
+                json!({"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}, "required": ["command"]}),
+            ),
+            tool(
+                "edit",
+                json!({"type": "object", "properties": {"edits": {"type": "array"}}, "required": ["edits"]}),
+            ),
+        ]);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"command": "ls"}))).as_deref(),
+            Some("bash")
+        );
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"edits": []}))).as_deref(),
+            Some("edit")
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_match_is_not_inferred() {
+        let schema = json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]});
+        let specs = tool_specs(&[tool("bash", schema.clone()), tool("bg_run", schema)]);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"command": "ls"}))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_required_or_unknown_argument_is_not_inferred() {
+        let specs = tool_specs(&[tool(
+            "read",
+            json!({"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}}, "required": ["path"]}),
+        )]);
+        assert_eq!(infer_tool_name(&specs, &args(json!({"offset": 3}))), None);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"path": "a", "mode": "x"}))),
+            None
+        );
+        assert_eq!(infer_tool_name(&specs, &args(json!({}))), None);
     }
 }
