@@ -33,6 +33,9 @@ pub struct Prepared {
     pub required: bool,
     /// Wire dialect this turn speaks (snapshot at turn start).
     pub dialect: dialect::Dialect,
+    /// User/tool messages this turn sends; added to the thread's exchange count
+    /// once the turn succeeds (drives the periodic reminder).
+    pub exchanges: usize,
 }
 
 /// Prepare a turn: resume, prompts, session, image, body.
@@ -94,6 +97,7 @@ pub async fn prepare(
         &system_extra,
         image_note.as_deref(),
         wire,
+        state.settings.get().tool_reminder_interval,
     );
     if prompt.is_empty() {
         tracing::warn!(thread = %key, "rejecting turn: no user message or tool result");
@@ -190,6 +194,7 @@ pub async fn prepare(
         specs,
         required,
         dialect: wire,
+        exchanges: crate::exchange_count(&req.messages),
     })
 }
 

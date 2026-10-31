@@ -123,6 +123,17 @@ pub fn choice_none(tool_choice: Option<&Value>) -> bool {
     matches!(tool_choice, Some(Value::String(s)) if s == "none")
 }
 
+/// Whether the periodic tool-call reminder is due on this turn.
+///
+/// Port of the Python proxy's `TOOL_REMINDER_INTERVAL` rule: `interval` 0 is off;
+/// otherwise the reminder goes out when the thread's exchange count (`offset`,
+/// the user/tool messages already sent) plus this turn's (`count`) crosses a
+/// multiple of `interval`.
+pub fn reminder_due(interval: u32, offset: usize, count: usize) -> bool {
+    let n = interval as usize;
+    n > 0 && (offset + count) / n > offset / n
+}
+
 /// Reminder text to append, or `None` when the turn offers no tools.
 pub fn reminder(tools: &[Value], wire: crate::dialect::Dialect) -> Option<String> {
     if tools.is_empty() {
@@ -155,6 +166,19 @@ mod tests {
             reminder,
             directive: None,
         }
+    }
+
+    #[test]
+    fn reminder_due_follows_the_python_interval_rule() {
+        // 0 is off, whatever the counts.
+        assert!(!reminder_due(0, 0, 1) && !reminder_due(0, 7, 9));
+        // 1 is every turn that carries an exchange.
+        assert!(reminder_due(1, 0, 1) && reminder_due(1, 5, 1));
+        assert!(!reminder_due(1, 5, 0));
+        // 3: due when the count crosses a multiple of 3.
+        assert!(!reminder_due(3, 0, 1) && !reminder_due(3, 1, 1));
+        assert!(reminder_due(3, 2, 1) && !reminder_due(3, 3, 1));
+        assert!(reminder_due(3, 1, 4), "a long delta can cross a multiple");
     }
 
     #[test]

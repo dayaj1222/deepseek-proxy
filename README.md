@@ -56,6 +56,18 @@ deepseek-rs status
 deepseek-rs logs -f
 ```
 
+Update a checkout-built binary in place:
+
+```bash
+deepseek-rs update            # git pull --ff-only, then cargo build --release
+deepseek-rs restart           # pick up the new binary
+```
+
+`update` refuses a dirty working tree or a branch other than `main`/`master`,
+so it never pulls a commit out from under work in progress; `--force` builds
+the tree exactly as it stands and does not touch git. It does not restart —
+rebuilding under a live server is safe, but swapping the code is your call.
+
 ## Configuration
 
 Environment beats `config.toml` beats built-in defaults. Every key is optional.

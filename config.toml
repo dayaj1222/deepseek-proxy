@@ -75,7 +75,7 @@ search = false
 # back-to-back requests on one account, and 10 concurrent thinking+search
 # requests, all returned 200 with no upstream rate-limit error. Raise this only
 # if you actually see `rate_limit_reached` or "Messages too frequent".
-request_delay_secs = 2
+request_delay_secs = 2.5
 
 # How many requests may queue behind a busy account before being rejected.
 queue_limit = 64
@@ -121,5 +121,11 @@ rate_limit_backoff_secs = 10.0
 # Correction turns for malformed tool calls. 0 disables repair.
 # Mirrors the Python proxy's TOOL_REPAIR_MAX_RETRIES.
 tool_repair_max_retries = 5
+
+# Re-send the tool-call reminder every N exchanges (user/tool messages) on a
+# thread; 0 turns the periodic reminder off. Mirrors the Python proxy's
+# TOOL_REMINDER_INTERVAL (there the default is 0; here 1 = every turn, which is
+# what this proxy did before the setting existed). Env: TOOL_REMINDER_INTERVAL.
+tool_reminder_interval = 1
 
 DEEPSEEK_LOG="debug"

@@ -70,6 +70,9 @@ struct Settings {
     rate_limit_backoff_secs: f64,
     /// Correction turns for malformed tool calls (`TOOL_REPAIR_MAX_RETRIES`).
     tool_repair_max_retries: u32,
+    /// Periodic tool-call reminder every N exchanges, 0 = off
+    /// (`TOOL_REMINDER_INTERVAL`).
+    tool_reminder_interval: u32,
     /// Whole-turn deadline in seconds (`REQUEST_TIMEOUT`).
     request_timeout_secs: f64,
     /// Largest accepted image in bytes (`IMAGE_MAX_BYTES`).
@@ -94,6 +97,7 @@ impl Settings {
             rate_limit_max_retries: cfg.rate_limit_max_retries,
             rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
             tool_repair_max_retries: cfg.tool_repair_max_retries,
+            tool_reminder_interval: cfg.tool_reminder_interval,
             request_timeout_secs: cfg.request_timeout_secs,
             image_max_bytes: cfg.image_max_bytes,
             heartbeat_interval_secs: cfg.heartbeat_interval_secs,
@@ -326,6 +330,7 @@ fn build_prompts(
         system_extra,
         image_note,
         dialect::Dialect::JsonInvoke,
+        1,
     )
 }
 
@@ -338,9 +343,18 @@ fn build_prompts_with(
     system_extra: &str,
     image_note: Option<&str>,
     wire: dialect::Dialect,
+    reminder_interval: u32,
 ) -> (String, String) {
     let (specs, required) = resolve_tools(req);
-    let reminder = prompt::reminder(&req.tools, wire);
+    // The periodic reminder rides only when the thread's exchange count crosses
+    // a multiple of `reminder_interval` (0 = never), as in the Python proxy.
+    let offset = existing.map_or(0, |t| t.exchanges);
+    let reminder = if prompt::reminder_due(reminder_interval, offset, exchange_count(&req.messages))
+    {
+        prompt::reminder(&req.tools, wire)
+    } else {
+        None
+    };
     let directive = prompt::directive(
         !specs.is_empty(),
         required,
@@ -659,6 +673,14 @@ fn delta_messages(messages: &[Msg]) -> &[Msg] {
         .map(|i| i + 1)
         .unwrap_or(0);
     &messages[start..]
+}
+
+/// User/tool messages in this turn's delta: the exchanges it adds to the thread.
+pub(crate) fn exchange_count(messages: &[Msg]) -> usize {
+    delta_messages(messages)
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "tool")
+        .count()
 }
 
 fn last_non_system_role(messages: &[Msg]) -> Option<&str> {
@@ -1567,6 +1589,30 @@ impl Recovery {
         }
     }
 
+    /// A repair reply with no call in it, on an optional call, means the model
+    /// decided the failed call was not needed. Drop the failures and return the
+    /// reply's prose, so the answer is delivered instead of another repair turn
+    /// asking for a call that will not come. Under `tool_choice: "required"` a
+    /// call is still owed, so the repair goes on.
+    fn declined_repair(&mut self, events: &[dialect::ScanEvent]) -> Option<String> {
+        let called = events
+            .iter()
+            .any(|e| !matches!(e, dialect::ScanEvent::Text(_)));
+        let prose: String = events
+            .iter()
+            .filter_map(|e| match e {
+                dialect::ScanEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        if self.required || called || prose.trim().is_empty() {
+            return None;
+        }
+        self.pending.clear();
+        self.last_failures.clear();
+        Some(prose)
+    }
+
     fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -1699,6 +1745,7 @@ async fn chat_completions(
         specs,
         required,
         dialect: wire,
+        exchanges,
     } = prepared;
 
     let id = format!("chatcmpl-{}", uuid_like());
@@ -1732,6 +1779,7 @@ async fn chat_completions(
         parallel: req.parallel_tool_calls,
         stream: req.stream,
         dialect: wire,
+        exchanges,
     })
     .await
 }
@@ -1815,6 +1863,9 @@ struct LiveTurn {
     stream: bool,
     /// Wire dialect; selects the streaming tool-call grammar.
     dialect: dialect::Dialect,
+    /// User/tool messages this turn carries; added to the thread's exchange
+    /// count once the turn succeeds.
+    exchanges: usize,
 }
 
 async fn stream_response(live: LiveTurn) -> Response {
@@ -1837,6 +1888,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         parallel,
         stream,
         dialect: wire,
+        exchanges,
     } = live;
     let (tx, rx) = tokio::sync::mpsc::channel::<sse::Chunk>(32);
 
@@ -2274,6 +2326,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         let mut repair_aborted = false;
         // Log-only: whether any correction turn ran, for the "turn done" line.
         let mut repaired = false;
+        // Prose from a repair reply that declined the call, delivered with the turn.
+        let mut declined_prose = String::new();
         for attempt in 1..=max {
             if tx.is_closed() {
                 return;
@@ -2362,6 +2416,28 @@ async fn stream_response(live: LiveTurn) -> Response {
                 );
                 repair_text.clear();
                 repair_mid = None;
+                // A throttle arrives as a 200 with the hint in the body, so
+                // `completion_with_retry` never sees it. Without a wait the
+                // whole repair budget burns in about two seconds. Wait like
+                // the turn path does (`backoff_delay`) before the next attempt.
+                if pool::is_rate_limit(&hint) && attempt < max {
+                    let wait = backoff_delay(&turn_settings, attempt - 1);
+                    tracing::info!(
+                        thread = %key,
+                        attempt,
+                        retry_delay_s = wait,
+                        "repair throttled; waiting before the next attempt"
+                    );
+                    if until_client_disconnect(
+                        &tx,
+                        tokio::time::sleep(std::time::Duration::from_secs_f64(wait)),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        return;
+                    }
+                }
             }
             // The correction answer is now the newest upstream message, so it —
             // not the malformed reply it fixed — becomes the parent of the
@@ -2370,7 +2446,13 @@ async fn stream_response(live: LiveTurn) -> Response {
             if let Some(mid) = repair_mid {
                 cursor = Some(mid);
             }
-            for event in wire.scan(&repair_text) {
+            let events = wire.scan(&repair_text);
+            if let Some(prose) = recovery.declined_repair(&events) {
+                tracing::info!(thread = %key, attempt, "repair declined: model answered without a call");
+                declined_prose = prose;
+                break;
+            }
+            for event in events {
                 match recovery.accept(event) {
                     Ok(_) => {}
                     Err(e) => {
@@ -2416,7 +2498,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         // `filter.calls` with the streamed reply's own calls; installing the
         // repaired calls before the flush let it overwrite them, so a repair
         // that worked was delivered as an empty `stop` turn.
-        let tail = filter.finish();
+        let mut tail = filter.finish();
+        tail.push_str(&declined_prose);
         filter.calls = recovery.calls;
 
         // Emit the held-back prose, then the tool calls (if any).
@@ -2509,6 +2592,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 
         state.threads.commit(&key, &session_id, cursor);
+        // Only a turn that succeeded counts toward the periodic reminder.
+        state.threads.bump_exchanges(&key, exchanges);
     });
 
     if stream {
@@ -3419,6 +3504,71 @@ mod tests {
             recovery.end_repair();
             assert_eq!(recovery.pending.len(), 1, "attempt {attempt}: pending grew");
         }
+    }
+
+    #[test]
+    fn a_repair_that_drops_the_call_delivers_its_answer() {
+        // The model read its bad call and decided none was needed. The failure
+        // must go away and the prose must be what the client gets; carrying the
+        // old failure forward is what looped the repair until the retry budget ran out.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
+        recovery
+            .accept(dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )))
+            .unwrap();
+        let _ = recovery.begin_repair(1);
+        let events = vec![dialect::ScanEvent::Text("The answer is 4.".into())];
+        assert_eq!(
+            recovery.declined_repair(&events).as_deref(),
+            Some("The answer is 4.")
+        );
+        // The loop breaks here, so `end_repair` must not carry the failure over.
+        assert!(!recovery.has_pending());
+    }
+
+    #[test]
+    fn a_repair_that_still_carries_a_call_is_not_declined() {
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
+        recovery
+            .accept(dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )))
+            .unwrap();
+        let _ = recovery.begin_repair(1);
+        let events = vec![
+            dialect::ScanEvent::Text("Let me fix that.".into()),
+            dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )),
+        ];
+        assert_eq!(recovery.declined_repair(&events), None);
+        for event in events {
+            recovery.accept(event).unwrap();
+        }
+        assert!(recovery.has_pending());
+    }
+
+    #[test]
+    fn a_required_call_is_never_declined() {
+        // `tool_choice: "required"` still owes a call, so a prose-only repair
+        // must not end the loop.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, true, false, dialect::Dialect::JsonInvoke);
+        recovery.require_call();
+        let _ = recovery.begin_repair(1);
+        let events = vec![dialect::ScanEvent::Text("Here is the answer.".into())];
+        assert_eq!(recovery.declined_repair(&events), None);
+        recovery.end_repair();
+        assert!(recovery.has_pending());
     }
 
     #[test]
