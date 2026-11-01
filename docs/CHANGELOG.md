@@ -6,6 +6,37 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-01 - `main.rs` split into `state` and `error`
+
+**`main.rs` had grown to ~3900 lines.** It held the shared state, both error
+types, the router, every handler and the whole test module, so finding the one
+place a rule lived meant scanning a file that had stopped being readable.
+
+Two modules were extracted, unchanged in behaviour:
+
+- `state.rs` - `Settings`, `AppState`, `SettingsHandle`, `Stats` and
+  `restart_only_keys`. Everything shared by every request now lives in one
+  place, and the reload story (generation, snapshot, restart-only keys) is
+  readable without the HTTP surface around it.
+- `error.rs` - `CompletionError`, `ProxyError` and `error_for`. The mapping from
+  a failed upstream attempt to the client's status/code, including the side
+  effect of a dead login, is now one file with one direction of dependency.
+
+`main.rs` re-exports both, so no other module changed. What is left is the HTTP
+surface: router, handlers, `LiveTurn` and the test module.
+
+Tests: no test changed. `cargo test --workspace` is 203 + 37 green, and
+`cargo clippy --workspace --all-targets` reports the same 28 warnings as before
+the split (none from the new modules).
+
+Accepted cost: two more files to open when following one type, and `main.rs`
+still owns the streaming half. This is the first cut, not the last - the next
+natural boundary is the streaming turn itself, which stays out of scope here
+because a behavioural refactor of `stream_response` would not be reviewable in
+the same change.
+
+---
+
 ## 2026-10-31 - The log level in config.toml works; failed tool calls name the tool
 
 **`DEEPSEEK_LOG="debug"` in `config.toml` did nothing.** The line sat under

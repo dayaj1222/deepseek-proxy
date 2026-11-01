@@ -27,15 +27,20 @@ mod config;
 mod dialect;
 mod dialect_dsml;
 mod dialect_simple;
+mod error;
 mod images;
 mod log;
 mod pool;
 mod prompt;
 mod session;
 mod sse;
+mod state;
 mod store;
 mod threads;
 mod turn;
+
+pub(crate) use error::{error_for, CompletionError, ProxyError};
+pub(crate) use state::{AppState, Settings, SettingsHandle, Stats};
 
 use axum::{
     extract::State,
@@ -53,215 +58,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sse::{pump, route_all, unix_secs, usage_block, uuid_like, Pumped};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 use threads::ThreadState;
 use tracing::Instrument;
 
-#[derive(Clone)]
-struct Settings {
-    thinking_default: bool,
-    search_enabled: bool,
-    model_name: String,
-    /// Throttle retries before the first byte (`RATE_LIMIT_MAX_RETRIES`).
-    rate_limit_max_retries: u32,
-    /// Base backoff (`RATE_LIMIT_BACKOFF_S`), floored at 0.5s like Python.
-    rate_limit_backoff_secs: f64,
-    /// Correction turns for malformed tool calls (`TOOL_REPAIR_MAX_RETRIES`).
-    tool_repair_max_retries: u32,
-    /// Periodic tool-call reminder every N exchanges, 0 = off
-    /// (`TOOL_REMINDER_INTERVAL`).
-    tool_reminder_interval: u32,
-    /// Whole-turn deadline in seconds (`REQUEST_TIMEOUT`).
-    request_timeout_secs: f64,
-    /// Largest accepted image in bytes (`IMAGE_MAX_BYTES`).
-    image_max_bytes: usize,
-    /// SSE keep-alive interval in seconds (`HEARTBEAT_INTERVAL`).
-    heartbeat_interval_secs: f64,
-    /// Wire dialect selected at startup (`dialect` / `DIALECT`).
-    dialect: dialect::Dialect,
-}
-
-impl Settings {
-    /// Project the reloadable subset of the resolved config.
-    ///
-    /// Restart-only keys (`host`, `port`, `db_path`, `image_max_bytes`) are
-    /// still copied here because a running process reads them from somewhere,
-    /// but a reload cannot change them; see [`restart_only_keys`].
-    fn from_config(cfg: &config::Config) -> Self {
-        Self {
-            thinking_default: cfg.thinking,
-            search_enabled: cfg.search,
-            model_name: cfg.model.clone(),
-            rate_limit_max_retries: cfg.rate_limit_max_retries,
-            rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
-            tool_repair_max_retries: cfg.tool_repair_max_retries,
-            tool_reminder_interval: cfg.tool_reminder_interval,
-            request_timeout_secs: cfg.request_timeout_secs,
-            image_max_bytes: cfg.image_max_bytes,
-            heartbeat_interval_secs: cfg.heartbeat_interval_secs,
-            dialect: cfg.dialect,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct AppState {
-    /// Live knobs. Behind a handle so a SIGHUP can swap them without a restart
-    /// or a lock held across an await.
-    settings: Arc<SettingsHandle>,
-    /// Account pool. Swappable so a reload can add or remove an account without
-    /// restarting; callers go through [`AppState::pool`] and never hold the lock
-    /// across an await, so an in-flight turn finishes on the pool it started on.
-    pool: Arc<std::sync::RwLock<Arc<pool::Pool>>>,
-    /// Cache, turn lock and persistence for conversation threads.
-    threads: Arc<threads::Threads>,
-    store: store::Store,
-    stats: Arc<Stats>,
-}
-
-impl AppState {
-    /// Snapshot the current pool. One Arc clone; safe to hold for a whole turn.
-    fn pool(&self) -> Arc<pool::Pool> {
-        self.pool
-            .read()
-            .expect("pool lock poisoned")
-            .clone()
-    }
-
-    /// Install a rebuilt pool. Turns already running keep their snapshot.
-    fn set_pool(&self, fresh: Arc<pool::Pool>) {
-        *self.pool.write().expect("pool lock poisoned") = fresh;
-    }
-}
-
-/// The current `Settings`, swappable at runtime.
-///
-/// A turn takes one [`get`](Self::get) snapshot at its start and uses it for its
-/// whole life: changing a turn's deadline halfway through a stream would be a
-/// bug, not a feature. New turns see new values; running turns finish on the
-/// values they started with.
-struct SettingsHandle {
-    current: std::sync::RwLock<Arc<Settings>>,
-    /// The resolved config behind `current`, kept so a reload can tell a
-    /// restart-only key apart from a live one.
-    config: std::sync::Mutex<config::Config>,
-    /// Bumped on every successful reload; 1 means "as loaded at boot".
-    generation: AtomicU64,
-    /// When the running config was installed.
-    loaded_at: std::sync::Mutex<Instant>,
-    /// Last reload failure. `None` means the running config is the last good
-    /// one and nothing has failed since.
-    last_error: std::sync::Mutex<Option<String>>,
-}
-
-/// Keys that cannot change while the process is running.
-///
-/// `host`/`port` are already bound, `db_path` is an open SQLite handle, and
-/// `image_max_bytes` is baked into `DefaultBodyLimit` when the router is built.
-/// A reload reports these instead of pretending to apply them.
-fn restart_only_keys(old: &config::Config, new: &config::Config) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-    if old.host != new.host || old.port != new.port {
-        changed.push("host/port");
-    }
-    if old.db_path != new.db_path {
-        changed.push("db_path");
-    }
-    if old.image_max_bytes != new.image_max_bytes {
-        changed.push("image_max_bytes");
-    }
-    if old.dialect != new.dialect {
-        changed.push("dialect");
-    }
-    changed
-}
-
-impl SettingsHandle {
-    fn new(config: config::Config) -> Self {
-        Self {
-            current: std::sync::RwLock::new(Arc::new(Settings::from_config(&config))),
-            config: std::sync::Mutex::new(config),
-            generation: AtomicU64::new(1),
-            loaded_at: std::sync::Mutex::new(Instant::now()),
-            last_error: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Install a new config. Running turns keep the snapshot they took.
-    fn replace(&self, config: config::Config) -> u64 {
-        let settings = Settings::from_config(&config);
-        *self.current.write().expect("settings lock poisoned") = Arc::new(settings);
-        *self.config.lock().expect("settings lock poisoned") = config;
-        *self.loaded_at.lock().expect("settings lock poisoned") = Instant::now();
-        *self.last_error.lock().expect("settings lock poisoned") = None;
-        self.generation.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Record a failed reload. The running config stays untouched.
-    fn note_error(&self, error: String) {
-        *self.last_error.lock().expect("settings lock poisoned") = Some(error);
-    }
-
-    /// `(generation, seconds_since_last_successful_load, last_error)`.
-    fn snapshot(&self) -> (u64, u64, Option<String>) {
-        let last_error = self.last_error.lock().expect("settings lock poisoned").clone();
-        (
-            self.generation.load(Ordering::Relaxed),
-            self.loaded_at
-                .lock()
-                .expect("settings lock poisoned")
-                .elapsed()
-                .as_secs(),
-            last_error,
-        )
-    }
-
-    /// Restart-only keys that changed since the running config was loaded.
-    fn restart_only_changes(&self, new: &config::Config) -> Vec<&'static str> {
-        let old = self.config.lock().expect("settings lock poisoned");
-        restart_only_keys(&old, new)
-    }
-
-    /// Cheap: one Arc clone under a read lock, never held across an await.
-    fn get(&self) -> Arc<Settings> {
-        self.current
-            .read()
-            .expect("settings lock poisoned")
-            .clone()
-    }
-}
-
-/// Process counters reported by `GET /stats`. Cheap atomics only; anything
-/// expensive (account gates, db counts) is read live by the handler.
-#[derive(Default)]
-struct Stats {
-    started: Option<Instant>,
-    total: AtomicU64,
-    ok: AtomicU64,
-    errors: AtomicU64,
-    auth_failed: AtomicU64,
-    retries: AtomicU64,
-    tool_calls: AtomicU64,
-    /// Images dropped because a turn carried more than DeepSeek accepts.
-    images_dropped: AtomicU64,
-    /// Set when SIGTERM/SIGINT arrives; `/readyz` reports 503 from then on.
-    shutting_down: std::sync::atomic::AtomicBool,
-}
-
-impl Stats {
-    fn new() -> Self {
-        Self {
-            started: Some(Instant::now()),
-            ..Default::default()
-        }
-    }
-
-    fn uptime_secs(&self) -> u64 {
-        self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
@@ -1193,151 +994,6 @@ fn unauthorized(missing: bool) -> Response {
             .insert(axum::http::header::WWW_AUTHENTICATE, v);
     }
     resp
-}
-
-/// Why a completion attempt ultimately failed.
-#[derive(Debug, Clone)]
-enum CompletionError {
-    /// Still throttled after every retry; maps to 429 `rate_limit_exceeded`.
-    RateLimited {
-        retry_after_s: u64,
-    },
-    /// Login is dead; maps to 502 `backend_auth_failed`.
-    LoginDead(String),
-    /// Queue full or queue wait timed out; maps to 503 `queue_unavailable`.
-    QueueUnavailable(String),
-    Other(String),
-}
-
-impl From<pool::PoolError> for CompletionError {
-    fn from(e: pool::PoolError) -> Self {
-        match e {
-            pool::PoolError::Queue(m) => CompletionError::QueueUnavailable(m),
-            pool::PoolError::LoginDead(m) => CompletionError::LoginDead(m),
-            pool::PoolError::RateLimited { retry_after_s } => {
-                CompletionError::RateLimited { retry_after_s }
-            }
-            pool::PoolError::Other(m) => CompletionError::Other(m),
-        }
-    }
-}
-
-impl std::fmt::Display for CompletionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompletionError::RateLimited { retry_after_s } => write!(
-                f,
-                "DeepSeek backend rate-limited this turn (retry after {retry_after_s}s)"
-            ),
-            CompletionError::LoginDead(msg) | CompletionError::Other(msg) => f.write_str(msg),
-            CompletionError::QueueUnavailable(msg) => f.write_str(msg),
-        }
-    }
-}
-
-/// Public API error. Port of `ProxyError` in `deepseek_proxy/errors.py`.
-///
-/// Backend detail stays in the logs; the client gets a stable code and a
-/// generic message, exactly as Python does.
-#[derive(Debug, Clone)]
-struct ProxyError {
-    message: String,
-    status: axum::http::StatusCode,
-    code: &'static str,
-    param: Option<String>,
-    retry_after: Option<u64>,
-}
-
-impl ProxyError {
-    fn new(message: impl Into<String>, status: axum::http::StatusCode, code: &'static str) -> Self {
-        Self {
-            message: message.into(),
-            status,
-            code,
-            param: None,
-            retry_after: None,
-        }
-    }
-
-    fn with_param(mut self, param: impl Into<String>) -> Self {
-        self.param = Some(param.into());
-        self
-    }
-
-    /// `ProxyError.payload()`: `type` follows the status, not the code.
-    fn payload(&self) -> Value {
-        json!({
-            "error": {
-                "message": self.message,
-                "type": match self.status.as_u16() {
-                    400..=404 => "invalid_request_error",
-                    429 => "rate_limit_error",
-                    _ => "server_error",
-                },
-                "param": self.param,
-                "code": self.code,
-            }
-        })
-    }
-
-    fn into_response(self) -> Response {
-        let retry_after = self.retry_after;
-        let mut resp = (self.status, Json(self.payload())).into_response();
-        // `app.py` sets Retry-After whenever the exception carries one.
-        if let Some(retry_after) = retry_after {
-            if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after.max(1).to_string()) {
-                resp.headers_mut().insert("retry-after", v);
-            }
-        }
-        resp
-    }
-}
-
-/// Port of `error_for()` in `deepseek_proxy/transport.py`: the single place
-/// that turns a backend failure into what the client sees and how it is logged.
-async fn error_for(state: &AppState, key: &str, err: CompletionError) -> ProxyError {
-    match err {
-        CompletionError::RateLimited { retry_after_s } => {
-            let mut e = ProxyError::new(
-                "Backend capacity temporarily unavailable",
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_exceeded",
-            );
-            e.retry_after = Some(retry_after_s.max(1));
-            e
-        }
-        CompletionError::LoginDead(msg) => {
-            tracing::error!(thread = %key, error = %msg, "backend login failed");
-            if state.pool().failover(key).await.is_some() {
-                // The account binding just moved, so the session id - scoped to
-                // the account that created it - now points at nothing. Forget
-                // it and let the next turn open a session on the new account,
-                // instead of burning a turn to discover the mismatch.
-                state.threads.forget(key);
-            }
-            ProxyError::new(
-                "Backend login failed; disabled account, retry with a fresh thread",
-                axum::http::StatusCode::BAD_GATEWAY,
-                "backend_auth_failed",
-            )
-        }
-        CompletionError::QueueUnavailable(msg) => {
-            tracing::warn!(thread = %key, error = %msg, "account queue unavailable");
-            ProxyError::new(
-                "Request queue unavailable; try again later",
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "queue_unavailable",
-            )
-        }
-        CompletionError::Other(msg) => {
-            tracing::error!(thread = %key, error = %msg, "backend request failed");
-            ProxyError::new(
-                "Backend request failed",
-                axum::http::StatusCode::BAD_GATEWAY,
-                "backend_error",
-            )
-        }
-    }
 }
 
 /// Send the completion, retrying throttles with linear backoff.
@@ -3209,6 +2865,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::restart_only_keys;
 
     #[test]
     fn reason_codes_keeps_only_the_code() {
