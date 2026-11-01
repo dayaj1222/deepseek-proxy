@@ -158,3 +158,15 @@ pub(crate) async fn error_for(state: &AppState, key: &str, err: CompletionError)
         }
     }
 }
+
+/// Backend failure. Port of `error_for()`'s fallback: the detail is logged and
+/// the client gets the generic OpenAI envelope, never the raw message.
+pub(crate) fn backend_error(msg: &str) -> Response {
+    tracing::error!(error = %msg, "backend request failed");
+    ProxyError::new(
+        "Backend request failed",
+        axum::http::StatusCode::BAD_GATEWAY,
+        "backend_error",
+    )
+    .into_response()
+}

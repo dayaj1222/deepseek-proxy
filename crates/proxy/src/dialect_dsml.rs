@@ -132,6 +132,50 @@ pub fn partial_len(text: &str) -> usize {
     }
 }
 
+/// Bare closers in a row, with nothing but whitespace between them, that end an
+/// upstream read (ADR-0019). Four, not two: ADR-0011 lets two reach the client
+/// on purpose, and the deepest legitimate structural close is three.
+pub const CLOSER_SPAM_THRESHOLD: usize = 4;
+
+/// How many bare closers, separated only by whitespace, are still visible at
+/// the end of `text`. Returns 0 when the text does not end inside or
+/// immediately after such a run.
+///
+/// Walks backwards from the end, reusing [`tag_at`] so the spelling rules stay
+/// in one place. Each step searches only the `MAX_TAG` bytes before the closer,
+/// so the cost follows the run, not the length of `text`.
+pub fn trailing_bare_closers(text: &str) -> usize {
+    let mut end = text.len();
+    let mut count = 0;
+    loop {
+        let head = text[..end].trim_end_matches(|c: char| c.is_ascii_whitespace());
+        if !head.ends_with('>') {
+            break;
+        }
+        let mut window = head.len().saturating_sub(MAX_TAG);
+        while !head.is_char_boundary(window) {
+            window += 1;
+        }
+        let Some(lt) = head[window..].rfind('<') else {
+            break;
+        };
+        let at = window + lt;
+        match tag_at(head, at) {
+            Some(Tag {
+                kind: Kind::Bare,
+                closing: true,
+                end: tag_end,
+                ..
+            }) if tag_end == head.len() => {
+                count += 1;
+                end = at;
+            }
+            _ => break,
+        }
+    }
+    count
+}
+
 fn attr(inner: &str, key: &str) -> Option<String> {
     let mut from = 0;
     while let Some(rel) = inner[from..].find(key) {
@@ -684,5 +728,42 @@ mod tests {
             "{:?}",
             r.results
         );
+    }
+
+    const BARE: &str = "</｜｜DSML｜｜>";
+
+    #[test]
+    fn trailing_bare_closers_counts_a_run() {
+        let text = format!("prose\n{BARE} {BARE}\n{BARE} {BARE}\n{BARE}\n{BARE}\n{BARE}\n{BARE}");
+        assert!(trailing_bare_closers(&text) >= CLOSER_SPAM_THRESHOLD);
+        assert_eq!(trailing_bare_closers(&text), 8);
+    }
+
+    #[test]
+    fn trailing_bare_closers_ignores_structural_closers() {
+        let text = "</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        assert_eq!(trailing_bare_closers(text), 0);
+        let mixed = format!("{BARE}{BARE}{BARE}</｜｜DSML｜｜ parameter>");
+        assert_eq!(trailing_bare_closers(&mixed), 0);
+    }
+
+    #[test]
+    fn trailing_bare_closers_stops_at_other_bytes() {
+        let text = format!("{BARE}x{BARE}");
+        assert_eq!(trailing_bare_closers(&text), 1);
+        let text = format!("{BARE}{BARE}{BARE}.{BARE}");
+        assert_eq!(trailing_bare_closers(&text), 1);
+    }
+
+    #[test]
+    fn trailing_bare_closers_tolerates_spelling() {
+        let text = "</DSML>\n</|DSML|>\t</ ｜ DSML ｜ >\n</｜DSML｜>";
+        assert_eq!(trailing_bare_closers(text), 4);
+    }
+
+    #[test]
+    fn trailing_bare_closers_is_bounded() {
+        let text = format!("{}{BARE}{BARE}{BARE}{BARE}", "word ".repeat(2000));
+        assert_eq!(trailing_bare_closers(&text), 4);
     }
 }

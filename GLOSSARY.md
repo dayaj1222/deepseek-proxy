@@ -45,5 +45,8 @@ reviews and refactors reuse these names rather than inventing new ones.
   it is malformed.
 - **account** — one DeepSeek login. Threads bind to an account; a login-dead
   account fails the thread over to a healthy one.
+- **closer spam** — a run of bare DSML closers (the closing marker with no
+  element name) with nothing but whitespace between them. Four in a row end the
+  upstream read instead of being parsed (ADR-0019).
 - **surface** — the HTTP API (`/v1/chat/completions` etc.). The one place the
   word "interface" is not used.

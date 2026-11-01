@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::dialect;
+use crate::dialect_dsml;
 
 /// One thing a turn produces before it is turned into a transport.
 ///
@@ -235,6 +236,22 @@ fn push_capped(head: &mut String, text: &str, max: usize) {
     }
 }
 
+/// Bytes of trailing text inspected for closer spam on every delta (ADR-0019).
+const CLOSER_TAIL_CAP: usize = 256;
+
+/// Append `text` to `tail`, keeping only the last `max` bytes, cut forward to a
+/// character boundary so the buffer stays valid UTF-8.
+fn push_tail(tail: &mut String, text: &str, max: usize) {
+    tail.push_str(text);
+    if tail.len() > max {
+        let mut start = tail.len() - max;
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        tail.drain(..start);
+    }
+}
+
 pub async fn pump(
     resp: reqwest::Response,
     tx: &ChunkSender,
@@ -282,8 +299,12 @@ pub async fn pump(
         );
     };
 
+    // Raw tail of the text channel, for the closer-spam cut. Unlike `head` it
+    // holds the most recent bytes, because a run only exists at the end.
+    let mut tail = String::new();
+
     let mut byte_stream = resp.bytes_stream();
-    loop {
+    'read: loop {
         // Python's `stream()` waits `heartbeat_interval` for the next event and
         // emits `: keep-alive` on timeout — it does NOT kill the stream. The
         // turn-wide `request_timeout` is what bounds a real hang.
@@ -416,6 +437,7 @@ pub async fn pump(
                 let delta = match ev.channel {
                     Channel::Text => {
                         text_all.push_str(&ev.text);
+                        push_tail(&mut tail, &ev.text, CLOSER_TAIL_CAP);
                         // Tool blocks are held back and surfaced as tool_calls.
                         let safe = filter.feed(&ev.text);
                         if safe.is_empty() {
@@ -455,6 +477,14 @@ pub async fn pump(
                         prompt_tokens,
                     };
                 }
+            }
+            // A run of bare closers at the end of what has arrived: the model
+            // has stopped producing anything useful. Leave the read loop; the
+            // stream and its socket are dropped on return, which is the stop
+            // signal. The turn itself is not a failure (ADR-0019).
+            if dialect_dsml::trailing_bare_closers(&tail) >= dialect_dsml::CLOSER_SPAM_THRESHOLD {
+                ended = "closer spam";
+                break 'read;
             }
         }
     }
@@ -600,5 +630,96 @@ mod tests {
         let mut j = Utf8Joiner::default();
         let out = j.push(b"a\xFFb");
         assert_eq!(out, "a\u{FFFD}b");
+    }
+
+    const BARE: &str = "</｜｜DSML｜｜>";
+    const CALL: &str = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"bash\">\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+
+    /// One text delta in the shape the upstream sends after the first event.
+    fn text_event(text: &str) -> String {
+        let v = json!({"p": "response/fragments/-1/content", "o": "APPEND", "v": text});
+        format!("data: {v}\n\n")
+    }
+
+    /// A stream opener, then one network chunk per entry in `chunks`.
+    fn upstream(chunks: &[String]) -> reqwest::Response {
+        let mut opener = String::from(
+            "event: ready\ndata: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}\n\n",
+        );
+        opener.push_str("data: {\"v\":{\"response\":{\"message_id\":2,\"parent_id\":1,\"status\":\"WIP\",\"fragments\":[{\"id\":2,\"type\":\"RESPONSE\",\"content\":\"\",\"references\":[],\"stage_id\":1}]}}}\n\n");
+        let mut all = vec![Ok::<_, std::io::Error>(opener)];
+        all.extend(chunks.iter().cloned().map(Ok));
+        let body = reqwest::Body::wrap_stream(futures_util::stream::iter(all));
+        reqwest::Response::from(axum::http::Response::new(body))
+    }
+
+    async fn pump_chunks(chunks: &[String]) -> Pumped {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1024);
+        pump(
+            upstream(chunks),
+            &tx,
+            "test",
+            "model",
+            0,
+            std::time::Duration::from_secs(5),
+            false,
+            dialect::Dialect::Native,
+        )
+        .await
+    }
+
+    /// The run is the last thing in its chunk; `AFTER` sits in the next one.
+    /// If the pump stops reading early, `AFTER` never reaches `text`.
+    fn run_then_after(prefix: &str, closers: usize) -> Vec<String> {
+        let run = vec![BARE; closers].join("\n");
+        vec![
+            text_event(&format!("{prefix}{run}")),
+            text_event("AFTER-THE-RUN"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn closer_spam_cuts_the_upstream_read() {
+        let mut pumped = pump_chunks(&run_then_after(&format!("{CALL}\n"), 4)).await;
+        assert!(pumped.hint.is_none());
+        // A tool block is held until `finish`, which the caller runs after the
+        // pump; the call is only in `calls` once that has happened.
+        pumped.filter.finish();
+        assert_eq!(
+            pumped.filter.calls.len(),
+            1,
+            "the call before the run is kept"
+        );
+        assert!(
+            !pumped.text.contains("AFTER-THE-RUN"),
+            "read continued past the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn closer_spam_before_any_call_still_cuts() {
+        let pumped = pump_chunks(&run_then_after("Here is the answer. ", 5)).await;
+        assert!(pumped.hint.is_none(), "a cut is not a failure");
+        assert!(pumped.filter.calls.is_empty());
+        assert!(pumped.emitted);
+        assert!(!pumped.text.contains("AFTER-THE-RUN"));
+    }
+
+    #[tokio::test]
+    async fn three_closers_do_not_cut() {
+        let pumped = pump_chunks(&run_then_after("x", 3)).await;
+        assert!(
+            pumped.text.contains("AFTER-THE-RUN"),
+            "ADR-0011 territory, not a cut"
+        );
+    }
+
+    #[tokio::test]
+    async fn structural_closers_never_cut() {
+        let closers =
+            "</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n".repeat(3);
+        let chunks = vec![text_event(&closers), text_event("AFTER-THE-RUN")];
+        let pumped = pump_chunks(&chunks).await;
+        assert!(pumped.text.contains("AFTER-THE-RUN"));
     }
 }
