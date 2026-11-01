@@ -6,6 +6,20 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-01 - Closer spam ends the upstream read
+
+**The model burned its whole token budget spraying closing tags.** It repeated
+the bare DSML closer, two per line, until its token limit, and the proxy kept
+draining the body the whole time. Hiding the extra tags after the fact (ADR-0011
+swallows up to two) saved no tokens and left the markup visible past the limit.
+
+Four bare closers in a row, with only whitespace between them, now close the
+upstream connection. Dropping the connection is the only stop signal DeepSeek
+honours. The client sees a normal end of stream, and the call or prose before
+the run is kept. The cut is not counted as an error. The threshold is four, so
+the two closers ADR-0011 allows still reach the client for a reply that quotes
+the tag in prose. Decision and rejected alternatives: ADR-0019.
+
 ## 2026-11-01 - `main.rs` split, second cut: request shape and admin routes
 
 **The first cut left `main.rs` at 3585 lines**, still holding the request model,
