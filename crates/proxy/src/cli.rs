@@ -602,7 +602,7 @@ fn open_store(cfg: &config::Config) -> Result<store::Store, String> {
 pub fn log_effective_settings(cfg: &config::Config, accounts: usize) {
     tracing::info!(
         listen = %format!("{}:{}", cfg.host, cfg.port),
-        log_profile = ?crate::log::Profile::from_env(),
+        log_profile = ?crate::log::Profile::resolve(crate::config::file_log_level().as_deref()),
         rust_log = %std::env::var("RUST_LOG").unwrap_or_default(),
         accounts,
         request_delay_secs = cfg.request_delay_secs,

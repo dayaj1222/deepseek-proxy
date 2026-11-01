@@ -11,6 +11,10 @@
 host = "0.0.0.0"
 port = 9174
 
+# Log verbosity: "debug" for the debug profile (raw malformed replies, repair
+# replies), anything else for prod. DEEPSEEK_LOG in the environment overrides it.
+log_level = "debug"
+
 # Wire dialect for tool calls. Precedence: DIALECT env > this file > "native".
 #
 #   native           (default) teach no wire format at all. The prompt states only
@@ -127,5 +131,3 @@ tool_repair_max_retries = 5
 # TOOL_REMINDER_INTERVAL (there the default is 0; here 1 = every turn, which is
 # what this proxy did before the setting existed). Env: TOOL_REMINDER_INTERVAL.
 tool_reminder_interval = 1
-
-DEEPSEEK_LOG="debug"

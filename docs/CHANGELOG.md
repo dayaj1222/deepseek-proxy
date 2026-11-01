@@ -6,6 +6,28 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-10-31 - The log level in config.toml works; failed tool calls name the tool
+
+**`DEEPSEEK_LOG="debug"` in `config.toml` did nothing.** The line sat under
+`[limits]`, so it was an unknown key, and the log level was read only from the
+environment. Debug output needed the variable set on every start. The level is
+now `[proxy] log_level`, read before logging starts. `DEEPSEEK_LOG` still wins
+when set, so one-off runs work as before.
+
+**A failed tool call did not say which tool it was.** The `tool repair` WARN
+gave reason codes only, and the raw reply was logged at debug only. The WARN now
+names the tools too (`tools=`, arguments excluded). A turn that fails without a
+repair logs the same line, so the tool shows with repair off as well.
+
+Tests: `log_level_is_read_from_the_proxy_section`, `the_config_file_sets_the_profile_when_the_env_is_unset`,
+`the_env_var_overrides_the_config_file`, `tool_names_are_logged_and_arguments_are_not`.
+
+Accepted cost: the config file is read twice at startup, once for the log level
+and again for the full config. A file that does not parse is reported by the
+full load, as before.
+
+---
+
 ## 2026-10-31 - `update` pulls and rebuilds, and stops there
 
 **Getting a new build meant remembering four commands.** `git pull && cargo

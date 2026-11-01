@@ -27,6 +27,9 @@ pub struct ProxySection {
     /// Wire dialect: `native` (default, teaches no syntax), `json_invoke`
     /// (taught `<invoke>` blocks) or `simple_tool_tag` (taught `<tool>` marker).
     pub dialect: Option<String>,
+    /// Log verbosity: `debug` for the debug profile, anything else (or unset)
+    /// for prod. `DEEPSEEK_LOG` in the environment overrides it.
+    pub log_level: Option<String>,
 }
 
 impl Default for ProxySection {
@@ -35,8 +38,19 @@ impl Default for ProxySection {
             host: "0.0.0.0".into(),
             port: 9174,
             dialect: None,
+            log_level: None,
         }
     }
+}
+
+/// The `[proxy] log_level` from the config file, read before logging starts.
+///
+/// Logging is set up before the full config is loaded, so this reads only the
+/// file. A file that does not parse yields `None` here; `Config::load` reports
+/// that error later, once logging is up.
+pub fn file_log_level() -> Option<String> {
+    let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| default_config_path());
+    Config::read_file(&path).ok()?.proxy.log_level
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +509,14 @@ mod tests {
     fn tool_reminder_interval_zero_is_readable_from_the_limits_section() {
         let f: FileConfig = toml::from_str("[limits]\ntool_reminder_interval = 0\n").unwrap();
         assert_eq!(f.limits.tool_reminder_interval, 0);
+    }
+
+    #[test]
+    fn log_level_is_read_from_the_proxy_section() {
+        let f: FileConfig = toml::from_str("[proxy]\nlog_level = \"debug\"\n").unwrap();
+        assert_eq!(f.proxy.log_level.as_deref(), Some("debug"));
+        let unset: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(unset.proxy.log_level, None);
     }
 
     #[test]

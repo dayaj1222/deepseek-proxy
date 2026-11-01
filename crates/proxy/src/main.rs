@@ -1434,6 +1434,20 @@ fn reason_codes(pending: &[dialect::MalformedCall]) -> String {
         .join(",")
 }
 
+/// Tool names of the pending malformed calls, comma-joined for logs. A call
+/// that named no tool shows as `-`. Only names: arguments and bodies stay out.
+/// Names are model text, so each is cut short.
+fn tool_names(pending: &[dialect::MalformedCall]) -> String {
+    pending
+        .iter()
+        .map(|m| match m.name.as_deref() {
+            Some(name) => name.chars().take(64).collect::<String>(),
+            None => "-".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl Recovery {
     fn new(
         specs: Vec<dialect::ToolSpec>,
@@ -2353,10 +2367,11 @@ async fn stream_response(live: LiveTurn) -> Response {
             // repairing before it runs.
             let pending = recovery.pending.len();
             let reasons = reason_codes(&recovery.pending);
+            let tools = tool_names(&recovery.pending);
             repaired = true;
             let prompt = recovery.begin_repair(attempt as usize);
             let expected = recovery.expected;
-            tracing::warn!(thread = %key, attempt, expected, pending, reasons = %reasons, "tool repair");
+            tracing::warn!(thread = %key, attempt, expected, pending, reasons = %reasons, tools = %tools, "tool repair");
 
             // The repair goes to whichever session is live right now, parented
             // to the newest message — including a rebuilt one.
@@ -2491,6 +2506,15 @@ async fn stream_response(live: LiveTurn) -> Response {
 
         // Python raises here rather than returning a turn with no usable calls.
         if recovery.has_pending() || repair_aborted {
+            // Logged here too: with repair off, or once it has run out, the
+            // "tool repair" line above never fires for these calls.
+            tracing::warn!(
+                thread = %key,
+                tools = %tool_names(&recovery.pending),
+                reasons = %reason_codes(&recovery.pending),
+                repair_aborted,
+                "tool call failed; turn not recovered"
+            );
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
             fail_turn(
                 &state,
@@ -2939,7 +2963,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(code);
     }
 
-    let profile = log::Profile::from_env();
+    let profile = log::Profile::resolve(config::file_log_level().as_deref());
     log::init(profile);
 
     // Claim the pidfile before doing any work, so a second `serve` fails fast
@@ -3200,6 +3224,20 @@ mod tests {
         ];
         assert_eq!(reason_codes(&pending), "bad_json,missing_name,");
         assert_eq!(reason_codes(&[]), "");
+    }
+
+    #[test]
+    fn tool_names_are_logged_and_arguments_are_not() {
+        let call = |name: Option<&str>| dialect::MalformedCall {
+            name: name.map(str::to_string),
+            body: String::from("\"command\": \"secret argument\""),
+            reason: "dsml_unparsable:x".into(),
+        };
+        let long = "n".repeat(100);
+        let pending = vec![call(Some("bash")), call(None), call(Some(&long))];
+        let names = tool_names(&pending);
+        assert_eq!(names, format!("bash,-,{}", "n".repeat(64)));
+        assert!(!names.contains("secret"));
     }
 
     #[tokio::test]

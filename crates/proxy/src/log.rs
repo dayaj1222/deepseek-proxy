@@ -50,13 +50,20 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub fn from_env() -> Self {
-        match std::env::var("DEEPSEEK_LOG")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+    /// The profile for this process: `DEEPSEEK_LOG` if it is set and not
+    /// empty, else the config file's `[proxy] log_level`, else prod.
+    pub fn resolve(file_level: Option<&str>) -> Self {
+        let env = std::env::var("DEEPSEEK_LOG").ok();
+        Self::resolve_from(env.as_deref(), file_level)
+    }
+
+    /// Pure form of [`Profile::resolve`], for tests.
+    fn resolve_from(env: Option<&str>, file_level: Option<&str>) -> Self {
+        let level = match env.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(env) => Some(env),
+            None => file_level.map(str::trim),
+        };
+        match level.unwrap_or_default().to_ascii_lowercase().as_str() {
             "debug" | "trace" | "dev" => Profile::Debug,
             _ => Profile::Prod,
         }
@@ -227,3 +234,25 @@ mod error_chain_tests {
         assert_eq!(error_chain(&Layer("boom", None)), "boom");
     }
 }
+
+#[cfg(test)]
+mod profile_tests {
+    use super::Profile;
+
+    #[test]
+    fn the_config_file_sets_the_profile_when_the_env_is_unset() {
+        assert_eq!(Profile::resolve_from(None, Some("debug")), Profile::Debug);
+        assert_eq!(Profile::resolve_from(None, Some(" DEBUG ")), Profile::Debug);
+        assert_eq!(Profile::resolve_from(None, Some("info")), Profile::Prod);
+        assert_eq!(Profile::resolve_from(None, None), Profile::Prod);
+    }
+
+    #[test]
+    fn the_env_var_overrides_the_config_file() {
+        assert_eq!(Profile::resolve_from(Some("off"), Some("debug")), Profile::Prod);
+        assert_eq!(Profile::resolve_from(Some("debug"), None), Profile::Debug);
+        // An empty env var is not an override.
+        assert_eq!(Profile::resolve_from(Some(""), Some("debug")), Profile::Debug);
+    }
+}
+
