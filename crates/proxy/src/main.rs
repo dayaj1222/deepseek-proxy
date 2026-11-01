@@ -22,6 +22,7 @@
 //! - `tools/format.py` prompt + tool-call dialect injection
 //! - multi-account failover
 
+mod admin;
 mod cli;
 mod config;
 mod dialect;
@@ -32,6 +33,7 @@ mod images;
 mod log;
 mod pool;
 mod prompt;
+mod request;
 mod session;
 mod sse;
 mod state;
@@ -39,9 +41,11 @@ mod store;
 mod threads;
 mod turn;
 
-pub(crate) use error::{error_for, CompletionError, ProxyError};
+pub(crate) use error::{backend_error, error_for, CompletionError, ProxyError};
+pub(crate) use request::{is_supported_model, resolve_tools, validate_request, ChatRequest, Msg};
 pub(crate) use state::{AppState, Settings, SettingsHandle, Stats};
 
+use admin::{admin_rebind, admin_throttled, build_id};
 use axum::{
     extract::State,
     http::HeaderMap,
@@ -53,7 +57,6 @@ use axum::{
     Json, Router,
 };
 use client::{CompletionBody, COMPLETION_PATH};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sse::{pump, route_all, unix_secs, usage_block, uuid_like, Pumped};
@@ -63,55 +66,6 @@ use std::sync::Arc;
 use threads::ThreadState;
 use tracing::Instrument;
 
-
-#[derive(Debug, Deserialize)]
-struct ChatRequest {
-    #[serde(default)]
-    model: Option<String>,
-    /// Explicit conversation key, mirroring the Python proxy's `thread_id`.
-    #[serde(default)]
-    thread_id: Option<String>,
-    #[serde(default)]
-    messages: Vec<Msg>,
-    #[serde(default)]
-    stream: bool,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default)]
-    thinking: Option<Value>,
-    #[serde(default)]
-    reasoning: Option<Value>,
-    #[serde(default)]
-    tools: Vec<Value>,
-    /// OpenAI `tool_choice`: "none" drops every tool, "required" forces a call,
-    /// an object narrows to one named function.
-    #[serde(default)]
-    tool_choice: Option<Value>,
-    /// OpenAI `parallel_tool_calls`; defaults to true like the OpenAI API.
-    #[serde(default = "default_true")]
-    parallel_tool_calls: bool,
-    /// OpenAI `stream_options`; only `include_usage` is honoured.
-    #[serde(default)]
-    stream_options: Option<Value>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Deserialize)]
-struct Msg {
-    role: String,
-    #[serde(default)]
-    content: Option<Value>,
-    // Deserialized for completeness; the prompt builders only need role/content.
-    #[serde(default)]
-
-    tool_calls: Vec<Value>,
-    /// Tool-call id this result answers, rendered as `Tool result (id=...)`.
-    #[serde(default)]
-    tool_call_id: Option<String>,
-}
 
 /// Prompts for one turn: the delta the session needs now, and the full
 /// flattened transcript used to rebuild the session when it overflows.
@@ -319,7 +273,7 @@ fn is_title_request(req: &ChatRequest) -> bool {
         .any(|m| content_text(&m.content).starts_with(TITLE_PROMPT_MARKER))
 }
 
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -624,268 +578,6 @@ async fn method_not_allowed() -> Response {
     .into_response()
 }
 
-/// `GET /admin/throttled` — threads whose bound account rate-limited them.
-///
-/// Most recent first. The account's *live* cooldown lives in the pool, not the
-/// database, so it is joined here: a thread is worth rebinding when its account
-/// is still cooling down, not merely because it failed once an hour ago.
-async fn admin_throttled(State(state): State<AppState>) -> Response {
-    let rows = match state.store.throttled_threads() {
-        Ok(rows) => rows,
-        Err(e) => return backend_error(&format!("store: {e}")),
-    };
-    let accounts = state.pool().snapshot().await;
-    let live: HashMap<&str, (Option<u64>, bool)> = accounts
-        .iter()
-        .map(|a| (a.email.as_str(), (a.cooldown_ms, a.healthy)))
-        .collect();
-    let now = unix_secs();
-
-    let threads: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            let (cooldown_ms, healthy) = live
-                .get(r.email.as_str())
-                .copied()
-                .unwrap_or((None, false));
-            json!({
-                "thread": r.thread_id,
-                "account": r.email,
-                "throttled_at": r.throttled_at,
-                "throttled_secs_ago": now.saturating_sub(r.throttled_at.max(0) as u64),
-                "account_cooldown_ms": cooldown_ms,
-                "account_healthy": healthy,
-            })
-        })
-        .collect();
-
-    Json(json!({ "count": threads.len(), "threads": threads })).into_response()
-}
-
-/// `POST /admin/rebind` — move one thread, or every throttled thread, to a
-/// fresh remote session, optionally on another account.
-///
-/// `account` accepts `next` (least-crowded healthy other account), `fresh`
-/// (same account, new session), or an email. `dry_run` returns the plan without
-/// touching anything, because a bulk rebind replays every transcript it moves.
-#[derive(Deserialize)]
-struct RebindRequest {
-    #[serde(default)]
-    thread: Option<String>,
-    #[serde(default)]
-    account: Option<String>,
-    #[serde(default)]
-    all_throttled: bool,
-    #[serde(default)]
-    dry_run: bool,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-/// Upper bound on a bulk rebind. Every thread moved costs one replay.
-const REBIND_BULK_LIMIT: usize = 10;
-
-fn parse_target(account: Option<&str>) -> Option<(session::ThreadChange, String)> {
-    let raw = account.unwrap_or("next").trim();
-    match raw {
-        "" | "next" => Some((
-            session::ThreadChange::Rebind {
-                target: pool::AccountTarget::Next,
-                reason: session::RebuildReason::Manual,
-            },
-            "next".to_string(),
-        )),
-        "fresh" | "current" => Some((
-            session::ThreadChange::Rebuild {
-                reason: session::RebuildReason::Manual,
-            },
-            "fresh".to_string(),
-        )),
-        email if email.contains('@') => Some((
-            session::ThreadChange::Rebind {
-                target: pool::AccountTarget::Email(email.to_string()),
-                reason: session::RebuildReason::Manual,
-            },
-            email.to_string(),
-        )),
-        _ => None,
-    }
-}
-
-async fn admin_rebind(
-    State(state): State<AppState>,
-    Json(body): Json<RebindRequest>,
-) -> Response {
-    let Some((change, target_label)) = parse_target(body.account.as_deref()) else {
-        return ProxyError::new(
-            "account must be next, fresh, or an email",
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_request",
-        )
-        .with_param("account")
-        .into_response();
-    };
-
-    // Which threads? An explicit one wins over the bulk flag.
-    let targets: Vec<String> = match (&body.thread, body.all_throttled) {
-        (Some(t), _) => vec![t.clone()],
-        (None, true) => {
-            let rows = match state.store.throttled_threads() {
-                Ok(rows) => rows,
-                Err(e) => return backend_error(&format!("store: {e}")),
-            };
-            let cap = body.limit.unwrap_or(REBIND_BULK_LIMIT).min(REBIND_BULK_LIMIT);
-            rows.into_iter().take(cap).map(|r| r.thread_id).collect()
-        }
-        (None, false) => {
-            return ProxyError::new(
-                "thread is required unless all_throttled is true",
-                axum::http::StatusCode::BAD_REQUEST,
-                "invalid_request",
-            )
-            .with_param("thread")
-            .into_response()
-        }
-    };
-
-    if body.dry_run {
-        let plan: Vec<Value> = targets
-            .iter()
-            .map(|t| {
-                json!({
-                    "thread": t,
-                    "from": state.store.get_binding(t).ok().flatten(),
-                    "to": target_label,
-                })
-            })
-            .collect();
-        return Json(json!({ "dry_run": true, "count": plan.len(), "plan": plan }))
-            .into_response();
-    }
-
-    let mut done: Vec<Value> = Vec::new();
-    let mut failed: Vec<Value> = Vec::new();
-    for thread in targets {
-        let from = state.store.get_binding(&thread).ok().flatten();
-        // Serialize against an in-flight turn on this thread: replacing the
-        // session under a streaming turn would orphan its cursor.
-        let _turn = state.threads.lock(&thread).await;
-        match session::open_session(&state, &thread, clone_change(&change)).await {
-            Ok(fresh) => {
-                // A rebind makes the old throttle flag meaningless; `bind`
-                // clears it when the account changes, but a same-account
-                // `fresh` rebuild must clear it explicitly.
-                if let Err(e) = state.store.clear_throttled(&thread) {
-                    tracing::warn!(thread = %thread, error = %e, "could not clear throttle flag");
-                }
-                done.push(json!({
-                    "thread": thread,
-                    "from": from,
-                    "to": state.store.get_binding(&thread).ok().flatten(),
-                    "session": fresh.session_id,
-                }));
-            }
-            Err(e) => failed.push(json!({ "thread": thread, "error": e.message })),
-        }
-    }
-
-    let status = if failed.is_empty() {
-        axum::http::StatusCode::OK
-    } else if done.is_empty() {
-        axum::http::StatusCode::BAD_GATEWAY
-    } else {
-        axum::http::StatusCode::MULTI_STATUS
-    };
-    (status, Json(json!({ "rebound": done, "failed": failed }))).into_response()
-}
-
-/// `ThreadChange` is consumed by `open_session`; the bulk loop needs one per
-/// thread, so rebuild it from the account label.
-fn clone_change(change: &session::ThreadChange) -> session::ThreadChange {
-    match change {
-        session::ThreadChange::Fresh => session::ThreadChange::Fresh,
-        session::ThreadChange::Rebuild { reason } => {
-            session::ThreadChange::Rebuild { reason: *reason }
-        }
-        session::ThreadChange::Rebind { target, reason } => session::ThreadChange::Rebind {
-            target: target.clone(),
-            reason: *reason,
-        },
-    }
-}
-
-/// `x-deepseek-rs-rebind`: `next`, `fresh`, or an account email.
-///
-/// This is the deterministic channel a pi extension uses: the extension eats
-/// the operator's sentinel in the `input` hook, so the sentinel never becomes a
-/// message, and sets this header on the request that follows. The proxy then
-/// never scans message text for directives, and nothing has to be stripped
-/// from the transcript.
-fn rebind_header(headers: &HeaderMap) -> Result<Option<session::ThreadChange>, ProxyError> {
-    let Some(raw) = header_value(headers, "x-deepseek-rs-rebind") else {
-        return Ok(None);
-    };
-    // An unknown target is a client error: a silent no-op would leave the
-    // caller believing the session moved.
-    let (change, _) = parse_target(Some(&raw)).ok_or_else(|| {
-        ProxyError::new(
-            "x-deepseek-rs-rebind must be next, fresh, or an account email",
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_request",
-        )
-        .with_param("x-deepseek-rs-rebind")
-    })?;
-    Ok(Some(change))
-}
-
-/// When the running executable was built, as `YYYY-MM-DD HH:MM:SS`.
-///
-/// There is no build script, and nothing else at startup says which binary is
-/// live — which cost an hour of log archaeology once: a stale `release` build
-/// from two days earlier was running, so a newly added control header was
-/// silently ignored and every feature landed since was simply absent. The
-/// mtime is the cheapest honest answer to "is the process I am looking at the
-/// code I just wrote?".
-fn build_id() -> String {
-    let Ok(exe) = std::env::current_exe() else {
-        return "unknown".to_string();
-    };
-    let Ok(meta) = std::fs::metadata(&exe) else {
-        return "unknown".to_string();
-    };
-    let Ok(modified) = meta.modified() else {
-        return "unknown".to_string();
-    };
-    let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) else {
-        return "unknown".to_string();
-    };
-    let secs = since.as_secs() as i64;
-    // `chrono` is not a dependency here; format by hand from the epoch offset.
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-/// Days since the Unix epoch to a proleptic Gregorian date (Howard Hinnant's
-/// `civil_from_days`), so the log line needs no date library.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
 
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
@@ -1302,36 +994,6 @@ impl Recovery {
     }
 }
 
-/// How `tool_choice` narrows the offered tools and sets the `required` flag.
-///
-/// Port of the filtering at the top of `ChatService.events()`:
-/// `"none"` drops every tool, a named choice keeps only that function and
-/// implies required, and `"required"` keeps all tools and implies required.
-fn resolve_tools(req: &ChatRequest) -> (Vec<dialect::ToolSpec>, bool) {
-    let mut tools = req.tools.clone();
-    let mut required = false;
-    match req.tool_choice.as_ref() {
-        Some(Value::String(s)) if s == "none" => tools.clear(),
-        Some(Value::String(s)) if s == "required" => required = true,
-        Some(Value::Object(obj)) => {
-            if let Some(name) = obj
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-            {
-                tools.retain(|t| {
-                    t.get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|n| n.as_str())
-                        == Some(name)
-                });
-                required = true;
-            }
-        }
-        _ => {}
-    }
-    (dialect::tool_specs(&tools), required)
-}
 
 /// Wait before retry number `attempt` (0-based).
 ///
@@ -1403,7 +1065,7 @@ async fn chat_completions(
     // A rebind directive must be resolved before preparation: it decides
     // whether this turn is a continuation (delta) or a replay into a session
     // that has never seen the conversation.
-    let rebind = match rebind_header(&headers) {
+    let rebind = match request::rebind_header(&headers) {
         Ok(r) => r,
         Err(e) => {
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -2391,150 +2053,6 @@ async fn collect_completion(mut rx: sse::ChunkReceiver) -> Response {
         body["usage"] = usage;
     }
     Json(body).into_response()
-}
-
-/// Port of `ChatService.validate()`'s request-shape checks (the pydantic model
-/// plus the tool-schema pass). Everything here is a client error: the handler
-/// returns it before touching the pool or the thread lock.
-fn validate_request(req: &ChatRequest) -> Result<(), ProxyError> {
-    // `model` is optional here: the handler defaults it from config, which the
-    // Python proxy does not allow but this port documents deliberately.
-    if req.messages.is_empty() {
-        return Err(invalid("messages", "List should have at least 1 item"));
-    }
-    if let Some(id) = &req.thread_id {
-        if id.is_empty() || id.chars().count() > 256 {
-            return Err(invalid("thread_id", "Invalid thread id"));
-        }
-    }
-    // `tool_choice`: only auto/none/required or a named-function object.
-    if let Some(choice) = &req.tool_choice {
-        let ok = match choice {
-            Value::String(s) => matches!(s.as_str(), "auto" | "none" | "required"),
-            Value::Object(obj) => obj
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .is_some_and(|n| !n.is_empty()),
-            _ => false,
-        };
-        if !ok {
-            return Err(invalid(
-                "tool_choice",
-                "Input should be a valid tool choice",
-            ));
-        }
-    }
-    for (i, m) in req.messages.iter().enumerate() {
-        let at = |field: &str| format!("messages.{i}.{field}");
-        if m.role == "tool" && m.tool_call_id.as_deref().unwrap_or_default().is_empty() {
-            return Err(invalid(
-                &at("tool_call_id"),
-                "Tool messages require tool_call_id",
-            ));
-        }
-        // Assistant messages may carry only tool_calls; every other role needs content.
-        let content_missing = match &m.content {
-            None => true,
-            Some(Value::String(s)) => s.is_empty(),
-            Some(Value::Array(parts)) => parts.is_empty(),
-            Some(_) => false,
-        };
-        if content_missing && !(m.role == "assistant" && !m.tool_calls.is_empty()) {
-            return Err(invalid(
-                &at("content"),
-                "Message requires content or assistant tool_calls",
-            ));
-        }
-        if let Some(Value::Array(parts)) = &m.content {
-            for (j, part) in parts.iter().enumerate() {
-                let ok = match part.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => part.get("text").and_then(|t| t.as_str()).is_some(),
-                    Some("image_url") => {
-                        m.role == "user"
-                            && part
-                                .get("image_url")
-                                .and_then(|i| i.get("url"))
-                                .and_then(|u| u.as_str())
-                                .is_some()
-                    }
-                    _ => false,
-                };
-                if !ok {
-                    return Err(invalid(
-                        &at(&format!("content.{j}")),
-                        "Unsupported or invalid message content part",
-                    ));
-                }
-            }
-        }
-    }
-    for tool in &req.tools {
-        let Some(func) = tool.get("function") else {
-            return Err(invalid("tools", "Invalid or unsupported tool schema"));
-        };
-        let name = func
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or_default();
-        if name.is_empty() || name.chars().count() > 128 {
-            return Err(invalid("tools", "Invalid or unsupported tool schema"));
-        }
-        let parameters = func.get("parameters").cloned().unwrap_or_else(|| json!({}));
-        if !parameters.is_object() {
-            return Err(invalid("tools", "Invalid or unsupported tool schema"));
-        }
-        // Python rejects the schema itself, and refuses remote `$ref`s so no
-        // network fetch can happen during validation.
-        if has_external_ref(&parameters) || jsonschema::validator_for(&parameters).is_err() {
-            return Err(invalid("tools", "Invalid or unsupported tool schema"));
-        }
-    }
-    Ok(())
-}
-
-fn invalid(param: &str, message: &str) -> ProxyError {
-    ProxyError::new(
-        message,
-        axum::http::StatusCode::BAD_REQUEST,
-        "invalid_request",
-    )
-    .with_param(param)
-}
-
-/// True when the schema contains a `$ref`/`$dynamicRef` that points outside the
-/// document. Port of the recursive check in `ChatService.validate()`.
-fn has_external_ref(node: &Value) -> bool {
-    match node {
-        Value::Object(map) => map.iter().any(|(k, v)| {
-            (k == "$ref" || k == "$dynamicRef")
-                .then(|| !v.as_str().unwrap_or_default().starts_with('#'))
-                .unwrap_or(false)
-                || has_external_ref(v)
-        }),
-        Value::Array(items) => items.iter().any(has_external_ref),
-        _ => false,
-    }
-}
-
-/// `ChatService.validate()`'s supported-model set, case-insensitive.
-fn is_supported_model(model: &str) -> bool {
-    matches!(
-        model.to_ascii_uppercase().as_str(),
-        "DEFAULT" | "EXPERT" | "VISION" | "DEEPSEEK-CHAT" | "DEEPSEEK-V3"
-    )
-}
-
-/// Backend failure. Port of `error_for()`'s fallback: the detail is logged and
-/// the client gets the generic OpenAI envelope, never the raw message.
-fn backend_error(msg: &str) -> Response {
-    tracing::error!(error = %msg, "backend request failed");
-    ProxyError::new(
-        "Backend request failed",
-        axum::http::StatusCode::BAD_GATEWAY,
-        "backend_error",
-    )
-    .into_response()
 }
 
 /// Build a connected account pool from resolved config.
@@ -3559,20 +3077,6 @@ mod tests {
         }
     }
 
-    /// The build stamp is a diagnostic: a wrong date is worse than no date,
-    /// because it would send someone looking at the wrong binary.
-    #[test]
-    fn build_id_civil_dates_are_correct() {
-        // Known-good pairs against the Unix epoch, including a leap day and the
-        // new year boundary.
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(1), (1970, 1, 2));
-        assert_eq!(civil_from_days(59), (1970, 3, 1));
-        // 2000-02-29: a leap day in a leap century.
-        assert_eq!(civil_from_days(11016), (2000, 2, 29));
-        assert_eq!(civil_from_days(364), (1970, 12, 31));
-        assert_eq!(civil_from_days(365), (1971, 1, 1));
-    }
 
     #[test]
     fn reminder_text_names_the_failure_modes() {

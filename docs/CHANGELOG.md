@@ -6,6 +6,40 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-01 - `main.rs` split, second cut: request shape and admin routes
+
+**The first cut left `main.rs` at 3585 lines**, still holding the request model,
+its validation, the whole admin surface and the build stamp. Those had no
+reason to be next to the streaming handler.
+
+Two more modules, bodies moved rather than rewritten:
+
+- `request.rs` - `ChatRequest`, `Msg`, `resolve_tools`, `parse_target`,
+  `rebind_header`, `validate_request`, `has_external_ref`, `is_supported_model`.
+  Deserialization and validation sit in one file on purpose: the serde
+  attributes say what is *accepted on the wire*, `validate_request` says what
+  is *semantically allowed*, and a change to one usually needs the other.
+- `admin.rs` - `admin_throttled`, `admin_rebind`, `RebindRequest`,
+  `clone_change`, `build_id`, `civil_from_days` and the build-stamp test. The
+  admin surface is what `deepseek-rs rebind` and `status` talk to, so it now
+  reads as one thing instead of being interleaved with `/v1/models`.
+
+`backend_error` moved to `error.rs`, where the other failure-to-response
+mapping already lives. `main.rs` re-exports the request types and functions, so
+`turn.rs`, `prompt.rs` and `images.rs` keep going through `crate::` unchanged.
+
+Tests: none changed; the build-stamp test moved with `civil_from_days`.
+`cargo test --workspace` is 263 green and clippy still reports the same 28
+warnings - two of them now point at `request.rs` instead of `main.rs`.
+
+Accepted cost: `RebindRequest` is now `pub(crate)` only so `build_router` can
+name it; the admin routes remain ordinary API routes (they still go through
+`authorize`), which is the deliberate choice in ADR-0015 and not re-opened here.
+
+Next cut, still out of scope: `stream_response` and the repair loop.
+
+---
+
 ## 2026-11-01 - `main.rs` split into `state` and `error`
 
 **`main.rs` had grown to ~3900 lines.** It held the shared state, both error
