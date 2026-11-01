@@ -225,8 +225,17 @@ mod error_chain_tests {
 
     #[test]
     fn walks_the_whole_source_chain() {
-        let e = Layer("error sending request", Some(Box::new(Layer("tls", Some(Box::new(Layer("certificate expired", None)))))));
-        assert_eq!(error_chain(&e), "error sending request: tls: certificate expired");
+        let e = Layer(
+            "error sending request",
+            Some(Box::new(Layer(
+                "tls",
+                Some(Box::new(Layer("certificate expired", None))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&e),
+            "error sending request: tls: certificate expired"
+        );
     }
 
     #[test]
@@ -249,10 +258,15 @@ mod profile_tests {
 
     #[test]
     fn the_env_var_overrides_the_config_file() {
-        assert_eq!(Profile::resolve_from(Some("off"), Some("debug")), Profile::Prod);
+        assert_eq!(
+            Profile::resolve_from(Some("off"), Some("debug")),
+            Profile::Prod
+        );
         assert_eq!(Profile::resolve_from(Some("debug"), None), Profile::Debug);
         // An empty env var is not an override.
-        assert_eq!(Profile::resolve_from(Some(""), Some("debug")), Profile::Debug);
+        assert_eq!(
+            Profile::resolve_from(Some(""), Some("debug")),
+            Profile::Debug
+        );
     }
 }
-

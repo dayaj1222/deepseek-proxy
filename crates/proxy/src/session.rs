@@ -8,7 +8,6 @@
 //! [`open_session`] is now the only way a remote session is created, so the
 //! field list and the persistence rule live in one place instead of four.
 
-
 use std::sync::Arc;
 
 use crate::pool::{AccountTarget, Connection};
@@ -95,12 +94,7 @@ async fn create_session(conn: &Arc<Connection>) -> Result<String, ProxyError> {
         .await
         .create_chat_session()
         .await
-        .map_err(|e| {
-            backend(&format!(
-                "create_session: {}",
-                crate::log::error_chain(&e)
-            ))
-        })
+        .map_err(|e| backend(&format!("create_session: {}", crate::log::error_chain(&e))))
 }
 
 fn queue(msg: &str) -> ProxyError {

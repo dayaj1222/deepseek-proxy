@@ -538,7 +538,6 @@ impl Pool {
         self.conns[0].clone()
     }
 
-
     /// Bind a thread to an account: honour an existing/persisted binding, else
     /// assign the least-crowded healthy account.
     pub async fn route(&self, thread_id: &str) -> Arc<Connection> {
@@ -641,9 +640,7 @@ impl Pool {
                     .position(|c| &c.email == email)
                     .ok_or_else(|| PoolError::Other(format!("unknown account {email}")))?;
                 if !self.conns[idx].healthy() {
-                    return Err(PoolError::Other(format!(
-                        "account {email} is not healthy"
-                    )));
+                    return Err(PoolError::Other(format!("account {email} is not healthy")));
                 }
                 idx
             }
@@ -990,7 +987,8 @@ mod tests {
             Breaker::Closed
         );
         // At the threshold with an open window: open, and it reports the wait.
-        let (state, retry) = Connection::breaker_at(&gate(3, Some(now + Duration::from_secs(5)), false), 3, now);
+        let (state, retry) =
+            Connection::breaker_at(&gate(3, Some(now + Duration::from_secs(5)), false), 3, now);
         assert_eq!(state, Breaker::Open);
         assert_eq!(retry, Some(Duration::from_secs(5)));
         // Window elapsed: half-open, ready for one probe.

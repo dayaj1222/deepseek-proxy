@@ -660,7 +660,13 @@ fn skeleton_target<'a>(malformed: &[MalformedCall], specs: &'a [ToolSpec]) -> Op
         .iter()
         .filter_map(|m| m.name.as_deref())
         .find_map(|n| specs.iter().find(|s| s.name == n))
-        .or_else(|| if specs.len() == 1 { specs.first() } else { None })
+        .or_else(|| {
+            if specs.len() == 1 {
+                specs.first()
+            } else {
+                None
+            }
+        })
 }
 
 /// A tool's arguments as (name, takes text), required ones first.
@@ -708,16 +714,26 @@ fn call_skeleton(spec: Option<&ToolSpec>, marker: Option<&str>) -> String {
     };
     let (tool, params) = match spec {
         Some(spec) => (spec.name.clone(), tool_params(spec)),
-        None => ("TOOL_NAME".to_string(), vec![("ARGUMENT_NAME".to_string(), true)]),
+        None => (
+            "TOOL_NAME".to_string(),
+            vec![("ARGUMENT_NAME".to_string(), true)],
+        ),
     };
     let mut out = String::new();
     out.push_str(&tag(false, "calls", ""));
     out.push('\n');
-    out.push_str(&format!("  {}\n", tag(false, "invoke", &format!(" name=\"{tool}\""))));
+    out.push_str(&format!(
+        "  {}\n",
+        tag(false, "invoke", &format!(" name=\"{tool}\""))
+    ));
     for (name, text) in params {
         out.push_str(&format!(
             "    {}VALUE{}\n",
-            tag(false, "parameter", &format!(" name=\"{name}\" string=\"{text}\"")),
+            tag(
+                false,
+                "parameter",
+                &format!(" name=\"{name}\" string=\"{text}\"")
+            ),
             tag(true, "parameter", "")
         ));
     }
@@ -1298,7 +1314,12 @@ mod tests {
         let bad = unreadable();
         let mut texts = vec![Dialect::Native.wire_shape()];
         for attempt in 1..=4 {
-            texts.push(build_repair_prompt_for(&Dialect::Native, &bad, &[], attempt));
+            texts.push(build_repair_prompt_for(
+                &Dialect::Native,
+                &bad,
+                &[],
+                attempt,
+            ));
         }
         for t in &texts {
             let lower = t.to_lowercase();
@@ -1351,7 +1372,10 @@ mod tests {
             assert!(!t.contains("valid list"), "attempt {attempt}: {t}");
             // The unrelated tool (its name attribute and its argument) must
             // not leak into a prompt about a bash call.
-            assert!(!t.contains("name=\"read\"") && !t.contains("\"path\""), "an unrelated tool leaked: {t}");
+            assert!(
+                !t.contains("name=\"read\"") && !t.contains("\"path\""),
+                "an unrelated tool leaked: {t}"
+            );
         }
         // The other dialects keep the list (Python parity).
         let json_prompt = build_repair_prompt_for(&Dialect::JsonInvoke, &unreadable(), &specs, 1);
@@ -1362,18 +1386,31 @@ mod tests {
     /// instead of guessing a tool for the model.
     #[test]
     fn native_skeleton_is_generic_when_the_failed_tool_is_unknown() {
-        let unknown = [MalformedCall::new(Some("bsh".into()), "".into(), "unknown_or_disallowed_tool")];
+        let unknown = [MalformedCall::new(
+            Some("bsh".into()),
+            "".into(),
+            "unknown_or_disallowed_tool",
+        )];
         let specs = [bash_with_timeout(), read_spec()];
         let t = build_repair_prompt_for(&Dialect::Native, &unknown, &specs, 2);
         assert!(t.contains("<invoke name=\"TOOL_NAME\">"), "{t}");
-        assert!(t.contains("<parameter name=\"ARGUMENT_NAME\" string=\"true\">VALUE</parameter>"), "{t}");
+        assert!(
+            t.contains("<parameter name=\"ARGUMENT_NAME\" string=\"true\">VALUE</parameter>"),
+            "{t}"
+        );
         assert!(!t.contains("bash") && !t.contains("read"), "{t}");
         // With exactly one offered tool the skeleton is that tool's.
         let one = build_repair_prompt_for(&Dialect::Native, &unknown, &[read_spec()], 2);
-        assert!(one.contains("<invoke name=\"read\">") && one.contains("name=\"path\""), "{one}");
+        assert!(
+            one.contains("<invoke name=\"read\">") && one.contains("name=\"path\""),
+            "{one}"
+        );
         // The literal form is generic too, and says what to replace.
         let literal = build_repair_prompt_for(&Dialect::Native, &unknown, &specs, 5);
-        assert!(literal.contains("TOOL_NAME") && literal.contains("ARGUMENT_NAME"), "{literal}");
+        assert!(
+            literal.contains("TOOL_NAME") && literal.contains("ARGUMENT_NAME"),
+            "{literal}"
+        );
     }
 
     /// Repair 5 and later: the full literal call, marker included, to repeat

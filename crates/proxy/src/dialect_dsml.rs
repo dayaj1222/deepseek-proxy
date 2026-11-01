@@ -144,6 +144,12 @@ pub const CLOSER_SPAM_THRESHOLD: usize = 4;
 /// Walks backwards from the end, reusing [`tag_at`] so the spelling rules stay
 /// in one place. Each step searches only the `MAX_TAG` bytes before the closer,
 /// so the cost follows the run, not the length of `text`.
+/// True when `tail` ends in a closer-spam run. Every read path that cuts on
+/// spam (the stream pump and the repair read) asks this, so they agree.
+pub fn closer_spam(tail: &str) -> bool {
+    trailing_bare_closers(tail) >= CLOSER_SPAM_THRESHOLD
+}
+
 pub fn trailing_bare_closers(text: &str) -> usize {
     let mut end = text.len();
     let mut count = 0;
