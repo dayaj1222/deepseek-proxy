@@ -544,6 +544,54 @@ mod bind_tests {
     }
 }
 
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_clean_main_tree_may_pull() {
+        assert_eq!(update_blocker("main", ""), None);
+        assert_eq!(update_blocker("main", "  \n"), None);
+        assert_eq!(update_blocker("master", ""), None);
+    }
+
+    #[test]
+    fn uncommitted_work_blocks_the_pull() {
+        let why = update_blocker("main", " M crates/proxy/src/cli.rs").unwrap();
+        assert!(why.contains("--force"), "{why}");
+    }
+
+    #[test]
+    fn a_feature_branch_blocks_the_pull() {
+        let why = update_blocker("feat/update-command", "").unwrap();
+        assert!(why.contains("feat/update-command"), "{why}");
+        assert!(why.contains("--force"), "{why}");
+        // A dirty feature branch reports the branch, not the dirt: the branch
+        // is the reason the pull is wrong at all.
+        assert_eq!(
+            update_blocker("feat/x", " M a").unwrap(),
+            update_blocker("feat/x", "").unwrap()
+        );
+    }
+
+    #[test]
+    fn detached_head_blocks_the_pull() {
+        assert!(update_blocker("(detached HEAD)", "").is_some());
+    }
+
+    #[test]
+    fn force_is_the_only_flag() {
+        assert!(!update_flags(&args(&["deepseek-rs", "update"])).unwrap().force);
+        assert!(update_flags(&args(&["deepseek-rs", "update", "--force"])).unwrap().force);
+        assert!(update_flags(&args(&["deepseek-rs", "update", "-f"])).unwrap().force);
+        assert!(update_flags(&args(&["deepseek-rs", "update", "--yes"])).is_err());
+    }
+}
+
 fn open_store(cfg: &config::Config) -> Result<store::Store, String> {
     store::Store::open_path(&cfg.db_path).map_err(|e| format!("open {}: {e}", cfg.db_path))
 }
@@ -554,12 +602,13 @@ fn open_store(cfg: &config::Config) -> Result<store::Store, String> {
 pub fn log_effective_settings(cfg: &config::Config, accounts: usize) {
     tracing::info!(
         listen = %format!("{}:{}", cfg.host, cfg.port),
-        log_profile = ?crate::log::Profile::from_env(),
+        log_profile = ?crate::log::Profile::resolve(crate::config::file_log_level().as_deref()),
         rust_log = %std::env::var("RUST_LOG").unwrap_or_default(),
         accounts,
         request_delay_secs = cfg.request_delay_secs,
         heartbeat_interval_secs = cfg.heartbeat_interval_secs,
         tool_repair_max_retries = cfg.tool_repair_max_retries,
+        tool_reminder_interval = cfg.tool_reminder_interval,
         "effective settings"
     );
 }
@@ -594,6 +643,7 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
             stop().await?;
             start_with(args, bg).await
         }
+        "update" => update(args),
         "logs" | "log" => logs(args),
         "check" => check().await,
         "accounts" | "account" => accounts(sub, args),
@@ -787,6 +837,174 @@ async fn start_with(args: &[String], bg: bool) -> Result<i32, Box<dyn std::error
             eprintln!("  {line}");
         }
         Ok(1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// update
+// ---------------------------------------------------------------------------
+
+/// Flags accepted by `update`.
+struct UpdateOpts {
+    /// Build the tree as it stands: no fetch, no pull, no cleanliness checks.
+    force: bool,
+}
+
+fn update_flags(args: &[String]) -> Result<UpdateOpts, String> {
+    let mut opts = UpdateOpts { force: false };
+    // Full argv, like the other commands: skip the program and the word.
+    for arg in args.iter().skip(2) {
+        match arg.as_str() {
+            "-f" | "--force" => opts.force = true,
+            other => return Err(format!("unknown update flag {other}")),
+        }
+    }
+    Ok(opts)
+}
+
+/// Why `update` will not pull into this tree, or `None` when it may.
+///
+/// Both refusals mean the same thing: the checkout is somebody's work in
+/// progress, and pulling would move it under their feet. `--force` is the one
+/// escape hatch, and it deliberately does not touch git at all.
+fn update_blocker(branch: &str, dirty: &str) -> Option<String> {
+    if branch != "main" && branch != "master" {
+        return Some(format!(
+            "on branch '{branch}', not main — check it out, or pass --force to build this tree as-is"
+        ));
+    }
+    if !dirty.trim().is_empty() {
+        return Some(
+            "working tree has uncommitted changes — commit or stash them, \
+             or pass --force to build this tree as-is"
+                .into(),
+        );
+    }
+    None
+}
+
+/// `deepseek-rs update` — pull, build the release binary, report where it is.
+///
+/// Deliberately does **not** restart: rebuilding is safe while the server runs,
+/// but swapping the code underneath a live proxy is a decision with downtime
+/// and a fresh login attached, so the last line tells you how to do it.
+fn update(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
+    let opts = match update_flags(args) {
+        Ok(opts) => opts,
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(2);
+        }
+    };
+
+    // The checkout this binary was built from. `CARGO_MANIFEST_DIR` is baked in
+    // at compile time, so a binary moved to another machine names a directory
+    // that is not there; that is reported instead of guessed around.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("unexpected CARGO_MANIFEST_DIR")?
+        .to_path_buf();
+    if !repo.join("Cargo.toml").is_file() {
+        eprintln!(
+            "source checkout missing at {} — this binary was built there; \
+             rebuild from a checkout instead",
+            repo.display()
+        );
+        return Ok(1);
+    }
+
+    if !opts.force {
+        if !repo.join(".git").exists() {
+            eprintln!(
+                "no git checkout at {} — pass --force to build this tree as-is",
+                repo.display()
+            );
+            return Ok(1);
+        }
+        let branch = git_capture(&repo, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .unwrap_or_else(|_| "(detached HEAD)".into());
+        let dirty = git_capture(&repo, &["status", "--porcelain"]).unwrap_or_default();
+        if let Some(why) = update_blocker(&branch, &dirty) {
+            eprintln!("{why}");
+            return Ok(1);
+        }
+        if let Err(e) =
+            git_capture(&repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        {
+            eprintln!("{branch} has no upstream ({e}) — pass --force to build this tree as-is");
+            return Ok(1);
+        }
+
+        println!("pull      {branch}");
+        if let Err(e) = run_inherit(&repo, "git", &["pull", "--ff-only"]) {
+            eprintln!("pull failed: {e} — the tree is unchanged; resolve it, or --force");
+            return Ok(1);
+        }
+    }
+
+    println!("build     cargo build --release");
+    if let Err(e) = run_inherit(&repo, "cargo", &["build", "--release"]) {
+        eprintln!("build failed: {e} — the binary in place is the previous one");
+        return Ok(1);
+    }
+
+    let binary = repo.join("target/release/deepseek-rs");
+    if !binary.is_file() {
+        eprintln!("build succeeded but {} is missing", binary.display());
+        return Ok(1);
+    }
+    println!("built     {}", binary.display());
+    println!("version   {}", env!("CARGO_PKG_VERSION"));
+
+    // The usual install is a `~/.local/bin` symlink to exactly this path; say
+    // so only when it is true, rather than claiming an install step happened.
+    if let Some(home) = std::env::var_os("HOME") {
+        let link = PathBuf::from(home).join(".local/bin/deepseek-rs");
+        match std::fs::read_link(&link) {
+            Ok(target) if target == binary => {
+                println!("install   {} -> this binary", link.display());
+            }
+            Ok(target) => println!("warning   {} points at {}", link.display(), target.display()),
+            Err(_) => {}
+        }
+    }
+
+    match Runtime::resolve().pid() {
+        Some(pid) => {
+            println!("running   pid {pid} — still the old binary; pick it up with:");
+            println!("          deepseek-rs restart");
+        }
+        None => println!("stopped   `deepseek-rs start -b` will run the new binary"),
+    }
+    Ok(0)
+}
+
+/// Run a command in `repo` and return its trimmed stdout.
+fn git_capture(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.first().copied().unwrap_or("")))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Run a command in `repo` with the terminal attached, so git and cargo print
+/// their own progress. Returns the failure detail, never a silent success.
+fn run_inherit(repo: &Path, program: &str, args: &[&str]) -> Result<(), String> {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} exited {status}"))
     }
 }
 
@@ -1547,6 +1765,10 @@ SERVER
   stop                        SIGTERM the server (SIGKILL after grace + 5s)
   reload                      SIGHUP: re-read config.toml and the account list
   restart [-b]                stop, then start (same flags as start)
+  update [--force]            git pull --ff-only, then cargo build --release;
+                              refuses a dirty tree or a non-main branch unless
+                              --force (which builds the tree without touching
+                              git). Does not restart — the last line says how.
   --port N / --host H         bind override for serve/start/restart; wins
                               over PROXY_PORT / PROXY_HOST and config.toml
   status                      pid, url, uptime, account count

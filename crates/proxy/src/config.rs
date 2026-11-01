@@ -27,6 +27,9 @@ pub struct ProxySection {
     /// Wire dialect: `native` (default, teaches no syntax), `json_invoke`
     /// (taught `<invoke>` blocks) or `simple_tool_tag` (taught `<tool>` marker).
     pub dialect: Option<String>,
+    /// Log verbosity: `debug` for the debug profile, anything else (or unset)
+    /// for prod. `DEEPSEEK_LOG` in the environment overrides it.
+    pub log_level: Option<String>,
 }
 
 impl Default for ProxySection {
@@ -35,8 +38,19 @@ impl Default for ProxySection {
             host: "0.0.0.0".into(),
             port: 9174,
             dialect: None,
+            log_level: None,
         }
     }
+}
+
+/// The `[proxy] log_level` from the config file, read before logging starts.
+///
+/// Logging is set up before the full config is loaded, so this reads only the
+/// file. A file that does not parse yields `None` here; `Config::load` reports
+/// that error later, once logging is up.
+pub fn file_log_level() -> Option<String> {
+    let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| default_config_path());
+    Config::read_file(&path).ok()?.proxy.log_level
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +127,11 @@ pub struct LimitsSection {
     /// Correction turns for malformed tool calls. Python:
     /// `TOOL_REPAIR_MAX_RETRIES`.
     pub tool_repair_max_retries: u32,
+    /// Re-send the tool-call reminder when a thread's exchange count crosses a
+    /// multiple of this many exchanges. `0` turns the periodic reminder off.
+    /// Python: `TOOL_REMINDER_INTERVAL` (default 0 there; here 1 = every turn,
+    /// which is what this proxy did before the setting existed).
+    pub tool_reminder_interval: u32,
     /// Wall-clock budget for one turn, in seconds. Python:
     /// `REQUEST_TIMEOUT` (default 300), applied by `asyncio.timeout` around the
     /// whole turn. Without it a stalled upstream socket hangs the request
@@ -143,6 +162,7 @@ impl Default for LimitsSection {
             rate_limit_max_retries: 3,
             rate_limit_backoff_secs: 10.0,
             tool_repair_max_retries: 3,
+            tool_reminder_interval: 1,
             request_timeout_secs: 300.0,
             shutdown_grace_secs: 20,
             heartbeat_interval_secs: 10.0,
@@ -172,6 +192,7 @@ pub struct Config {
     pub rate_limit_max_retries: u32,
     pub rate_limit_backoff_secs: f64,
     pub tool_repair_max_retries: u32,
+    pub tool_reminder_interval: u32,
     pub request_timeout_secs: f64,
     pub shutdown_grace_secs: u64,
     pub heartbeat_interval_secs: f64,
@@ -247,6 +268,8 @@ impl Config {
                 .max(0.0),
             tool_repair_max_retries: env_num("TOOL_REPAIR_MAX_RETRIES")
                 .unwrap_or(file.limits.tool_repair_max_retries),
+            tool_reminder_interval: env_num("TOOL_REMINDER_INTERVAL")
+                .unwrap_or(file.limits.tool_reminder_interval),
             request_timeout_secs: env_num("REQUEST_TIMEOUT")
                 .unwrap_or(file.limits.request_timeout_secs)
                 .max(1.0),
@@ -474,6 +497,26 @@ mod tests {
     fn missing_file_is_not_an_error() {
         let f = Config::read_file("/nonexistent/config.toml").unwrap();
         assert_eq!(f.proxy.port, 9174);
+    }
+
+    #[test]
+    fn tool_reminder_interval_defaults_to_every_turn() {
+        let f: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(f.limits.tool_reminder_interval, 1);
+    }
+
+    #[test]
+    fn tool_reminder_interval_zero_is_readable_from_the_limits_section() {
+        let f: FileConfig = toml::from_str("[limits]\ntool_reminder_interval = 0\n").unwrap();
+        assert_eq!(f.limits.tool_reminder_interval, 0);
+    }
+
+    #[test]
+    fn log_level_is_read_from_the_proxy_section() {
+        let f: FileConfig = toml::from_str("[proxy]\nlog_level = \"debug\"\n").unwrap();
+        assert_eq!(f.proxy.log_level.as_deref(), Some("debug"));
+        let unset: FileConfig = toml::from_str("").unwrap();
+        assert_eq!(unset.proxy.log_level, None);
     }
 
     #[test]

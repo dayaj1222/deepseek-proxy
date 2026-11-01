@@ -33,6 +33,10 @@ pub struct Failure {
     pub name: Option<String>,
     pub body: String,
     pub detail: String,
+    /// Arguments of a block that named no tool, when it is the region's only
+    /// block. The caller may infer the tool from them (see
+    /// `dialect::infer_tool_name`). `None` when nothing safe can be inferred.
+    pub args: Option<Map<String, Value>>,
 }
 
 #[derive(Debug)]
@@ -207,6 +211,7 @@ fn finish_call(call: Open, text: &str, end: usize) -> Result<ToolCall, Failure> 
             name: None,
             body: clip(&text[call.start..end]),
             detail: "the block that names the tool had no name".into(),
+            args: Some(call.args),
         }),
     }
 }
@@ -300,11 +305,23 @@ pub fn parse_region(text: &str) -> Region {
                     finish_param(p, call.as_mut());
                 }
                 if call.is_none() {
-                    results.push(Err(Failure {
-                        name: None,
-                        body: clip(&text[lt..]),
-                        detail: "an argument block appeared outside any tool block".into(),
-                    }));
+                    if saw_invoke {
+                        results.push(Err(Failure {
+                            name: None,
+                            body: clip(&text[lt..]),
+                            detail: "an argument block appeared outside any tool block".into(),
+                            args: None,
+                        }));
+                    } else {
+                        // Arguments with no invoke tag before them: the model
+                        // dropped the tool name. Held as a call that names no
+                        // tool, so its arguments are kept for inference.
+                        call = Some(Open {
+                            name: None,
+                            args: Map::new(),
+                            start: lt,
+                        });
+                    }
                 }
                 param = Some(Param {
                     name: attr(tag.inner, "name").or_else(|| attr(tag.inner, "parameter")),
@@ -337,18 +354,40 @@ pub fn parse_region(text: &str) -> Region {
     }
 
     if let Some(c) = call.take() {
-        // Cut off before the invoke closed (usually the token limit).
-        results.push(Err(Failure {
-            name: c.name.filter(|n| !n.is_empty()),
-            body: clip(&text[c.start..]),
-            detail: "the output ended before the call was closed".into(),
-        }));
+        match c.name.clone().filter(|n| !n.is_empty()) {
+            // The model stopped after its last argument and skipped the closers.
+            // Every argument it sent is whole, so the call is too. A cut-off
+            // inside an argument still fails, and the caller's schema check
+            // still runs on what is accepted here.
+            Some(name) if param.is_none() && !c.args.is_empty() => {
+                results.push(Ok(ToolCall {
+                    name,
+                    arguments: Value::Object(c.args).to_string(),
+                }));
+            }
+            // Cut off before the invoke closed (usually the token limit). Never
+            // inferred: a truncated argument may be partial.
+            name => results.push(Err(Failure {
+                name,
+                body: clip(&text[c.start..]),
+                detail: "the output ended before the call was closed".into(),
+                args: None,
+            })),
+        }
     } else if saw_open && !saw_invoke && results.is_empty() {
         results.push(Err(Failure {
             name: None,
             body: clip(&text[..consumed.max(1).min(text.len())]),
             detail: "the outer call block held no tool block".into(),
+            args: None,
         }));
+    }
+    // Inference only when the nameless block is the whole region. Next to
+    // another block it could be a stray, and running it would be a guess.
+    if results.len() != 1 {
+        for failure in results.iter_mut().filter_map(|r| r.as_mut().err()) {
+            failure.args = None;
+        }
     }
     Region {
         consumed: consumed.max(text.find('>').map_or(1, |g| g + 1)),
@@ -581,5 +620,69 @@ mod tests {
         );
         assert_eq!(partial_len("a < b"), 0);
         assert_eq!(partial_len("<b>bold"), 0);
+    }
+
+    #[test]
+    fn arguments_with_no_invoke_tag_are_kept_for_inference() {
+        // Seen in the wild: `calls` opens, then parameters with no invoke tag.
+        let t = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        let r = parse_region(t);
+        let [Err(f)] = r.results.as_slice() else {
+            panic!("{:?}", r.results)
+        };
+        assert_eq!(f.name, None);
+        assert_eq!(f.args.as_ref().unwrap()["command"], "ls");
+    }
+
+    #[test]
+    fn nameless_arguments_are_not_inferred_next_to_another_block() {
+        // A nameless block beside a real one could be a stray. Never a guess.
+        let t = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n<｜｜DSML｜｜ invoke name=\"b\"></｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let r = parse_region(t);
+        assert_eq!(r.results.len(), 2, "{:?}", r.results);
+        assert!(matches!(&r.results[0], Err(f) if f.args.is_none()));
+        assert!(matches!(&r.results[1], Ok(c) if c.name == "b"));
+    }
+
+    #[test]
+    fn a_parameter_after_a_closed_invoke_is_not_a_nameless_call() {
+        let t = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"a\"></｜｜DSML｜｜ invoke><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter></｜｜DSML｜｜ calls>";
+        let r = parse_region(t);
+        assert!(
+            matches!(r.results.as_slice(), [Ok(a), Err(f)] if a.name == "a" && f.args.is_none()),
+            "{:?}",
+            r.results
+        );
+    }
+
+    #[test]
+    fn a_call_cut_off_after_its_last_argument_is_kept() {
+        // The model stopped after a whole argument and skipped the closers.
+        let t = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>";
+        let (name, args) = one_call(t);
+        assert_eq!(name, "bash");
+        assert_eq!(args["command"], "ls");
+    }
+
+    #[test]
+    fn a_call_cut_off_with_no_argument_still_fails() {
+        let r = parse_region("<｜｜DSML｜｜ invoke name=\"bash\">");
+        assert!(
+            matches!(r.results.as_slice(), [Err(f)] if f.detail.contains("ended before")),
+            "{:?}",
+            r.results
+        );
+    }
+
+    #[test]
+    fn a_truncated_nameless_block_is_never_inferred() {
+        let t =
+            "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">rm -rf";
+        let r = parse_region(t);
+        assert!(
+            matches!(r.results.as_slice(), [Err(f)] if f.args.is_none() && f.detail.contains("ended before")),
+            "{:?}",
+            r.results
+        );
     }
 }

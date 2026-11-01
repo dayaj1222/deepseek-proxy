@@ -252,6 +252,20 @@ impl Threads {
         self.persist.save(key, &merged);
     }
 
+    /// Add `n` user/tool exchanges to the thread's counter after a successful
+    /// turn. In memory only (it restarts with the process, as `ThreadState`
+    /// documents); it feeds the periodic reminder and diagnostics.
+    pub fn bump_exchanges(&self, key: &str, n: usize) {
+        if let Some(entry) = self
+            .cache
+            .lock()
+            .expect("threads lock poisoned")
+            .get_mut(key)
+        {
+            entry.exchanges += n;
+        }
+    }
+
     /// Walk the cursor back one commit.
     ///
     /// Returns the parent id the thread had before its newest commit, or `None`
@@ -328,6 +342,17 @@ mod tests {
             prev_parents: Vec::new(),
             exchanges: 0,
         }
+    }
+
+    #[test]
+    fn bump_exchanges_accumulates_on_a_known_thread_and_ignores_others() {
+        let threads = threads_with(Arc::new(MemoryPersist::new()));
+        threads.commit("t1", "s1", Some(1));
+        threads.bump_exchanges("t1", 2);
+        threads.bump_exchanges("t1", 3);
+        threads.bump_exchanges("missing", 9);
+        assert_eq!(threads.resume("t1").unwrap().exchanges, 5);
+        assert!(threads.resume("missing").is_none());
     }
 
     #[test]

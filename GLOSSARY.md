@@ -40,6 +40,9 @@ reviews and refactors reuse these names rather than inventing new ones.
   malformed tool call. Non-streaming, no thinking, no search.
 - **malformed** — a tool-call block that parsed but failed schema validation, or
   never closed. Distinct from prose; it routes to repair, never to the client.
+- **nameless block** — a DSML block that carries arguments but no tool name. It
+  runs only when its arguments fit exactly one offered tool (ADR-0016); otherwise
+  it is malformed.
 - **account** — one DeepSeek login. Threads bind to an account; a login-dead
   account fails the thread over to a healthy one.
 - **surface** — the HTTP API (`/v1/chat/completions` etc.). The one place the

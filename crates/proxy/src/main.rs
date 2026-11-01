@@ -27,15 +27,20 @@ mod config;
 mod dialect;
 mod dialect_dsml;
 mod dialect_simple;
+mod error;
 mod images;
 mod log;
 mod pool;
 mod prompt;
 mod session;
 mod sse;
+mod state;
 mod store;
 mod threads;
 mod turn;
+
+pub(crate) use error::{error_for, CompletionError, ProxyError};
+pub(crate) use state::{AppState, Settings, SettingsHandle, Stats};
 
 use axum::{
     extract::State,
@@ -53,211 +58,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sse::{pump, route_all, unix_secs, usage_block, uuid_like, Pumped};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 use threads::ThreadState;
 use tracing::Instrument;
 
-#[derive(Clone)]
-struct Settings {
-    thinking_default: bool,
-    search_enabled: bool,
-    model_name: String,
-    /// Throttle retries before the first byte (`RATE_LIMIT_MAX_RETRIES`).
-    rate_limit_max_retries: u32,
-    /// Base backoff (`RATE_LIMIT_BACKOFF_S`), floored at 0.5s like Python.
-    rate_limit_backoff_secs: f64,
-    /// Correction turns for malformed tool calls (`TOOL_REPAIR_MAX_RETRIES`).
-    tool_repair_max_retries: u32,
-    /// Whole-turn deadline in seconds (`REQUEST_TIMEOUT`).
-    request_timeout_secs: f64,
-    /// Largest accepted image in bytes (`IMAGE_MAX_BYTES`).
-    image_max_bytes: usize,
-    /// SSE keep-alive interval in seconds (`HEARTBEAT_INTERVAL`).
-    heartbeat_interval_secs: f64,
-    /// Wire dialect selected at startup (`dialect` / `DIALECT`).
-    dialect: dialect::Dialect,
-}
-
-impl Settings {
-    /// Project the reloadable subset of the resolved config.
-    ///
-    /// Restart-only keys (`host`, `port`, `db_path`, `image_max_bytes`) are
-    /// still copied here because a running process reads them from somewhere,
-    /// but a reload cannot change them; see [`restart_only_keys`].
-    fn from_config(cfg: &config::Config) -> Self {
-        Self {
-            thinking_default: cfg.thinking,
-            search_enabled: cfg.search,
-            model_name: cfg.model.clone(),
-            rate_limit_max_retries: cfg.rate_limit_max_retries,
-            rate_limit_backoff_secs: cfg.rate_limit_backoff_secs,
-            tool_repair_max_retries: cfg.tool_repair_max_retries,
-            request_timeout_secs: cfg.request_timeout_secs,
-            image_max_bytes: cfg.image_max_bytes,
-            heartbeat_interval_secs: cfg.heartbeat_interval_secs,
-            dialect: cfg.dialect,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct AppState {
-    /// Live knobs. Behind a handle so a SIGHUP can swap them without a restart
-    /// or a lock held across an await.
-    settings: Arc<SettingsHandle>,
-    /// Account pool. Swappable so a reload can add or remove an account without
-    /// restarting; callers go through [`AppState::pool`] and never hold the lock
-    /// across an await, so an in-flight turn finishes on the pool it started on.
-    pool: Arc<std::sync::RwLock<Arc<pool::Pool>>>,
-    /// Cache, turn lock and persistence for conversation threads.
-    threads: Arc<threads::Threads>,
-    store: store::Store,
-    stats: Arc<Stats>,
-}
-
-impl AppState {
-    /// Snapshot the current pool. One Arc clone; safe to hold for a whole turn.
-    fn pool(&self) -> Arc<pool::Pool> {
-        self.pool
-            .read()
-            .expect("pool lock poisoned")
-            .clone()
-    }
-
-    /// Install a rebuilt pool. Turns already running keep their snapshot.
-    fn set_pool(&self, fresh: Arc<pool::Pool>) {
-        *self.pool.write().expect("pool lock poisoned") = fresh;
-    }
-}
-
-/// The current `Settings`, swappable at runtime.
-///
-/// A turn takes one [`get`](Self::get) snapshot at its start and uses it for its
-/// whole life: changing a turn's deadline halfway through a stream would be a
-/// bug, not a feature. New turns see new values; running turns finish on the
-/// values they started with.
-struct SettingsHandle {
-    current: std::sync::RwLock<Arc<Settings>>,
-    /// The resolved config behind `current`, kept so a reload can tell a
-    /// restart-only key apart from a live one.
-    config: std::sync::Mutex<config::Config>,
-    /// Bumped on every successful reload; 1 means "as loaded at boot".
-    generation: AtomicU64,
-    /// When the running config was installed.
-    loaded_at: std::sync::Mutex<Instant>,
-    /// Last reload failure. `None` means the running config is the last good
-    /// one and nothing has failed since.
-    last_error: std::sync::Mutex<Option<String>>,
-}
-
-/// Keys that cannot change while the process is running.
-///
-/// `host`/`port` are already bound, `db_path` is an open SQLite handle, and
-/// `image_max_bytes` is baked into `DefaultBodyLimit` when the router is built.
-/// A reload reports these instead of pretending to apply them.
-fn restart_only_keys(old: &config::Config, new: &config::Config) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-    if old.host != new.host || old.port != new.port {
-        changed.push("host/port");
-    }
-    if old.db_path != new.db_path {
-        changed.push("db_path");
-    }
-    if old.image_max_bytes != new.image_max_bytes {
-        changed.push("image_max_bytes");
-    }
-    if old.dialect != new.dialect {
-        changed.push("dialect");
-    }
-    changed
-}
-
-impl SettingsHandle {
-    fn new(config: config::Config) -> Self {
-        Self {
-            current: std::sync::RwLock::new(Arc::new(Settings::from_config(&config))),
-            config: std::sync::Mutex::new(config),
-            generation: AtomicU64::new(1),
-            loaded_at: std::sync::Mutex::new(Instant::now()),
-            last_error: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Install a new config. Running turns keep the snapshot they took.
-    fn replace(&self, config: config::Config) -> u64 {
-        let settings = Settings::from_config(&config);
-        *self.current.write().expect("settings lock poisoned") = Arc::new(settings);
-        *self.config.lock().expect("settings lock poisoned") = config;
-        *self.loaded_at.lock().expect("settings lock poisoned") = Instant::now();
-        *self.last_error.lock().expect("settings lock poisoned") = None;
-        self.generation.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Record a failed reload. The running config stays untouched.
-    fn note_error(&self, error: String) {
-        *self.last_error.lock().expect("settings lock poisoned") = Some(error);
-    }
-
-    /// `(generation, seconds_since_last_successful_load, last_error)`.
-    fn snapshot(&self) -> (u64, u64, Option<String>) {
-        let last_error = self.last_error.lock().expect("settings lock poisoned").clone();
-        (
-            self.generation.load(Ordering::Relaxed),
-            self.loaded_at
-                .lock()
-                .expect("settings lock poisoned")
-                .elapsed()
-                .as_secs(),
-            last_error,
-        )
-    }
-
-    /// Restart-only keys that changed since the running config was loaded.
-    fn restart_only_changes(&self, new: &config::Config) -> Vec<&'static str> {
-        let old = self.config.lock().expect("settings lock poisoned");
-        restart_only_keys(&old, new)
-    }
-
-    /// Cheap: one Arc clone under a read lock, never held across an await.
-    fn get(&self) -> Arc<Settings> {
-        self.current
-            .read()
-            .expect("settings lock poisoned")
-            .clone()
-    }
-}
-
-/// Process counters reported by `GET /stats`. Cheap atomics only; anything
-/// expensive (account gates, db counts) is read live by the handler.
-#[derive(Default)]
-struct Stats {
-    started: Option<Instant>,
-    total: AtomicU64,
-    ok: AtomicU64,
-    errors: AtomicU64,
-    auth_failed: AtomicU64,
-    retries: AtomicU64,
-    tool_calls: AtomicU64,
-    /// Images dropped because a turn carried more than DeepSeek accepts.
-    images_dropped: AtomicU64,
-    /// Set when SIGTERM/SIGINT arrives; `/readyz` reports 503 from then on.
-    shutting_down: std::sync::atomic::AtomicBool,
-}
-
-impl Stats {
-    fn new() -> Self {
-        Self {
-            started: Some(Instant::now()),
-            ..Default::default()
-        }
-    }
-
-    fn uptime_secs(&self) -> u64 {
-        self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
@@ -326,6 +131,7 @@ fn build_prompts(
         system_extra,
         image_note,
         dialect::Dialect::JsonInvoke,
+        1,
     )
 }
 
@@ -338,9 +144,18 @@ fn build_prompts_with(
     system_extra: &str,
     image_note: Option<&str>,
     wire: dialect::Dialect,
+    reminder_interval: u32,
 ) -> (String, String) {
     let (specs, required) = resolve_tools(req);
-    let reminder = prompt::reminder(&req.tools, wire);
+    // The periodic reminder rides only when the thread's exchange count crosses
+    // a multiple of `reminder_interval` (0 = never), as in the Python proxy.
+    let offset = existing.map_or(0, |t| t.exchanges);
+    let reminder = if prompt::reminder_due(reminder_interval, offset, exchange_count(&req.messages))
+    {
+        prompt::reminder(&req.tools, wire)
+    } else {
+        None
+    };
     let directive = prompt::directive(
         !specs.is_empty(),
         required,
@@ -659,6 +474,14 @@ fn delta_messages(messages: &[Msg]) -> &[Msg] {
         .map(|i| i + 1)
         .unwrap_or(0);
     &messages[start..]
+}
+
+/// User/tool messages in this turn's delta: the exchanges it adds to the thread.
+pub(crate) fn exchange_count(messages: &[Msg]) -> usize {
+    delta_messages(messages)
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "tool")
+        .count()
 }
 
 fn last_non_system_role(messages: &[Msg]) -> Option<&str> {
@@ -1173,151 +996,6 @@ fn unauthorized(missing: bool) -> Response {
     resp
 }
 
-/// Why a completion attempt ultimately failed.
-#[derive(Debug, Clone)]
-enum CompletionError {
-    /// Still throttled after every retry; maps to 429 `rate_limit_exceeded`.
-    RateLimited {
-        retry_after_s: u64,
-    },
-    /// Login is dead; maps to 502 `backend_auth_failed`.
-    LoginDead(String),
-    /// Queue full or queue wait timed out; maps to 503 `queue_unavailable`.
-    QueueUnavailable(String),
-    Other(String),
-}
-
-impl From<pool::PoolError> for CompletionError {
-    fn from(e: pool::PoolError) -> Self {
-        match e {
-            pool::PoolError::Queue(m) => CompletionError::QueueUnavailable(m),
-            pool::PoolError::LoginDead(m) => CompletionError::LoginDead(m),
-            pool::PoolError::RateLimited { retry_after_s } => {
-                CompletionError::RateLimited { retry_after_s }
-            }
-            pool::PoolError::Other(m) => CompletionError::Other(m),
-        }
-    }
-}
-
-impl std::fmt::Display for CompletionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompletionError::RateLimited { retry_after_s } => write!(
-                f,
-                "DeepSeek backend rate-limited this turn (retry after {retry_after_s}s)"
-            ),
-            CompletionError::LoginDead(msg) | CompletionError::Other(msg) => f.write_str(msg),
-            CompletionError::QueueUnavailable(msg) => f.write_str(msg),
-        }
-    }
-}
-
-/// Public API error. Port of `ProxyError` in `deepseek_proxy/errors.py`.
-///
-/// Backend detail stays in the logs; the client gets a stable code and a
-/// generic message, exactly as Python does.
-#[derive(Debug, Clone)]
-struct ProxyError {
-    message: String,
-    status: axum::http::StatusCode,
-    code: &'static str,
-    param: Option<String>,
-    retry_after: Option<u64>,
-}
-
-impl ProxyError {
-    fn new(message: impl Into<String>, status: axum::http::StatusCode, code: &'static str) -> Self {
-        Self {
-            message: message.into(),
-            status,
-            code,
-            param: None,
-            retry_after: None,
-        }
-    }
-
-    fn with_param(mut self, param: impl Into<String>) -> Self {
-        self.param = Some(param.into());
-        self
-    }
-
-    /// `ProxyError.payload()`: `type` follows the status, not the code.
-    fn payload(&self) -> Value {
-        json!({
-            "error": {
-                "message": self.message,
-                "type": match self.status.as_u16() {
-                    400..=404 => "invalid_request_error",
-                    429 => "rate_limit_error",
-                    _ => "server_error",
-                },
-                "param": self.param,
-                "code": self.code,
-            }
-        })
-    }
-
-    fn into_response(self) -> Response {
-        let retry_after = self.retry_after;
-        let mut resp = (self.status, Json(self.payload())).into_response();
-        // `app.py` sets Retry-After whenever the exception carries one.
-        if let Some(retry_after) = retry_after {
-            if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after.max(1).to_string()) {
-                resp.headers_mut().insert("retry-after", v);
-            }
-        }
-        resp
-    }
-}
-
-/// Port of `error_for()` in `deepseek_proxy/transport.py`: the single place
-/// that turns a backend failure into what the client sees and how it is logged.
-async fn error_for(state: &AppState, key: &str, err: CompletionError) -> ProxyError {
-    match err {
-        CompletionError::RateLimited { retry_after_s } => {
-            let mut e = ProxyError::new(
-                "Backend capacity temporarily unavailable",
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_exceeded",
-            );
-            e.retry_after = Some(retry_after_s.max(1));
-            e
-        }
-        CompletionError::LoginDead(msg) => {
-            tracing::error!(thread = %key, error = %msg, "backend login failed");
-            if state.pool().failover(key).await.is_some() {
-                // The account binding just moved, so the session id - scoped to
-                // the account that created it - now points at nothing. Forget
-                // it and let the next turn open a session on the new account,
-                // instead of burning a turn to discover the mismatch.
-                state.threads.forget(key);
-            }
-            ProxyError::new(
-                "Backend login failed; disabled account, retry with a fresh thread",
-                axum::http::StatusCode::BAD_GATEWAY,
-                "backend_auth_failed",
-            )
-        }
-        CompletionError::QueueUnavailable(msg) => {
-            tracing::warn!(thread = %key, error = %msg, "account queue unavailable");
-            ProxyError::new(
-                "Request queue unavailable; try again later",
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "queue_unavailable",
-            )
-        }
-        CompletionError::Other(msg) => {
-            tracing::error!(thread = %key, error = %msg, "backend request failed");
-            ProxyError::new(
-                "Backend request failed",
-                axum::http::StatusCode::BAD_GATEWAY,
-                "backend_error",
-            )
-        }
-    }
-}
-
 /// Send the completion, retrying throttles with linear backoff.
 ///
 /// Port of `Backend.generate()` in `deepseek_proxy/backend.py`. Three details
@@ -1412,6 +1090,20 @@ fn reason_codes(pending: &[dialect::MalformedCall]) -> String {
         .join(",")
 }
 
+/// Tool names of the pending malformed calls, comma-joined for logs. A call
+/// that named no tool shows as `-`. Only names: arguments and bodies stay out.
+/// Names are model text, so each is cut short.
+fn tool_names(pending: &[dialect::MalformedCall]) -> String {
+    pending
+        .iter()
+        .map(|m| match m.name.as_deref() {
+            Some(name) => name.chars().take(64).collect::<String>(),
+            None => "-".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl Recovery {
     fn new(
         specs: Vec<dialect::ToolSpec>,
@@ -1449,6 +1141,20 @@ impl Recovery {
                 return Ok(None);
             }
             dialect::ScanEvent::Text(_) => return Ok(None),
+            dialect::ScanEvent::Nameless { args, malformed } => {
+                // The model dropped the tool name. Take the call only if its
+                // arguments fit exactly one offered tool; otherwise it stays a
+                // malformed call and the repair turn asks for the name.
+                let Some(name) = dialect::infer_tool_name(&self.specs, &args) else {
+                    self.pending.push(malformed);
+                    return Ok(None);
+                };
+                tracing::info!(tool = %name, "tool name inferred from arguments");
+                dialect::ToolCall {
+                    name,
+                    arguments: serde_json::Value::Object(args).to_string(),
+                }
+            }
             dialect::ScanEvent::Tool(c) => c,
         };
 
@@ -1565,6 +1271,30 @@ impl Recovery {
             }
             self.pending.extend(carried);
         }
+    }
+
+    /// A repair reply with no call in it, on an optional call, means the model
+    /// decided the failed call was not needed. Drop the failures and return the
+    /// reply's prose, so the answer is delivered instead of another repair turn
+    /// asking for a call that will not come. Under `tool_choice: "required"` a
+    /// call is still owed, so the repair goes on.
+    fn declined_repair(&mut self, events: &[dialect::ScanEvent]) -> Option<String> {
+        let called = events
+            .iter()
+            .any(|e| !matches!(e, dialect::ScanEvent::Text(_)));
+        let prose: String = events
+            .iter()
+            .filter_map(|e| match e {
+                dialect::ScanEvent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        if self.required || called || prose.trim().is_empty() {
+            return None;
+        }
+        self.pending.clear();
+        self.last_failures.clear();
+        Some(prose)
     }
 
     fn has_pending(&self) -> bool {
@@ -1699,6 +1429,7 @@ async fn chat_completions(
         specs,
         required,
         dialect: wire,
+        exchanges,
     } = prepared;
 
     let id = format!("chatcmpl-{}", uuid_like());
@@ -1732,6 +1463,7 @@ async fn chat_completions(
         parallel: req.parallel_tool_calls,
         stream: req.stream,
         dialect: wire,
+        exchanges,
     })
     .await
 }
@@ -1815,6 +1547,9 @@ struct LiveTurn {
     stream: bool,
     /// Wire dialect; selects the streaming tool-call grammar.
     dialect: dialect::Dialect,
+    /// User/tool messages this turn carries; added to the thread's exchange
+    /// count once the turn succeeds.
+    exchanges: usize,
 }
 
 async fn stream_response(live: LiveTurn) -> Response {
@@ -1837,6 +1572,7 @@ async fn stream_response(live: LiveTurn) -> Response {
         parallel,
         stream,
         dialect: wire,
+        exchanges,
     } = live;
     let (tx, rx) = tokio::sync::mpsc::channel::<sse::Chunk>(32);
 
@@ -2274,6 +2010,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         let mut repair_aborted = false;
         // Log-only: whether any correction turn ran, for the "turn done" line.
         let mut repaired = false;
+        // Prose from a repair reply that declined the call, delivered with the turn.
+        let mut declined_prose = String::new();
         for attempt in 1..=max {
             if tx.is_closed() {
                 return;
@@ -2285,10 +2023,11 @@ async fn stream_response(live: LiveTurn) -> Response {
             // repairing before it runs.
             let pending = recovery.pending.len();
             let reasons = reason_codes(&recovery.pending);
+            let tools = tool_names(&recovery.pending);
             repaired = true;
             let prompt = recovery.begin_repair(attempt as usize);
             let expected = recovery.expected;
-            tracing::warn!(thread = %key, attempt, expected, pending, reasons = %reasons, "tool repair");
+            tracing::warn!(thread = %key, attempt, expected, pending, reasons = %reasons, tools = %tools, "tool repair");
 
             // The repair goes to whichever session is live right now, parented
             // to the newest message — including a rebuilt one.
@@ -2362,6 +2101,28 @@ async fn stream_response(live: LiveTurn) -> Response {
                 );
                 repair_text.clear();
                 repair_mid = None;
+                // A throttle arrives as a 200 with the hint in the body, so
+                // `completion_with_retry` never sees it. Without a wait the
+                // whole repair budget burns in about two seconds. Wait like
+                // the turn path does (`backoff_delay`) before the next attempt.
+                if pool::is_rate_limit(&hint) && attempt < max {
+                    let wait = backoff_delay(&turn_settings, attempt - 1);
+                    tracing::info!(
+                        thread = %key,
+                        attempt,
+                        retry_delay_s = wait,
+                        "repair throttled; waiting before the next attempt"
+                    );
+                    if until_client_disconnect(
+                        &tx,
+                        tokio::time::sleep(std::time::Duration::from_secs_f64(wait)),
+                    )
+                    .await
+                    .is_none()
+                    {
+                        return;
+                    }
+                }
             }
             // The correction answer is now the newest upstream message, so it —
             // not the malformed reply it fixed — becomes the parent of the
@@ -2370,7 +2131,13 @@ async fn stream_response(live: LiveTurn) -> Response {
             if let Some(mid) = repair_mid {
                 cursor = Some(mid);
             }
-            for event in wire.scan(&repair_text) {
+            let events = wire.scan(&repair_text);
+            if let Some(prose) = recovery.declined_repair(&events) {
+                tracing::info!(thread = %key, attempt, "repair declined: model answered without a call");
+                declined_prose = prose;
+                break;
+            }
+            for event in events {
                 match recovery.accept(event) {
                     Ok(_) => {}
                     Err(e) => {
@@ -2395,6 +2162,15 @@ async fn stream_response(live: LiveTurn) -> Response {
 
         // Python raises here rather than returning a turn with no usable calls.
         if recovery.has_pending() || repair_aborted {
+            // Logged here too: with repair off, or once it has run out, the
+            // "tool repair" line above never fires for these calls.
+            tracing::warn!(
+                thread = %key,
+                tools = %tool_names(&recovery.pending),
+                reasons = %reason_codes(&recovery.pending),
+                repair_aborted,
+                "tool call failed; turn not recovered"
+            );
             state.stats.errors.fetch_add(1, Ordering::Relaxed);
             fail_turn(
                 &state,
@@ -2416,7 +2192,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         // `filter.calls` with the streamed reply's own calls; installing the
         // repaired calls before the flush let it overwrite them, so a repair
         // that worked was delivered as an empty `stop` turn.
-        let tail = filter.finish();
+        let mut tail = filter.finish();
+        tail.push_str(&declined_prose);
         filter.calls = recovery.calls;
 
         // Emit the held-back prose, then the tool calls (if any).
@@ -2509,6 +2286,8 @@ async fn stream_response(live: LiveTurn) -> Response {
         let _ = tx.send(sse::Chunk::Data("[DONE]".into())).await;
 
         state.threads.commit(&key, &session_id, cursor);
+        // Only a turn that succeeded counts toward the periodic reminder.
+        state.threads.bump_exchanges(&key, exchanges);
     });
 
     if stream {
@@ -2840,7 +2619,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(code);
     }
 
-    let profile = log::Profile::from_env();
+    let profile = log::Profile::resolve(config::file_log_level().as_deref());
     log::init(profile);
 
     // Claim the pidfile before doing any work, so a second `serve` fails fast
@@ -3086,6 +2865,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::restart_only_keys;
 
     #[test]
     fn reason_codes_keeps_only_the_code() {
@@ -3101,6 +2881,20 @@ mod tests {
         ];
         assert_eq!(reason_codes(&pending), "bad_json,missing_name,");
         assert_eq!(reason_codes(&[]), "");
+    }
+
+    #[test]
+    fn tool_names_are_logged_and_arguments_are_not() {
+        let call = |name: Option<&str>| dialect::MalformedCall {
+            name: name.map(str::to_string),
+            body: String::from("\"command\": \"secret argument\""),
+            reason: "dsml_unparsable:x".into(),
+        };
+        let long = "n".repeat(100);
+        let pending = vec![call(Some("bash")), call(None), call(Some(&long))];
+        let names = tool_names(&pending);
+        assert_eq!(names, format!("bash,-,{}", "n".repeat(64)));
+        assert!(!names.contains("secret"));
     }
 
     #[tokio::test]
@@ -3398,6 +3192,78 @@ mod tests {
         assert!(prompt.contains("Valid tool names: bash."));
     }
 
+    /// Feed a whole reply through the same scan + accept path the stream uses.
+    fn accept_reply(recovery: &mut Recovery, reply: &str) -> Vec<dialect::ToolCall> {
+        let mut calls = Vec::new();
+        for event in dialect::Dialect::Native.scan(reply) {
+            calls.extend(recovery.accept(event).unwrap());
+        }
+        calls
+    }
+
+    #[test]
+    fn a_nameless_reply_runs_the_one_tool_its_arguments_fit() {
+        // The model sent `command` with no tool name; only bash takes it.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        let calls = accept_reply(&mut recovery, reply);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].json().unwrap()["command"], "ls");
+        assert!(!recovery.has_pending());
+    }
+
+    #[test]
+    fn a_nameless_reply_that_fits_no_tool_stays_malformed() {
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">a</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        assert!(accept_reply(&mut recovery, reply).is_empty());
+        assert!(recovery.has_pending());
+        assert_eq!(recovery.pending[0].name, None);
+        assert!(recovery.pending[0].reason.starts_with("dsml_unparsable:"));
+    }
+
+    #[test]
+    fn a_nameless_reply_matching_two_tools_is_not_run() {
+        let other = serde_json::json!({
+            "type": "function",
+            "function": {"name": "bg_run", "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }}
+        });
+        let specs = dialect::tool_specs(&[tool_with_schema(), other]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let reply = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">rm x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ calls>";
+        assert!(accept_reply(&mut recovery, reply).is_empty());
+        assert!(recovery.has_pending());
+    }
+
+    #[test]
+    fn a_cut_off_call_runs_only_if_its_arguments_are_complete() {
+        // Skipped closers after a whole `command` are fine; `timeout` alone is
+        // not, because bash requires `command`, so the schema check sends it on.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, true, dialect::Dialect::Native);
+        let whole = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜ parameter>";
+        let calls = accept_reply(&mut recovery, whole);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+
+        let mut recovery = Recovery::new(
+            dialect::tool_specs(&[tool_with_schema()]),
+            false,
+            true,
+            dialect::Dialect::Native,
+        );
+        let missing = "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name=\"bash\"><｜｜DSML｜｜ parameter name=\"timeout\" string=\"false\">30</｜｜DSML｜｜ parameter>";
+        assert!(accept_reply(&mut recovery, missing).is_empty());
+        assert!(recovery.has_pending());
+    }
+
     #[test]
     fn a_failed_repair_does_not_grow_the_failure_list() {
         // One bad call; every repair reply is bad too. The model must always be
@@ -3419,6 +3285,71 @@ mod tests {
             recovery.end_repair();
             assert_eq!(recovery.pending.len(), 1, "attempt {attempt}: pending grew");
         }
+    }
+
+    #[test]
+    fn a_repair_that_drops_the_call_delivers_its_answer() {
+        // The model read its bad call and decided none was needed. The failure
+        // must go away and the prose must be what the client gets; carrying the
+        // old failure forward is what looped the repair until the retry budget ran out.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
+        recovery
+            .accept(dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )))
+            .unwrap();
+        let _ = recovery.begin_repair(1);
+        let events = vec![dialect::ScanEvent::Text("The answer is 4.".into())];
+        assert_eq!(
+            recovery.declined_repair(&events).as_deref(),
+            Some("The answer is 4.")
+        );
+        // The loop breaks here, so `end_repair` must not carry the failure over.
+        assert!(!recovery.has_pending());
+    }
+
+    #[test]
+    fn a_repair_that_still_carries_a_call_is_not_declined() {
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, false, false, dialect::Dialect::JsonInvoke);
+        recovery
+            .accept(dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )))
+            .unwrap();
+        let _ = recovery.begin_repair(1);
+        let events = vec![
+            dialect::ScanEvent::Text("Let me fix that.".into()),
+            dialect::ScanEvent::Malformed(dialect::MalformedCall::new(
+                None,
+                "x".into(),
+                "dsml_unparsable:an invoke tag was never closed",
+            )),
+        ];
+        assert_eq!(recovery.declined_repair(&events), None);
+        for event in events {
+            recovery.accept(event).unwrap();
+        }
+        assert!(recovery.has_pending());
+    }
+
+    #[test]
+    fn a_required_call_is_never_declined() {
+        // `tool_choice: "required"` still owes a call, so a prose-only repair
+        // must not end the loop.
+        let specs = dialect::tool_specs(&[tool_with_schema()]);
+        let mut recovery = Recovery::new(specs, true, false, dialect::Dialect::JsonInvoke);
+        recovery.require_call();
+        let _ = recovery.begin_repair(1);
+        let events = vec![dialect::ScanEvent::Text("Here is the answer.".into())];
+        assert_eq!(recovery.declined_repair(&events), None);
+        recovery.end_repair();
+        assert!(recovery.has_pending());
     }
 
     #[test]

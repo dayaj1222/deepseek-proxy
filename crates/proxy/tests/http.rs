@@ -312,6 +312,65 @@ async fn a_repaired_native_call_is_delivered_to_the_client() {
     );
 }
 
+/// Drive `n` plain turns on one thread against a mock and return the prompt the
+/// proxy sent upstream for each. Tools are offered, so the periodic reminder is
+/// eligible every turn.
+async fn prompts_over_turns(env: &[(&str, &str)], turns: usize) -> Vec<String> {
+    let steps = (0..turns)
+        .map(|i| Step::Sse(sse_reply(2 * (i as i64) + 2, 2 * (i as i64) + 1, &["ok"])))
+        .collect();
+    let (upstream, script) = start_mock(MockScript::new(steps)).await;
+    let app = spawn_app_with_env(&upstream, &[("a@example.com", "pw")], env).await;
+    let tools = json!([{"type": "function", "function": {
+        "name": "bash", "description": "run a command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    }}]);
+    let mut messages = vec![json!({"role": "user", "content": "q0"})];
+    for i in 0..turns {
+        let body = json!({"model": "deepseek-chat", "stream": true, "thread_id": "reminders",
+                          "messages": messages, "tools": tools});
+        let resp = complete(&app, body).await;
+        assert_eq!(resp.status(), 200);
+        resp.text().await.unwrap();
+        messages.push(json!({"role": "assistant", "content": "ok"}));
+        messages.push(json!({"role": "user", "content": format!("q{}", i + 1)}));
+    }
+    script.prompts()
+}
+
+const REMINDER_MARK: &str = "Tool-call reminder";
+
+/// Default behaviour is unchanged: the reminder rides on every turn.
+#[tokio::test]
+async fn the_periodic_reminder_is_sent_every_turn_by_default() {
+    let prompts = prompts_over_turns(&[], 3).await;
+    assert_eq!(prompts.len(), 3);
+    for (i, p) in prompts.iter().enumerate() {
+        assert!(p.contains(REMINDER_MARK), "turn {i} lost its reminder: {p}");
+    }
+}
+
+/// `TOOL_REMINDER_INTERVAL=0` switches the periodic reminder off entirely
+/// (the Python proxy's setting: 0 = off).
+#[tokio::test]
+async fn an_interval_of_zero_turns_the_periodic_reminder_off() {
+    let prompts = prompts_over_turns(&[("TOOL_REMINDER_INTERVAL", "0")], 3).await;
+    assert_eq!(prompts.len(), 3);
+    for (i, p) in prompts.iter().enumerate() {
+        assert!(!p.contains(REMINDER_MARK), "turn {i} still has a reminder: {p}");
+    }
+}
+
+/// With an interval of 2 the reminder is due when the thread's exchange count
+/// crosses a multiple of 2: it is absent on the first turn, present on the
+/// second, absent on the third (the count is bumped after each turn).
+#[tokio::test]
+async fn an_interval_of_two_reminds_every_second_exchange() {
+    let prompts = prompts_over_turns(&[("TOOL_REMINDER_INTERVAL", "2")], 3).await;
+    let has: Vec<bool> = prompts.iter().map(|p| p.contains(REMINDER_MARK)).collect();
+    assert_eq!(has, vec![false, true, false], "{prompts:?}");
+}
+
 /// A turn whose repairs all fail answers 502, and the client then retries the
 /// same delta. The failed attempt (the malformed reply plus every correction
 /// exchange) must not stay in the conversation the retry builds on: the cursor
@@ -433,6 +492,66 @@ async fn a_throttled_repair_reply_does_not_move_the_cursor() {
         vec![None, Some(2), Some(4), Some(4)],
         "the repair after a throttled one must parent to 4, not to the discarded 6"
     );
+}
+
+/// A throttle hint on a repair reply arrives as a 200, so the retry loop never
+/// sees it. Before the fix every repair attempt fired back to back and the whole
+/// budget died in about two seconds. The retry must now wait the backoff.
+#[tokio::test]
+async fn a_throttled_repair_waits_before_the_next_attempt() {
+    let bad = format!("{TOOL_OPEN}{{oops}}{TOOL_CLOSE}");
+    let good = format!("{TOOL_OPEN}{{\"command\": \"ls\"}}{TOOL_CLOSE}");
+    let throttled = format!(
+        "{}event: hint\ndata: {}\n\n",
+        sse_reply(6, 5, &[]),
+        json!({"type": "error", "content": "Messages too frequent. Try again later."})
+    );
+    let script = MockScript::new(vec![
+        Step::Sse(sse_reply(2, 1, &["ok"])),
+        Step::Sse(sse_reply(4, 3, &[bad.as_str()])),
+        Step::Sse(throttled),
+        Step::Sse(sse_reply(8, 7, &[good.as_str()])),
+    ]);
+    let (upstream, script) = start_mock(script).await;
+    let app = spawn_app_with_env(
+        &upstream,
+        &[("a@example.com", "pw")],
+        &[
+            ("DIALECT", "json_invoke"),
+            ("TOOL_REPAIR_MAX_RETRIES", "2"),
+            ("RATE_LIMIT_BACKOFF_S", "1"),
+        ],
+    )
+    .await;
+    let tools = json!([{"type": "function", "function": {
+        "name": "bash", "description": "run a command",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    }}]);
+    let turn = |messages: serde_json::Value| {
+        json!({"model": "deepseek-chat", "stream": true, "thread_id": "repair-wait",
+               "messages": messages, "tools": tools})
+    };
+    let resp = complete(&app, turn(json!([{"role": "user", "content": "hi"}]))).await;
+    resp.text().await.unwrap();
+
+    let started = std::time::Instant::now();
+    let resp = complete(
+        &app,
+        turn(json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "list files"}
+        ])),
+    )
+    .await;
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("tool_calls"), "the repair should deliver: {text}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(1),
+        "the retry after a throttled repair must wait the backoff, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(script.completions(), 4, "one throttled and one good repair");
 }
 
 /// The poisoned-cursor regression: DeepSeek answers `{"code":26}` when the

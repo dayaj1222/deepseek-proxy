@@ -653,13 +653,14 @@ fn repair_tier(attempt: usize) -> usize {
 }
 
 /// The tool a repair skeleton is built for: the one the failed call named, if
-/// the request offers it, otherwise the first offered tool.
+/// the request offers it, or the only tool offered. Otherwise `None`: guessing
+/// one (the first in the list) would point the model at an arbitrary tool.
 fn skeleton_target<'a>(malformed: &[MalformedCall], specs: &'a [ToolSpec]) -> Option<&'a ToolSpec> {
     malformed
         .iter()
         .filter_map(|m| m.name.as_deref())
         .find_map(|n| specs.iter().find(|s| s.name == n))
-        .or_else(|| specs.first())
+        .or_else(|| if specs.len() == 1 { specs.first() } else { None })
 }
 
 /// A tool's arguments as (name, takes text), required ones first.
@@ -693,10 +694,11 @@ fn tool_params(spec: &ToolSpec) -> Vec<(String, bool)> {
     first
 }
 
-/// The shape of one call to `spec`, every value a placeholder. With a marker the
-/// tags carry it (the literal form); without, they are bare (the form shown on
-/// the third repair, which leaves the marker for the model to add).
-fn call_skeleton(spec: &ToolSpec, marker: Option<&str>) -> String {
+/// The shape of one call, every value a placeholder. With a marker the tags
+/// carry it (the literal form); without, they are bare (the form shown on
+/// repairs 1-4, which leaves the marker for the model to add). With no `spec`
+/// the tool and argument names are placeholders too.
+fn call_skeleton(spec: Option<&ToolSpec>, marker: Option<&str>) -> String {
     let tag = |close: bool, element: &str, attrs: &str| {
         let slash = if close { "/" } else { "" };
         match marker {
@@ -704,21 +706,18 @@ fn call_skeleton(spec: &ToolSpec, marker: Option<&str>) -> String {
             None => format!("<{slash}{element}{attrs}>"),
         }
     };
+    let (tool, params) = match spec {
+        Some(spec) => (spec.name.clone(), tool_params(spec)),
+        None => ("TOOL_NAME".to_string(), vec![("ARGUMENT_NAME".to_string(), true)]),
+    };
     let mut out = String::new();
     out.push_str(&tag(false, "calls", ""));
     out.push('\n');
-    out.push_str(&format!(
-        "  {}\n",
-        tag(false, "invoke", &format!(" name=\"{}\"", spec.name))
-    ));
-    for (name, text) in tool_params(spec) {
+    out.push_str(&format!("  {}\n", tag(false, "invoke", &format!(" name=\"{tool}\""))));
+    for (name, text) in params {
         out.push_str(&format!(
             "    {}VALUE{}\n",
-            tag(
-                false,
-                "parameter",
-                &format!(" name=\"{name}\" string=\"{text}\"")
-            ),
+            tag(false, "parameter", &format!(" name=\"{name}\" string=\"{text}\"")),
             tag(true, "parameter", "")
         ));
     }
@@ -727,38 +726,52 @@ fn call_skeleton(spec: &ToolSpec, marker: Option<&str>) -> String {
     out
 }
 
-/// What a native repair attempt escalates to once the plain structure has not
-/// worked: from the third attempt the actual call shape, marker left out; from
-/// the fifth the full literal, to repeat verbatim. `None` means stay plain
-/// (earlier attempts, or no tool to build a skeleton from).
+/// What a native repair attempt says. Every attempt shows the call's actual
+/// shape (the marker left out) so one slip leaves the model a structure to fill
+/// in; from the fifth the full literal, to repeat verbatim. `None` means there
+/// is no offered tool at all, so the caller stays with the plain description.
 fn native_escalation(
     attempt: usize,
     malformed: &[MalformedCall],
     specs: &[ToolSpec],
 ) -> Option<(&'static str, String)> {
-    if attempt < 3 {
+    if specs.is_empty() {
         return None;
     }
-    let spec = skeleton_target(malformed, specs)?;
+    let spec = skeleton_target(malformed, specs);
+    let subject = match spec {
+        Some(spec) => format!("a call to {}", spec.name),
+        None => "a tool call".to_string(),
+    };
     if attempt >= 5 {
         let literal = call_skeleton(spec, Some(&crate::dialect_dsml::marker()));
+        let replace = if spec.is_some() {
+            "each VALUE"
+        } else {
+            "TOOL_NAME, ARGUMENT_NAME and each VALUE"
+        };
         Some((
             "Last attempt.",
             format!(
-                "Repeat the following call VERBATIM, changing only each VALUE to the real value, \
-                 and send nothing else:\n\n{literal}"
+                "Repeat the following call VERBATIM, changing only {replace} to the real \
+                 thing, and send nothing else:\n\n{literal}"
             ),
         ))
     } else {
+        let intro = if attempt <= 1 {
+            "That tool call could not be run, so nothing happened. The problem is only the \
+             call's format, not what you were trying to do."
+        } else {
+            "Still not usable."
+        };
         let shape = call_skeleton(spec, None);
         Some((
-            "Still not usable.",
+            intro,
             format!(
-                "This is the exact shape of a call to {}, with the marker words left out. Add the \
+                "This is the exact shape of {subject}, with the marker words left out. Add the \
                  DSML tags yourself, in the same places, and fill in the values:\n\n{shape}\n\n\
                  string=\"true\" is for text, \"false\" for numbers, booleans and JSON. Every closing \
-                 tag repeats its own element word. Send only this call, nothing else.",
-                spec.name
+                 tag repeats its own element word. Send only this call, nothing else."
             ),
         ))
     }
@@ -856,7 +869,8 @@ pub fn build_repair_prompt_for(
             ));
         }
     }
-    if !specs.is_empty() {
+    // Native: the model already has its tools; the list only added noise.
+    if !specs.is_empty() && !native {
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         out.push_str(&format!("\nValid tool names: {}.", names.join(", ")));
     }
@@ -871,8 +885,8 @@ pub fn build_repair_prompt_for(
         0 => {
             if native {
                 out.push_str(
-                    "\nCheck the tool name against the valid list above and that its arguments \
-                     are complete and valid, then emit the call once.\n",
+                    "\nCheck that the tool name and its arguments are complete and valid, \
+                     then emit the call once.\n",
                 );
             } else {
                 out.push_str(
@@ -1016,6 +1030,51 @@ pub enum ScanEvent {
     Text(String),
     Tool(ToolCall),
     Malformed(MalformedCall),
+    /// A block whose tool name is missing but whose arguments are intact.
+    /// `malformed` is what it becomes when `infer_tool_name` finds no tool.
+    Nameless {
+        args: serde_json::Map<String, serde_json::Value>,
+        malformed: MalformedCall,
+    },
+}
+
+/// The tool a nameless block was meant for, inferred from its argument names.
+///
+/// A tool qualifies when its schema declares every argument given, and every
+/// argument it requires is present. If more than one tool qualifies, or none
+/// does, nothing is inferred and the caller treats the block as malformed.
+pub fn infer_tool_name(
+    specs: &[ToolSpec],
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    if args.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for spec in specs {
+        let Some(params) = spec.raw.get("function").and_then(|f| f.get("parameters")) else {
+            continue;
+        };
+        let Some(props) = params.get("properties").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let required_present = params
+            .get("required")
+            .and_then(|r| r.as_array())
+            .is_none_or(|req| {
+                req.iter()
+                    .filter_map(|k| k.as_str())
+                    .all(|k| args.contains_key(k))
+            });
+        if !required_present || !args.keys().all(|k| props.contains_key(k)) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(spec.name.clone());
+    }
+    found
 }
 
 /// Split model text into ordered text / tool / malformed events.
@@ -1217,8 +1276,8 @@ mod tests {
     #[test]
     fn native_reminder_stays_short_and_vocabulary_free() {
         let r = crate::dialect_simple::native_reminder().to_lowercase();
+        // The format may be named in words (ADR-0017); the marker may not.
         for banned in [
-            "dsml",
             "invoke",
             "parameter",
             "<",
@@ -1232,37 +1291,30 @@ mod tests {
         assert!(r.contains("one call per response"));
     }
 
-    /// Repairs 1 and 2: the structure in plain words (nesting, what each level
-    /// carries, each closer matches its own block). No vocabulary, no markup.
+    /// With no offered tool to build a skeleton from, repairs fall back to the
+    /// structure in plain words: no vocabulary, no markup.
     #[test]
-    fn native_first_repairs_describe_structure_without_vocabulary() {
+    fn native_repair_without_tools_describes_structure_without_vocabulary() {
         let bad = unreadable();
         let mut texts = vec![Dialect::Native.wire_shape()];
-        for attempt in 1..=2 {
-            texts.push(build_repair_prompt_for(
-                &Dialect::Native,
-                &bad,
-                &[bash_with_timeout()],
-                attempt,
-            ));
+        for attempt in 1..=4 {
+            texts.push(build_repair_prompt_for(&Dialect::Native, &bad, &[], attempt));
         }
         for t in &texts {
             let lower = t.to_lowercase();
             for banned in ["dsml", "invoke", "parameter", "<", ">", "\u{FF5C}", "|"] {
                 assert!(!lower.contains(banned), "{banned:?} in: {t}");
             }
-            assert!(t.contains("closing marker"), "{t}");
-            assert!(t.contains("innermost"), "{t}");
-            assert!(t.contains("outer call block"), "{t}");
         }
+        assert!(texts[0].contains("closing marker") && texts[0].contains("outer call block"));
     }
 
-    /// Repairs 3 and 4: the actual shape of a call to the actual tool, with the
+    /// Repairs 1-4: the actual shape of a call to the actual tool, with the
     /// marker left out, and a short note to add the DSML tags itself.
     #[test]
-    fn native_third_and_fourth_repairs_show_the_markerless_skeleton() {
+    fn native_repairs_one_to_four_show_the_markerless_skeleton() {
         let bad = unreadable();
-        for attempt in [3, 4] {
+        for attempt in [1, 2, 3, 4] {
             let t =
                 build_repair_prompt_for(&Dialect::Native, &bad, &[bash_with_timeout()], attempt);
             assert!(t.contains("<calls>"), "attempt {attempt}: {t}");
@@ -1275,6 +1327,53 @@ mod tests {
             assert!(t.contains("DSML tags yourself"), "{t}");
             assert!(!t.contains('\u{FF5C}'), "the marker must be left out: {t}");
         }
+    }
+
+    fn read_spec() -> ToolSpec {
+        ToolSpec {
+            name: "read".into(),
+            raw: json!({"type": "function", "function": {
+                "name": "read", "description": "read",
+                "parameters": {"type": "object",
+                    "properties": {"path": {"type": "string"}}, "required": ["path"]}
+            }}),
+        }
+    }
+
+    /// The tool list is not repeated in native repair prompts: the model already
+    /// has its tools, and the list only added noise.
+    #[test]
+    fn native_repairs_do_not_list_tool_names() {
+        let specs = [bash_with_timeout(), read_spec()];
+        for attempt in 1..=6 {
+            let t = build_repair_prompt_for(&Dialect::Native, &unreadable(), &specs, attempt);
+            assert!(!t.contains("Valid tool names"), "attempt {attempt}: {t}");
+            assert!(!t.contains("valid list"), "attempt {attempt}: {t}");
+            // The unrelated tool (its name attribute and its argument) must
+            // not leak into a prompt about a bash call.
+            assert!(!t.contains("name=\"read\"") && !t.contains("\"path\""), "an unrelated tool leaked: {t}");
+        }
+        // The other dialects keep the list (Python parity).
+        let json_prompt = build_repair_prompt_for(&Dialect::JsonInvoke, &unreadable(), &specs, 1);
+        assert!(json_prompt.contains("Valid tool names:"), "{json_prompt}");
+    }
+
+    /// When the failed call named no real tool, the skeleton uses placeholders
+    /// instead of guessing a tool for the model.
+    #[test]
+    fn native_skeleton_is_generic_when_the_failed_tool_is_unknown() {
+        let unknown = [MalformedCall::new(Some("bsh".into()), "".into(), "unknown_or_disallowed_tool")];
+        let specs = [bash_with_timeout(), read_spec()];
+        let t = build_repair_prompt_for(&Dialect::Native, &unknown, &specs, 2);
+        assert!(t.contains("<invoke name=\"TOOL_NAME\">"), "{t}");
+        assert!(t.contains("<parameter name=\"ARGUMENT_NAME\" string=\"true\">VALUE</parameter>"), "{t}");
+        assert!(!t.contains("bash") && !t.contains("read"), "{t}");
+        // With exactly one offered tool the skeleton is that tool's.
+        let one = build_repair_prompt_for(&Dialect::Native, &unknown, &[read_spec()], 2);
+        assert!(one.contains("<invoke name=\"read\">") && one.contains("name=\"path\""), "{one}");
+        // The literal form is generic too, and says what to replace.
+        let literal = build_repair_prompt_for(&Dialect::Native, &unknown, &specs, 5);
+        assert!(literal.contains("TOOL_NAME") && literal.contains("ARGUMENT_NAME"), "{literal}");
     }
 
     /// Repair 5 and later: the full literal call, marker included, to repeat
@@ -1782,6 +1881,8 @@ impl StreamToolFilter {
                 ScanEvent::Text(text) => prose.push_str(&text),
                 ScanEvent::Tool(call) => self.calls.push(call),
                 ScanEvent::Malformed(bad) => self.malformed.push(bad),
+                // Inference needs the tool list, which only `Recovery` has.
+                ScanEvent::Nameless { malformed, .. } => self.malformed.push(malformed),
             }
         }
         prose
@@ -2033,5 +2134,65 @@ mod stream_tests {
         let out = f.feed("<invoke name=\"t\">{\"a\":1}</invoke> done");
         assert_eq!(out, " done");
         assert_eq!(f.calls.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod infer_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool(name: &str, params: serde_json::Value) -> serde_json::Value {
+        json!({"type": "function", "function": {"name": name, "parameters": params}})
+    }
+
+    fn args(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn the_one_tool_whose_schema_fits_is_inferred() {
+        let specs = tool_specs(&[
+            tool(
+                "bash",
+                json!({"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}, "required": ["command"]}),
+            ),
+            tool(
+                "edit",
+                json!({"type": "object", "properties": {"edits": {"type": "array"}}, "required": ["edits"]}),
+            ),
+        ]);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"command": "ls"}))).as_deref(),
+            Some("bash")
+        );
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"edits": []}))).as_deref(),
+            Some("edit")
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_match_is_not_inferred() {
+        let schema = json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]});
+        let specs = tool_specs(&[tool("bash", schema.clone()), tool("bg_run", schema)]);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"command": "ls"}))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_required_or_unknown_argument_is_not_inferred() {
+        let specs = tool_specs(&[tool(
+            "read",
+            json!({"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}}, "required": ["path"]}),
+        )]);
+        assert_eq!(infer_tool_name(&specs, &args(json!({"offset": 3}))), None);
+        assert_eq!(
+            infer_tool_name(&specs, &args(json!({"path": "a", "mode": "x"}))),
+            None
+        );
+        assert_eq!(infer_tool_name(&specs, &args(json!({}))), None);
     }
 }
