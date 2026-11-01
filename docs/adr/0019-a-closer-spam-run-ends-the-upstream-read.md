@@ -1,6 +1,6 @@
 # ADR-0019: A run of four bare closers ends the upstream read
 
-**Status:** accepted (2026-11-01)
+**Status:** accepted (2026-11-01); amended by ADR-0020 (the cut now stops the remote message first)
 **Supersedes / amends:** none. Sits beside ADR-0011, which is unchanged.
 
 ## Context

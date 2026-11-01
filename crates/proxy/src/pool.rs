@@ -809,7 +809,7 @@ impl Pool {
         max_retries: u32,
         backoff_secs: f64,
         mut on_retry: impl FnMut(u32, f64),
-    ) -> Result<(reqwest::Response, RateTicket), PoolError> {
+    ) -> Result<(client::Completion, RateTicket), PoolError> {
         let backoff = backoff_secs.max(0.5);
         let mut attempt = 0u32;
         let mut conn = self.route(thread_id).await;
@@ -832,7 +832,6 @@ impl Pool {
                 Err(e) => return Err(PoolError::Queue(e)),
             };
             let client = conn.client().await;
-
             match client.stream_completion(body).await {
                 Ok(resp) => {
                     conn.record_success();

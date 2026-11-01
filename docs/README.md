@@ -44,3 +44,4 @@ give back.
 | [0017](adr/0017-native-prompts-may-name-the-format-not-the-marker.md) | Native prompts may name the DSML format in words; the marker and markup stay out |
 | [0018](adr/0018-accept-a-call-cut-off-after-its-last-argument.md) | A call cut off after its last whole argument is accepted |
 | [0019](adr/0019-a-closer-spam-run-ends-the-upstream-read.md) | A run of four bare closers ends the upstream read |
+| [0020](adr/0020-stop-the-remote-message-before-closing.md) | The client stops the remote message before it closes the connection (amends 0019) |

@@ -6,6 +6,20 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-01 - Stop the remote message before closing the connection
+
+**Closing the connection left DeepSeek's message `wip`.** After the closer-spam
+cut, the next request on that message failed with `biz_code 11, message still
+wip`, so the thread could not continue. A HAR of the web client's stop button
+showed the missing step: `POST /api/v0/chat/stop_stream` with the session and
+message id.
+
+The stop now lives in the `client` crate. `stream_completion` returns a
+`Completion` that stops its message when asked (`stop()`) and, when dropped
+unfinished, in the background. Every early exit benefits: the cut, a client
+hang-up, a timeout, an error. Decision and the rejected proxy-level alternative:
+ADR-0020, which amends ADR-0019.
+
 ## 2026-11-01 - Closer spam ends the upstream read
 
 **The model burned its whole token budget spraying closing tags.** It repeated

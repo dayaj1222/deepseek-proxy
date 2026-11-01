@@ -239,6 +239,7 @@ fn push_capped(head: &mut String, text: &str, max: usize) {
 /// Bytes of trailing text inspected for closer spam on every delta (ADR-0019).
 const CLOSER_TAIL_CAP: usize = 256;
 
+
 /// Append `text` to `tail`, keeping only the last `max` bytes, cut forward to a
 /// character boundary so the buffer stays valid UTF-8.
 fn push_tail(tail: &mut String, text: &str, max: usize) {
@@ -253,7 +254,7 @@ fn push_tail(tail: &mut String, text: &str, max: usize) {
 }
 
 pub async fn pump(
-    resp: reqwest::Response,
+    resp: client::Completion,
     tx: &ChunkSender,
     id: &str,
     model: &str,
@@ -303,7 +304,9 @@ pub async fn pump(
     // holds the most recent bytes, because a run only exists at the end.
     let mut tail = String::new();
 
-    let mut byte_stream = resp.bytes_stream();
+    // The completion stops the remote message itself when asked or dropped
+    // early (ADR-0020); the pump only decides when to ask.
+    let mut byte_stream = resp;
     'read: loop {
         // Python's `stream()` waits `heartbeat_interval` for the next event and
         // emits `: keep-alive` on timeout — it does NOT kill the stream. The
@@ -483,6 +486,16 @@ pub async fn pump(
             // stream and its socket are dropped on return, which is the stop
             // signal. The turn itself is not a failure (ADR-0019).
             if dialect_dsml::trailing_bare_closers(&tail) >= dialect_dsml::CLOSER_SPAM_THRESHOLD {
+                // Stop the remote message while the connection is still open,
+                // as the web stop button does. Without it DeepSeek keeps the
+                // message `wip` and rejects the next turn that parents to it.
+                if let Err(e) = byte_stream.stop().await {
+                    tracing::warn!(
+                        thread = %id,
+                        cause = %crate::log::error_chain(&e),
+                        "stop_stream failed; closing the connection anyway"
+                    );
+                }
                 ended = "closer spam";
                 break 'read;
             }
@@ -642,7 +655,7 @@ mod tests {
     }
 
     /// A stream opener, then one network chunk per entry in `chunks`.
-    fn upstream(chunks: &[String]) -> reqwest::Response {
+    fn upstream(chunks: &[String]) -> client::Completion {
         let mut opener = String::from(
             "event: ready\ndata: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}\n\n",
         );
@@ -650,7 +663,11 @@ mod tests {
         let mut all = vec![Ok::<_, std::io::Error>(opener)];
         all.extend(chunks.iter().cloned().map(Ok));
         let body = reqwest::Body::wrap_stream(futures_util::stream::iter(all));
-        reqwest::Response::from(axum::http::Response::new(body))
+        // Nothing listens on port 9, so a stop from a test fails fast and is
+        // only logged; the stop's wire shape is tested in the client crate.
+        let client = client::Client::with_base_url("test".into(), "http://127.0.0.1:9");
+        let resp = reqwest::Response::from(axum::http::Response::new(body));
+        client::Completion::new(resp, client, "session".into())
     }
 
     async fn pump_chunks(chunks: &[String]) -> Pumped {

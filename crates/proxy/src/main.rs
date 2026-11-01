@@ -705,7 +705,7 @@ async fn completion_with_retry(
     state: &AppState,
     thread_id: &str,
     body: &CompletionBody,
-) -> Result<(reqwest::Response, pool::RateTicket), CompletionError> {
+) -> Result<(client::Completion, pool::RateTicket), CompletionError> {
     state
         .pool()
         .complete(
@@ -1190,7 +1190,7 @@ struct LiveTurn {
     guard: tokio::sync::OwnedMutexGuard<()>,
     state: AppState,
     key: String,
-    resp: reqwest::Response,
+    resp: client::Completion,
     slot: pool::RateTicket,
     /// Upstream body, re-sent for retries and correction turns.
     body: CompletionBody,
