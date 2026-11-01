@@ -76,10 +76,7 @@ pub(crate) struct AppState {
 impl AppState {
     /// Snapshot the current pool. One Arc clone; safe to hold for a whole turn.
     pub(crate) fn pool(&self) -> Arc<pool::Pool> {
-        self.pool
-            .read()
-            .expect("pool lock poisoned")
-            .clone()
+        self.pool.read().expect("pool lock poisoned").clone()
     }
 
     /// Install a rebuilt pool. Turns already running keep their snapshot.
@@ -158,7 +155,11 @@ impl SettingsHandle {
 
     /// `(generation, seconds_since_last_successful_load, last_error)`.
     pub(crate) fn snapshot(&self) -> (u64, u64, Option<String>) {
-        let last_error = self.last_error.lock().expect("settings lock poisoned").clone();
+        let last_error = self
+            .last_error
+            .lock()
+            .expect("settings lock poisoned")
+            .clone();
         (
             self.generation.load(Ordering::Relaxed),
             self.loaded_at
@@ -178,10 +179,7 @@ impl SettingsHandle {
 
     /// Cheap: one Arc clone under a read lock, never held across an await.
     pub(crate) fn get(&self) -> Arc<Settings> {
-        self.current
-            .read()
-            .expect("settings lock poisoned")
-            .clone()
+        self.current.read().expect("settings lock poisoned").clone()
     }
 }
 

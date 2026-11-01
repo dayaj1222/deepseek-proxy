@@ -49,10 +49,7 @@ use admin::{admin_rebind, admin_throttled, build_id};
 use axum::{
     extract::State,
     http::HeaderMap,
-    response::{
-        sse::Sse,
-        IntoResponse, Response,
-    },
+    response::{sse::Sse, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -65,7 +62,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use threads::ThreadState;
 use tracing::Instrument;
-
 
 /// Prompts for one turn: the delta the session needs now, and the full
 /// flattened transcript used to rebuild the session when it overflows.
@@ -491,12 +487,7 @@ async fn readyz(State(state): State<AppState>) -> Response {
 /// Unknown route: `404` in the OpenAI error envelope, so SDK clients parse it
 /// instead of choking on axum's empty-body default.
 async fn fallback() -> Response {
-    ProxyError::new(
-        "Not Found",
-        axum::http::StatusCode::NOT_FOUND,
-        "not_found",
-    )
-    .into_response()
+    ProxyError::new("Not Found", axum::http::StatusCode::NOT_FOUND, "not_found").into_response()
 }
 
 /// Echo `x-request-id`, or mint one, and carry it in every log line.
@@ -577,7 +568,6 @@ async fn method_not_allowed() -> Response {
     )
     .into_response()
 }
-
 
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
@@ -679,8 +669,8 @@ fn unauthorized(missing: bool) -> Response {
     } else {
         ("Invalid API key", "invalid_api_key")
     };
-    let mut resp = ProxyError::new(message, axum::http::StatusCode::UNAUTHORIZED, code)
-        .into_response();
+    let mut resp =
+        ProxyError::new(message, axum::http::StatusCode::UNAUTHORIZED, code).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str("Bearer") {
         resp.headers_mut()
             .insert(axum::http::header::WWW_AUTHENTICATE, v);
@@ -994,7 +984,6 @@ impl Recovery {
     }
 }
 
-
 /// Wait before retry number `attempt` (0-based).
 ///
 /// Python: `backoff * min(attempt + 1, max(1, max_retries))`, with the base
@@ -1292,8 +1281,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             let (resp, slot) = next.take().expect("attempt in flight");
             let account = slot.account.clone();
             // Hold the account's rate slot until the upstream body is drained.
-            let idle =
-                std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
+            let idle = std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
             // The whole turn is bounded, like `asyncio.timeout(REQUEST_TIMEOUT)`.
             // A stalled upstream becomes a visible error instead of a hang.
             let budget = std::time::Duration::from_secs_f64(turn_settings.request_timeout_secs)
@@ -1724,7 +1712,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Some(result) => result,
                 None => return,
             };
-            let (resp, _slot) = match completion {
+            let (mut resp, _slot) = match completion {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(thread = %key, attempt, error = %e, "repair completion failed");
@@ -1732,8 +1720,13 @@ async fn stream_response(live: LiveTurn) -> Response {
                     break;
                 }
             };
-            let raw = match until_client_disconnect(&tx, resp.text()).await {
-                Some(Ok(text)) => text,
+            let raw = match until_client_disconnect(&tx, sse::read_body(&mut resp, &key)).await {
+                Some(Ok(body)) => {
+                    if body.cut {
+                        tracing::info!(thread = %key, attempt, "repair reply cut at closer spam");
+                    }
+                    body.raw
+                }
                 Some(Err(e)) => {
                     tracing::error!(
                         thread = %key,
@@ -2441,7 +2434,10 @@ mod tests {
         drop(rx);
 
         assert_eq!(waiter.await.unwrap(), None);
-        assert!(dropped.load(Ordering::Relaxed), "repair future was not cancelled");
+        assert!(
+            dropped.load(Ordering::Relaxed),
+            "repair future was not cancelled"
+        );
     }
 
     fn msg_with(role: &str, content: &str) -> Msg {
@@ -2798,7 +2794,10 @@ mod tests {
         recovery.accept(bad()).unwrap();
         for attempt in 1..=5 {
             let _ = recovery.begin_repair(attempt);
-            assert_eq!(recovery.expected, 1, "attempt {attempt} must still expect one call");
+            assert_eq!(
+                recovery.expected, 1,
+                "attempt {attempt} must still expect one call"
+            );
             recovery.accept(bad()).unwrap(); // the repair reply failed again
             recovery.end_repair();
             assert_eq!(recovery.pending.len(), 1, "attempt {attempt}: pending grew");
@@ -2894,11 +2893,14 @@ mod tests {
 
     #[test]
     fn history_is_role_labelled() {
-        let text = flatten_transcript(&[
-            msg_with("system", "be nice"),
-            msg_with("user", "hi"),
-            msg_with("assistant", "hello"),
-        ], dialect::Dialect::JsonInvoke);
+        let text = flatten_transcript(
+            &[
+                msg_with("system", "be nice"),
+                msg_with("user", "hi"),
+                msg_with("assistant", "hello"),
+            ],
+            dialect::Dialect::JsonInvoke,
+        );
         assert_eq!(text, "System: be nice\n\nUser: hi\n\nAssistant: hello");
     }
 
@@ -2987,7 +2989,8 @@ mod tests {
             (None, "repair_omitted_call"),
             (Some("bash".to_string()), "unterminated_block"),
         ] {
-            let mut recovery = Recovery::new(specs.clone(), false, true, dialect::Dialect::JsonInvoke);
+            let mut recovery =
+                Recovery::new(specs.clone(), false, true, dialect::Dialect::JsonInvoke);
             recovery.pending.push(dialect::MalformedCall::new(
                 name.clone(),
                 String::new(),
@@ -3064,9 +3067,15 @@ mod tests {
         // SDKs branch on `error.type`, so it must track the status, not the code.
         for (status, expected) in [
             (axum::http::StatusCode::BAD_REQUEST, "invalid_request_error"),
-            (axum::http::StatusCode::UNAUTHORIZED, "invalid_request_error"),
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_request_error",
+            ),
             (axum::http::StatusCode::NOT_FOUND, "invalid_request_error"),
-            (axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+            ),
             (axum::http::StatusCode::BAD_GATEWAY, "server_error"),
             (axum::http::StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         ] {
@@ -3076,7 +3085,6 @@ mod tests {
             assert_eq!(payload["error"]["code"], "some_code");
         }
     }
-
 
     #[test]
     fn reminder_text_names_the_failure_modes() {

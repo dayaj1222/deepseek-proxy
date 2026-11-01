@@ -6,6 +6,16 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-01 - The closer-spam cut also covers the tool repair read
+
+**A repair reply could repeat closing tags for hundreds of lines.** The repair
+turn is non-streaming and read its whole body with `text()`, so the closer-spam
+cut in `sse::pump` never ran on it, and no stop was sent. The repair now reads
+through `sse::read_body`, which applies the same check (`dialect_dsml::closer_spam`)
+and stops the remote message on a cut. A cut is logged at info with the attempt.
+Limit: the check counts bare closers in a plain run; a run interleaved with bare
+opening tags does not reach the threshold and is not cut.
+
 ## 2026-11-01 - Stop the remote message before closing the connection
 
 **Closing the connection left DeepSeek's message `wip`.** After the closer-spam
