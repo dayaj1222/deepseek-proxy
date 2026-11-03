@@ -9,3 +9,6 @@ target/
 .env
 *.log
 *.db.pre-local-*
+
+# generated evidence index (AGENTS.md) - local only
+openwiki/
