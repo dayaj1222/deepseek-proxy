@@ -1621,6 +1621,17 @@ async fn rebind(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         all = true;
         dry_run = true;
     }
+    if let Some(t) = &thread {
+        // `rebind next` reads like "rebind the next thread" and used to rebind a
+        // *thread literally named `next`*, silently leaving the conversation you
+        // were looking at untouched. The account is `--account`; say so.
+        if matches!(t.as_str(), "next" | "fresh" | "current") || t.contains('@') {
+            eprintln!(
+                "'{t}' is an account target, not a thread; use --account {t} (or name the thread id)"
+            );
+            return Ok(2);
+        }
+    }
     if thread.is_some() && all {
         eprintln!("give a thread or --all, not both\n");
         return Ok(2);

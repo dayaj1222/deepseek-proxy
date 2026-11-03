@@ -21,6 +21,12 @@ pub(crate) enum CompletionError {
     LoginDead(String),
     /// Queue full or queue wait timed out; maps to 503 `queue_unavailable`.
     QueueUnavailable(String),
+    /// The backend muted the account until `until` (unix seconds); maps to 429
+    /// `account_muted` with the real deadline as `Retry-After`.
+    AccountMuted {
+        retry_after_s: u64,
+        until: i64,
+    },
     Other(String),
 }
 
@@ -32,6 +38,13 @@ impl From<pool::PoolError> for CompletionError {
             pool::PoolError::RateLimited { retry_after_s } => {
                 CompletionError::RateLimited { retry_after_s }
             }
+            pool::PoolError::Muted {
+                retry_after_s,
+                until,
+            } => CompletionError::AccountMuted {
+                retry_after_s,
+                until,
+            },
             pool::PoolError::Other(m) => CompletionError::Other(m),
         }
     }
@@ -46,6 +59,10 @@ impl std::fmt::Display for CompletionError {
             ),
             CompletionError::LoginDead(msg) | CompletionError::Other(msg) => f.write_str(msg),
             CompletionError::QueueUnavailable(msg) => f.write_str(msg),
+            CompletionError::AccountMuted { retry_after_s, .. } => write!(
+                f,
+                "DeepSeek muted this account (retry after {retry_after_s}s)"
+            ),
         }
     }
 }
@@ -147,6 +164,28 @@ pub(crate) async fn error_for(state: &AppState, key: &str, err: CompletionError)
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "queue_unavailable",
             )
+        }
+        CompletionError::AccountMuted {
+            retry_after_s,
+            until,
+        } => {
+            // The account is time-muted by DeepSeek, not broken and not
+            // throttled: say so, and put the real deadline in Retry-After.
+            tracing::error!(
+                thread = %key,
+                until,
+                retry_after_s,
+                "account muted by the backend"
+            );
+            let mut e = ProxyError::new(
+                format!(
+                    "DeepSeek account is muted until {until} (unix); retry after {retry_after_s}s"
+                ),
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "account_muted",
+            );
+            e.retry_after = Some(retry_after_s.max(1));
+            e
         }
         CompletionError::Other(msg) => {
             tracing::error!(thread = %key, error = %msg, "backend request failed");

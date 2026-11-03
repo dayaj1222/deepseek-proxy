@@ -6,7 +6,36 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
-## 2026-11-01 - The closer-spam cut also covers the tool repair read
+## 2026-11-03 - A backend mute is its own failure, with a real deadline
+
+**`{"biz_code":5,"biz_msg":"user is muted"}` was reported as a generic 502
+`backend_error`,** because it matched none of the hint classifiers: not a
+context limit, not a rate-limit marker, not a dead login. The message says
+exactly what happened and carries `biz_data.mute_until` (epoch seconds as a
+float), so treating it as "backend request failed" hid both the reason and the
+recovery time — and routed the thread straight back to the muted account on the
+next turn.
+
+A mute is now `CompletionError::AccountMuted` → HTTP 429 `account_muted`, with
+the deadline in the message and `Retry-After`. `Pool::mute` records
+`mute_until` on the account; `Connection::healthy()` treats a muted account as
+unhealthy, so routing sends new threads elsewhere and moves existing ones off,
+and the cooldown shows up in `/admin/throttled` where `deepseek-rs rebind` reads
+it. Deliberately **not** `record_failure`: a mute is not a fault and its
+recovery time is known, so it must not compound the exponential breaker.
+
+The turn that hits the mute rebinds the running thread once (`AccountTarget::Next`,
+`RebuildReason::Manual`) and replays the transcript, so the mute does not reach
+the client when another account can serve. If no rebind is possible, the 429 is
+returned rather than a 502.
+
+Also: `deepseek-rs rebind next` used to rebind a thread literally named `next`
+(the positional argument is the thread, not the account), silently leaving the
+conversation untouched. That now fails with a hint to use `--account next`.
+Limit: a mute is held in memory only; a proxy restart forgets it and the
+account is retried once.
+
+
 
 **A repair reply could repeat closing tags for hundreds of lines.** The repair
 turn is non-streaming and read its whole body with `text()`, so the closer-spam

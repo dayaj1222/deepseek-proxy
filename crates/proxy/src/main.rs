@@ -1244,6 +1244,10 @@ async fn stream_response(live: LiveTurn) -> Response {
         // exhausted (or empty) is the session itself presumed gone and the
         // expensive replay path taken.
         let mut rewinds: usize = 0;
+        // Whether this turn already tried to escape a backend mute. One attempt
+        // is enough: if the landing account is muted too, reporting that is
+        // more useful than hopping through every account in the pool.
+        let mut mute_recovered = false;
         let mut body = body;
         // The conversation cursor, ported from aiodeepseek's
         // `Conversation._parent_message_id`: the id of the NEWEST upstream
@@ -1487,6 +1491,90 @@ async fn stream_response(live: LiveTurn) -> Response {
                         return;
                     }
                 }
+            } else if pool::is_muted(&hint) {
+                // DeepSeek muted the account itself: 200 OK with a JSON body
+                // that is not SSE. This is more specific than a generic backend
+                // error and it is not a throttle — retrying the same account
+                // cannot work until `mute_until`.
+                let until =
+                    pool::mute_until_secs(&hint).unwrap_or_else(|| sse::unix_secs() as i64 + 60);
+                state.stats.errors.fetch_add(1, Ordering::Relaxed);
+                // Mark the account unhealthy until the mute deadline, so the
+                // next turn on this thread is routed off it.
+                state.pool().mute(&account, until);
+                if let Err(e) = state.store.mark_throttled(&key) {
+                    tracing::warn!(thread = %key, error = %e, "could not record mute");
+                }
+                tracing::error!(thread = %key, account = %account, until, "upstream muted the account: {hint}");
+                // A mute rebinds the running thread for this turn. The mute just
+                // marked the account unhealthy, so `Next` cannot land back on it,
+                // and the transcript is replayed into a session that has never
+                // seen this conversation.
+                if !mute_recovered && !pumped.emitted && can_recover {
+                    mute_recovered = true;
+                    attempt += 1;
+                    let change = session::ThreadChange::Rebind {
+                        target: pool::AccountTarget::Next,
+                        reason: session::RebuildReason::Manual,
+                    };
+                    match session::open_session(&state, &key, change).await {
+                        Ok(fresh) => {
+                            tracing::warn!(thread = %key, "muted; rebound the thread and replaying the transcript");
+                            let thinking = body.thinking_enabled;
+                            let search = body.search_enabled;
+                            body = completion_body(
+                                &fresh,
+                                &replay,
+                                thinking,
+                                search,
+                                &body.ref_file_ids,
+                                &body.model_type,
+                            );
+                            session_id = fresh.session_id.clone();
+                            cursor = None;
+                            match completion_with_retry(&state, &key, &body).await {
+                                Ok(v) => {
+                                    next = Some(v);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    fail_turn(
+                                        &state,
+                                        &key,
+                                        &session_id,
+                                        cursor,
+                                        &tx,
+                                        error_for(&state, &key, e).await,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            fail_turn(&state, &key, &session_id, cursor, &tx, e).await;
+                            return;
+                        }
+                    }
+                }
+                fail_turn(
+                    &state,
+                    &key,
+                    &session_id,
+                    cursor,
+                    &tx,
+                    error_for(
+                        &state,
+                        &key,
+                        CompletionError::AccountMuted {
+                            retry_after_s: (until - sse::unix_secs() as i64).max(1) as u64,
+                            until,
+                        },
+                    )
+                    .await,
+                )
+                .await;
+                return;
             } else if pool::is_rate_limit(&hint) && !pumped.emitted {
                 let wait = backoff_delay(&turn_settings, attempt);
                 if attempt >= turn_settings.rate_limit_max_retries {

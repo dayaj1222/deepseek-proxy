@@ -18,6 +18,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const HEADER = "x-deepseek-rs-rebind";
 
+/**
+ * What a compaction should arm. `fresh` rebuilds the remote session on the same
+ * account, which is the point: the pre-compaction thread carries a transcript
+ * the model no longer sees, so continuing it replays a conversation the summary
+ * already replaced. `next` would also hop accounts, which is unnecessary churn
+ * here - compaction is not an account failure.
+ */
+const REBIND_ON_COMPACT: string | null = "fresh";
+
 /** Targets the proxy understands, plus `off` which never leaves this file. */
 const TARGETS = ["next", "fresh", "off"];
 
@@ -87,6 +96,16 @@ export default function deepseekRebind(pi: ExtensionAPI) {
 		// even if a lower layer retries the request.
 		armed = null;
 		event.headers[HEADER] = target;
+	});
+
+	// A compaction replaced the context the old remote session was built around.
+	// Arm a `fresh` rebuild so the next request opens a new remote session and
+	// replays the summary, instead of parenting onto a thread whose earlier turns
+	// the model can no longer see. The header is consumed by the very next
+	// provider request, so this fires exactly once per compaction.
+	pi.on("session_compact", () => {
+		if (REBIND_ON_COMPACT === null) return;
+		armed = REBIND_ON_COMPACT;
 	});
 
 	// A pending move must not leak across sessions: switching away from the

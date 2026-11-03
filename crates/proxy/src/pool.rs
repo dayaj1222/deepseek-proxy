@@ -104,6 +104,10 @@ pub struct Connection {
     cooldown_base: Duration,
     /// Upper bound for the exponential breaker cooldown.
     cooldown_max: Duration,
+    /// Unix seconds until which DeepSeek has muted this account. Separate from
+    /// the breaker: a mute has a known recovery time, so it must not compound
+    /// the exponential backoff or count as a fault.
+    muted_until: std::sync::Mutex<Option<i64>>,
     store: crate::store::Store,
 }
 
@@ -134,6 +138,7 @@ impl Connection {
                 cooldown_until: None,
             })),
             breaker: std::sync::Mutex::new(BreakerState::default()),
+            muted_until: std::sync::Mutex::new(None),
             request_delay,
             waiting: AtomicUsize::new(0),
             queue_limit,
@@ -302,10 +307,18 @@ impl Connection {
             Self::breaker_at(&b, self.fail_threshold, now)
         };
         let g = self.gate.lock().await;
-        let cooldown_ms = g
+        let gate_cooldown_ms = g
             .cooldown_until
             .filter(|u| *u > now)
             .map(|u| u.saturating_duration_since(now).as_millis() as u64);
+        // A mute is reported through the same `cooldown_ms` field `rebind` reads
+        // to decide whether a thread's account is worth moving off, so the CLI
+        // shows the real mute deadline instead of an unrelated backoff.
+        let wall_now = now_secs();
+        let mute_ms = self
+            .muted_until_at(wall_now)
+            .map(|until| ((until - wall_now).max(0) as u64) * 1000);
+        let cooldown_ms = gate_cooldown_ms.max(mute_ms);
         ConnectionSnapshot {
             email: self.email.clone(),
             healthy: cooldown_ms.is_none() && breaker != Breaker::Open,
@@ -318,8 +331,26 @@ impl Connection {
     }
 
     /// Cheap gate check used by routing; does not claim a probe.
+    ///
+    /// A muted account is unhealthy even with a closed breaker: the backend
+    /// refuses every turn until `muted_until`, so routing must not send new
+    /// threads there and `route` moves an existing one off.
     fn healthy(&self) -> bool {
-        !self.breaker_open()
+        !self.breaker_open() && self.muted_until_at(now_secs()).is_none()
+    }
+
+    /// Unix seconds until which this account is muted, if still muted at `now`.
+    fn muted_until_at(&self, now: i64) -> Option<i64> {
+        let g = self.muted_until.lock().expect("mute lock poisoned");
+        g.filter(|until| *until > now)
+    }
+
+    /// Record a backend mute: the account cannot serve until `until` (unix
+    /// seconds). Does not touch the breaker or the failure count — a mute is not
+    /// a fault, and its recovery time is known exactly.
+    pub fn mute_until(&self, until: i64) {
+        let mut g = self.muted_until.lock().expect("mute lock poisoned");
+        *g = Some((*g).map_or(until, |cur| cur.max(until)));
     }
 
     /// Re-login, replacing the client. Resume ids stay valid.
@@ -753,6 +784,16 @@ impl Pool {
         out
     }
 
+    /// Mute the account named `email` until `until` (unix seconds).
+    ///
+    /// Returns the connection so the caller can report the deadline actually
+    /// applied when a second mute extends the first.
+    pub fn mute(&self, email: &str, until: i64) -> Option<Arc<Connection>> {
+        let conn = self.conns.iter().find(|c| c.email == email)?.clone();
+        conn.mute_until(until);
+        Some(conn)
+    }
+
     /// Try to re-login an account (invalid/expired token recovery).
     pub async fn recover(&self, conn: &Arc<Connection>) -> bool {
         conn.reconnect().await.is_ok()
@@ -774,6 +815,11 @@ pub enum PoolError {
     RateLimited {
         retry_after_s: u64,
     },
+    /// The backend muted this account until `until` (unix seconds).
+    Muted {
+        retry_after_s: u64,
+        until: i64,
+    },
     Other(String),
 }
 
@@ -784,6 +830,10 @@ impl std::fmt::Display for PoolError {
             PoolError::RateLimited { retry_after_s } => write!(
                 f,
                 "DeepSeek backend rate-limited this turn (retry after {retry_after_s}s)"
+            ),
+            PoolError::Muted { retry_after_s, .. } => write!(
+                f,
+                "DeepSeek muted this account (retry after {retry_after_s}s)"
             ),
         }
     }
@@ -858,6 +908,29 @@ impl Pool {
                         tracing::info!("recovered account {}", conn.email);
                         drop(slot);
                         continue;
+                    }
+
+                    if is_muted(&last) {
+                        // A mute is not a fault: the account is fine, the backend
+                        // just refused this account until a known deadline. Mark
+                        // it unhealthy for exactly that long (never the
+                        // exponential breaker) and surface the deadline. Retrying
+                        // on the same account would only burn a turn and count a
+                        // failure that did not happen.
+                        let until = mute_until_secs(&last).unwrap_or_else(|| now_secs() + 60);
+                        let retry_after_s = (until - now_secs()).max(1) as u64;
+                        conn.mute_until(until);
+                        tracing::warn!(
+                            account = %conn.email,
+                            until,
+                            retry_after_s,
+                            "account muted by the backend"
+                        );
+                        drop(slot);
+                        return Err(PoolError::Muted {
+                            retry_after_s,
+                            until,
+                        });
                     }
 
                     if !is_rate_limit(&last) {
@@ -946,6 +1019,46 @@ const RATE_LIMIT_MARKERS: [&str; 10] = [
 pub fn is_rate_limit(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     RATE_LIMIT_MARKERS.iter().any(|k| m.contains(k))
+}
+
+/// Unix seconds, for mute deadlines that arrive in wall-clock time.
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// True when the upstream refused the turn because the account is muted:
+/// `{"biz_code":5,"biz_msg":"user is muted","biz_data":{"is_muted":1,...}}`.
+///
+/// Checked before [`is_rate_limit`]: a mute is not a throttle. Retrying it on
+/// the same account cannot work until a known deadline, and treating it as one
+/// opens the breaker and compounds a backoff for a time already known.
+pub fn is_muted(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("user is muted") || m.contains("\"is_muted\":1") || m.contains("\"biz_code\":5")
+}
+
+/// The mute deadline in the error body, as unix seconds.
+///
+/// `biz_data.mute_until` is epoch seconds written as a float
+/// (`1794289346.415`), so it is matched as a number or numeric string and
+/// truncated.
+pub fn mute_until_secs(msg: &str) -> Option<i64> {
+    let (_, rest) = msg.split_once("\"mute_until\"")?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let numeric: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let secs: f64 = numeric.parse().ok()?;
+    if secs <= 0.0 {
+        None
+    } else {
+        Some(secs.floor() as i64)
+    }
 }
 
 #[cfg(test)]
