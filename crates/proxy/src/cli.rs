@@ -212,7 +212,9 @@ pub fn env_accounts() -> Vec<pool::AccountSpec> {
 /// This numbering is the contract `disabled_accounts` numbers refer to, and it
 /// is what `accounts list` prints, so the config line can be read straight off
 /// the CLI output. Deleting an account renumbers the ones added after it.
-pub fn db_accounts_numbered(store: &store::Store) -> Result<Vec<(usize, store::AccountRow)>, store::StoreError> {
+pub fn db_accounts_numbered(
+    store: &store::Store,
+) -> Result<Vec<(usize, store::AccountRow)>, store::StoreError> {
     Ok(store
         .accounts()?
         .into_iter()
@@ -585,9 +587,21 @@ mod update_tests {
 
     #[test]
     fn force_is_the_only_flag() {
-        assert!(!update_flags(&args(&["deepseek-rs", "update"])).unwrap().force);
-        assert!(update_flags(&args(&["deepseek-rs", "update", "--force"])).unwrap().force);
-        assert!(update_flags(&args(&["deepseek-rs", "update", "-f"])).unwrap().force);
+        assert!(
+            !update_flags(&args(&["deepseek-rs", "update"]))
+                .unwrap()
+                .force
+        );
+        assert!(
+            update_flags(&args(&["deepseek-rs", "update", "--force"]))
+                .unwrap()
+                .force
+        );
+        assert!(
+            update_flags(&args(&["deepseek-rs", "update", "-f"]))
+                .unwrap()
+                .force
+        );
         assert!(update_flags(&args(&["deepseek-rs", "update", "--yes"])).is_err());
     }
 }
@@ -929,9 +943,10 @@ fn update(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
             eprintln!("{why}");
             return Ok(1);
         }
-        if let Err(e) =
-            git_capture(&repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-        {
+        if let Err(e) = git_capture(
+            &repo,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        ) {
             eprintln!("{branch} has no upstream ({e}) — pass --force to build this tree as-is");
             return Ok(1);
         }
@@ -965,7 +980,11 @@ fn update(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
             Ok(target) if target == binary => {
                 println!("install   {} -> this binary", link.display());
             }
-            Ok(target) => println!("warning   {} points at {}", link.display(), target.display()),
+            Ok(target) => println!(
+                "warning   {} points at {}",
+                link.display(),
+                target.display()
+            ),
             Err(_) => {}
         }
     }
@@ -1482,9 +1501,7 @@ fn keys(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
 
     // `key <name> <key>` is the original spelling of `keys add`.
     let (sub, offset) = match sub {
-        "" | "list" | "ls" | "add" | "rm" | "remove" | "delete" | "disable" | "enable" => {
-            (sub, 3)
-        }
+        "" | "list" | "ls" | "add" | "rm" | "remove" | "delete" | "disable" | "enable" => (sub, 3),
         _ => ("add", 2),
     };
 
@@ -1604,6 +1621,17 @@ async fn rebind(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         all = true;
         dry_run = true;
     }
+    if let Some(t) = &thread {
+        // `rebind next` reads like "rebind the next thread" and used to rebind a
+        // *thread literally named `next`*, silently leaving the conversation you
+        // were looking at untouched. The account is `--account`; say so.
+        if matches!(t.as_str(), "next" | "fresh" | "current") || t.contains('@') {
+            eprintln!(
+                "'{t}' is an account target, not a thread; use --account {t} (or name the thread id)"
+            );
+            return Ok(2);
+        }
+    }
     if thread.is_some() && all {
         eprintln!("give a thread or --all, not both\n");
         return Ok(2);
@@ -1629,10 +1657,7 @@ async fn rebind(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("proxy unreachable at {root}: {e}"))?;
     if !listed.status().is_success() {
-        eprintln!(
-            "GET /admin/throttled -> HTTP {}",
-            listed.status().as_u16()
-        );
+        eprintln!("GET /admin/throttled -> HTTP {}", listed.status().as_u16());
         if listed.status() == reqwest::StatusCode::UNAUTHORIZED {
             eprintln!("pass a registered key with --key or DEEPSEEK_API_KEY");
         }

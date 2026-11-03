@@ -36,10 +36,8 @@ pub(crate) async fn admin_throttled(State(state): State<AppState>) -> Response {
     let threads: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let (cooldown_ms, healthy) = live
-                .get(r.email.as_str())
-                .copied()
-                .unwrap_or((None, false));
+            let (cooldown_ms, healthy) =
+                live.get(r.email.as_str()).copied().unwrap_or((None, false));
             json!({
                 "thread": r.thread_id,
                 "account": r.email,
@@ -99,7 +97,10 @@ pub(crate) async fn admin_rebind(
                 Ok(rows) => rows,
                 Err(e) => return backend_error(&format!("store: {e}")),
             };
-            let cap = body.limit.unwrap_or(REBIND_BULK_LIMIT).min(REBIND_BULK_LIMIT);
+            let cap = body
+                .limit
+                .unwrap_or(REBIND_BULK_LIMIT)
+                .min(REBIND_BULK_LIMIT);
             rows.into_iter().take(cap).map(|r| r.thread_id).collect()
         }
         (None, false) => {
@@ -124,8 +125,7 @@ pub(crate) async fn admin_rebind(
                 })
             })
             .collect();
-        return Json(json!({ "dry_run": true, "count": plan.len(), "plan": plan }))
-            .into_response();
+        return Json(json!({ "dry_run": true, "count": plan.len(), "plan": plan })).into_response();
     }
 
     let mut done: Vec<Value> = Vec::new();

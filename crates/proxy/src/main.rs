@@ -49,10 +49,7 @@ use admin::{admin_rebind, admin_throttled, build_id};
 use axum::{
     extract::State,
     http::HeaderMap,
-    response::{
-        sse::Sse,
-        IntoResponse, Response,
-    },
+    response::{sse::Sse, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -65,7 +62,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use threads::ThreadState;
 use tracing::Instrument;
-
 
 /// Prompts for one turn: the delta the session needs now, and the full
 /// flattened transcript used to rebuild the session when it overflows.
@@ -491,12 +487,7 @@ async fn readyz(State(state): State<AppState>) -> Response {
 /// Unknown route: `404` in the OpenAI error envelope, so SDK clients parse it
 /// instead of choking on axum's empty-body default.
 async fn fallback() -> Response {
-    ProxyError::new(
-        "Not Found",
-        axum::http::StatusCode::NOT_FOUND,
-        "not_found",
-    )
-    .into_response()
+    ProxyError::new("Not Found", axum::http::StatusCode::NOT_FOUND, "not_found").into_response()
 }
 
 /// Echo `x-request-id`, or mint one, and carry it in every log line.
@@ -577,7 +568,6 @@ async fn method_not_allowed() -> Response {
     )
     .into_response()
 }
-
 
 /// `GET /stats` — everything `deepseek-rs stats` and `status` need.
 async fn stats(State(state): State<AppState>) -> Json<Value> {
@@ -679,8 +669,8 @@ fn unauthorized(missing: bool) -> Response {
     } else {
         ("Invalid API key", "invalid_api_key")
     };
-    let mut resp = ProxyError::new(message, axum::http::StatusCode::UNAUTHORIZED, code)
-        .into_response();
+    let mut resp =
+        ProxyError::new(message, axum::http::StatusCode::UNAUTHORIZED, code).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str("Bearer") {
         resp.headers_mut()
             .insert(axum::http::header::WWW_AUTHENTICATE, v);
@@ -705,7 +695,7 @@ async fn completion_with_retry(
     state: &AppState,
     thread_id: &str,
     body: &CompletionBody,
-) -> Result<(reqwest::Response, pool::RateTicket), CompletionError> {
+) -> Result<(client::Completion, pool::RateTicket), CompletionError> {
     state
         .pool()
         .complete(
@@ -994,7 +984,6 @@ impl Recovery {
     }
 }
 
-
 /// Wait before retry number `attempt` (0-based).
 ///
 /// Python: `backoff * min(attempt + 1, max(1, max_retries))`, with the base
@@ -1190,7 +1179,7 @@ struct LiveTurn {
     guard: tokio::sync::OwnedMutexGuard<()>,
     state: AppState,
     key: String,
-    resp: reqwest::Response,
+    resp: client::Completion,
     slot: pool::RateTicket,
     /// Upstream body, re-sent for retries and correction turns.
     body: CompletionBody,
@@ -1255,6 +1244,10 @@ async fn stream_response(live: LiveTurn) -> Response {
         // exhausted (or empty) is the session itself presumed gone and the
         // expensive replay path taken.
         let mut rewinds: usize = 0;
+        // Whether this turn already tried to escape a backend mute. One attempt
+        // is enough: if the landing account is muted too, reporting that is
+        // more useful than hopping through every account in the pool.
+        let mut mute_recovered = false;
         let mut body = body;
         // The conversation cursor, ported from aiodeepseek's
         // `Conversation._parent_message_id`: the id of the NEWEST upstream
@@ -1292,8 +1285,7 @@ async fn stream_response(live: LiveTurn) -> Response {
             let (resp, slot) = next.take().expect("attempt in flight");
             let account = slot.account.clone();
             // Hold the account's rate slot until the upstream body is drained.
-            let idle =
-                std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
+            let idle = std::time::Duration::from_secs_f64(turn_settings.heartbeat_interval_secs);
             // The whole turn is bounded, like `asyncio.timeout(REQUEST_TIMEOUT)`.
             // A stalled upstream becomes a visible error instead of a hang.
             let budget = std::time::Duration::from_secs_f64(turn_settings.request_timeout_secs)
@@ -1499,6 +1491,90 @@ async fn stream_response(live: LiveTurn) -> Response {
                         return;
                     }
                 }
+            } else if pool::is_muted(&hint) {
+                // DeepSeek muted the account itself: 200 OK with a JSON body
+                // that is not SSE. This is more specific than a generic backend
+                // error and it is not a throttle — retrying the same account
+                // cannot work until `mute_until`.
+                let until =
+                    pool::mute_until_secs(&hint).unwrap_or_else(|| sse::unix_secs() as i64 + 60);
+                state.stats.errors.fetch_add(1, Ordering::Relaxed);
+                // Mark the account unhealthy until the mute deadline, so the
+                // next turn on this thread is routed off it.
+                state.pool().mute(&account, until);
+                if let Err(e) = state.store.mark_throttled(&key) {
+                    tracing::warn!(thread = %key, error = %e, "could not record mute");
+                }
+                tracing::error!(thread = %key, account = %account, until, "upstream muted the account: {hint}");
+                // A mute rebinds the running thread for this turn. The mute just
+                // marked the account unhealthy, so `Next` cannot land back on it,
+                // and the transcript is replayed into a session that has never
+                // seen this conversation.
+                if !mute_recovered && !pumped.emitted && can_recover {
+                    mute_recovered = true;
+                    attempt += 1;
+                    let change = session::ThreadChange::Rebind {
+                        target: pool::AccountTarget::Next,
+                        reason: session::RebuildReason::Manual,
+                    };
+                    match session::open_session(&state, &key, change).await {
+                        Ok(fresh) => {
+                            tracing::warn!(thread = %key, "muted; rebound the thread and replaying the transcript");
+                            let thinking = body.thinking_enabled;
+                            let search = body.search_enabled;
+                            body = completion_body(
+                                &fresh,
+                                &replay,
+                                thinking,
+                                search,
+                                &body.ref_file_ids,
+                                &body.model_type,
+                            );
+                            session_id = fresh.session_id.clone();
+                            cursor = None;
+                            match completion_with_retry(&state, &key, &body).await {
+                                Ok(v) => {
+                                    next = Some(v);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    fail_turn(
+                                        &state,
+                                        &key,
+                                        &session_id,
+                                        cursor,
+                                        &tx,
+                                        error_for(&state, &key, e).await,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            fail_turn(&state, &key, &session_id, cursor, &tx, e).await;
+                            return;
+                        }
+                    }
+                }
+                fail_turn(
+                    &state,
+                    &key,
+                    &session_id,
+                    cursor,
+                    &tx,
+                    error_for(
+                        &state,
+                        &key,
+                        CompletionError::AccountMuted {
+                            retry_after_s: (until - sse::unix_secs() as i64).max(1) as u64,
+                            until,
+                        },
+                    )
+                    .await,
+                )
+                .await;
+                return;
             } else if pool::is_rate_limit(&hint) && !pumped.emitted {
                 let wait = backoff_delay(&turn_settings, attempt);
                 if attempt >= turn_settings.rate_limit_max_retries {
@@ -1724,7 +1800,7 @@ async fn stream_response(live: LiveTurn) -> Response {
                 Some(result) => result,
                 None => return,
             };
-            let (resp, _slot) = match completion {
+            let (mut resp, _slot) = match completion {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(thread = %key, attempt, error = %e, "repair completion failed");
@@ -1732,8 +1808,13 @@ async fn stream_response(live: LiveTurn) -> Response {
                     break;
                 }
             };
-            let raw = match until_client_disconnect(&tx, resp.text()).await {
-                Some(Ok(text)) => text,
+            let raw = match until_client_disconnect(&tx, sse::read_body(&mut resp, &key)).await {
+                Some(Ok(body)) => {
+                    if body.cut {
+                        tracing::info!(thread = %key, attempt, "repair reply cut at closer spam");
+                    }
+                    body.raw
+                }
                 Some(Err(e)) => {
                     tracing::error!(
                         thread = %key,
@@ -2441,7 +2522,10 @@ mod tests {
         drop(rx);
 
         assert_eq!(waiter.await.unwrap(), None);
-        assert!(dropped.load(Ordering::Relaxed), "repair future was not cancelled");
+        assert!(
+            dropped.load(Ordering::Relaxed),
+            "repair future was not cancelled"
+        );
     }
 
     fn msg_with(role: &str, content: &str) -> Msg {
@@ -2798,7 +2882,10 @@ mod tests {
         recovery.accept(bad()).unwrap();
         for attempt in 1..=5 {
             let _ = recovery.begin_repair(attempt);
-            assert_eq!(recovery.expected, 1, "attempt {attempt} must still expect one call");
+            assert_eq!(
+                recovery.expected, 1,
+                "attempt {attempt} must still expect one call"
+            );
             recovery.accept(bad()).unwrap(); // the repair reply failed again
             recovery.end_repair();
             assert_eq!(recovery.pending.len(), 1, "attempt {attempt}: pending grew");
@@ -2894,11 +2981,14 @@ mod tests {
 
     #[test]
     fn history_is_role_labelled() {
-        let text = flatten_transcript(&[
-            msg_with("system", "be nice"),
-            msg_with("user", "hi"),
-            msg_with("assistant", "hello"),
-        ], dialect::Dialect::JsonInvoke);
+        let text = flatten_transcript(
+            &[
+                msg_with("system", "be nice"),
+                msg_with("user", "hi"),
+                msg_with("assistant", "hello"),
+            ],
+            dialect::Dialect::JsonInvoke,
+        );
         assert_eq!(text, "System: be nice\n\nUser: hi\n\nAssistant: hello");
     }
 
@@ -2987,7 +3077,8 @@ mod tests {
             (None, "repair_omitted_call"),
             (Some("bash".to_string()), "unterminated_block"),
         ] {
-            let mut recovery = Recovery::new(specs.clone(), false, true, dialect::Dialect::JsonInvoke);
+            let mut recovery =
+                Recovery::new(specs.clone(), false, true, dialect::Dialect::JsonInvoke);
             recovery.pending.push(dialect::MalformedCall::new(
                 name.clone(),
                 String::new(),
@@ -3064,9 +3155,15 @@ mod tests {
         // SDKs branch on `error.type`, so it must track the status, not the code.
         for (status, expected) in [
             (axum::http::StatusCode::BAD_REQUEST, "invalid_request_error"),
-            (axum::http::StatusCode::UNAUTHORIZED, "invalid_request_error"),
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_request_error",
+            ),
             (axum::http::StatusCode::NOT_FOUND, "invalid_request_error"),
-            (axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+            ),
             (axum::http::StatusCode::BAD_GATEWAY, "server_error"),
             (axum::http::StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         ] {
@@ -3076,7 +3173,6 @@ mod tests {
             assert_eq!(payload["error"]["code"], "some_code");
         }
     }
-
 
     #[test]
     fn reminder_text_names_the_failure_modes() {

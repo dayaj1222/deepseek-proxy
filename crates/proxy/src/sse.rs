@@ -35,7 +35,9 @@ pub type ChunkSender = tokio::sync::mpsc::Sender<Chunk>;
 pub type ChunkReceiver = tokio::sync::mpsc::Receiver<Chunk>;
 
 /// Wrap a chunk receiver as an SSE response body.
-pub fn sse_stream(rx: ChunkReceiver) -> impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> {
+pub fn sse_stream(
+    rx: ChunkReceiver,
+) -> impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>> {
     ReceiverStream::new(rx).map(|chunk| {
         Ok(match chunk {
             Chunk::Data(data) => Event::default().data(data),
@@ -252,8 +254,68 @@ fn push_tail(tail: &mut String, text: &str, max: usize) {
     }
 }
 
+/// A completion body read to its end, or to a closer-spam cut.
+pub struct ReadBody {
+    /// The raw SSE text, as a whole-body read returns it.
+    pub raw: String,
+    /// The read stopped at a closer-spam run and the remote message was stopped.
+    pub cut: bool,
+}
+
+/// Collect a completion body without streaming it out, with the same
+/// closer-spam cut `pump` applies (ADR-0019). This is the read under every
+/// non-streaming caller, so a runaway reply is cut whatever the layer above
+/// does with it.
+pub async fn read_body(
+    resp: &mut client::Completion,
+    id: &str,
+) -> Result<ReadBody, reqwest::Error> {
+    let mut raw = String::new();
+    let mut utf8 = Utf8Joiner::default();
+    let mut buf = String::new();
+    let mut current_event = String::new();
+    let mut router = FragmentRouter::new();
+    let mut events = Vec::new();
+    let mut tail = String::new();
+    while let Some(chunk) = resp.next().await {
+        let text = utf8.push(&chunk?);
+        raw.push_str(&text);
+        buf.push_str(&text);
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].to_string();
+            buf.drain(..=pos);
+            // Hint errors are left in `raw`; the caller checks them with `hint_in`.
+            let protocol::LineKind::Event(value) =
+                protocol::classify_line(&line, &mut current_event)
+            else {
+                continue;
+            };
+            events.clear();
+            route_event(&value, &mut router, &mut events);
+            for ev in &events {
+                if matches!(ev.channel, Channel::Text) {
+                    push_tail(&mut tail, &ev.text, CLOSER_TAIL_CAP);
+                }
+            }
+            if dialect_dsml::closer_spam(&tail) {
+                // Stop the remote message while the connection is open, as the
+                // stream pump does (ADR-0020). A failure is logged, not fatal.
+                if let Err(e) = resp.stop().await {
+                    tracing::warn!(
+                        thread = %id,
+                        cause = %crate::log::error_chain(&e),
+                        "stop_stream failed; closing the connection anyway"
+                    );
+                }
+                return Ok(ReadBody { raw, cut: true });
+            }
+        }
+    }
+    Ok(ReadBody { raw, cut: false })
+}
+
 pub async fn pump(
-    resp: reqwest::Response,
+    resp: client::Completion,
     tx: &ChunkSender,
     id: &str,
     model: &str,
@@ -303,7 +365,9 @@ pub async fn pump(
     // holds the most recent bytes, because a run only exists at the end.
     let mut tail = String::new();
 
-    let mut byte_stream = resp.bytes_stream();
+    // The completion stops the remote message itself when asked or dropped
+    // early (ADR-0020); the pump only decides when to ask.
+    let mut byte_stream = resp;
     'read: loop {
         // Python's `stream()` waits `heartbeat_interval` for the next event and
         // emits `: keep-alive` on timeout — it does NOT kill the stream. The
@@ -333,15 +397,15 @@ pub async fn pump(
         let chunk = match next {
             Ok(Some(chunk)) => chunk,
             Ok(None) => {
-                ended = if saw_done { "[DONE]" } else { "upstream closed" };
+                ended = if saw_done {
+                    "[DONE]"
+                } else {
+                    "upstream closed"
+                };
                 break;
             }
             Err(_) => {
-                if tx
-                    .send(Chunk::KeepAlive)
-                    .await
-                    .is_err()
-                {
+                if tx.send(Chunk::KeepAlive).await.is_err() {
                     ended = "client disconnected";
                     break;
                 }
@@ -461,11 +525,7 @@ pub async fn pump(
                     chunk["usage"] = Value::Null;
                 }
                 emitted = true;
-                if tx
-                    .send(Chunk::Data(chunk.to_string()))
-                    .await
-                    .is_err()
-                {
+                if tx.send(Chunk::Data(chunk.to_string())).await.is_err() {
                     finish("client disconnected", raw_bytes, raw_events);
                     return Pumped {
                         parent,
@@ -482,7 +542,17 @@ pub async fn pump(
             // has stopped producing anything useful. Leave the read loop; the
             // stream and its socket are dropped on return, which is the stop
             // signal. The turn itself is not a failure (ADR-0019).
-            if dialect_dsml::trailing_bare_closers(&tail) >= dialect_dsml::CLOSER_SPAM_THRESHOLD {
+            if dialect_dsml::closer_spam(&tail) {
+                // Stop the remote message while the connection is still open,
+                // as the web stop button does. Without it DeepSeek keeps the
+                // message `wip` and rejects the next turn that parents to it.
+                if let Err(e) = byte_stream.stop().await {
+                    tracing::warn!(
+                        thread = %id,
+                        cause = %crate::log::error_chain(&e),
+                        "stop_stream failed; closing the connection anyway"
+                    );
+                }
                 ended = "closer spam";
                 break 'read;
             }
@@ -642,7 +712,7 @@ mod tests {
     }
 
     /// A stream opener, then one network chunk per entry in `chunks`.
-    fn upstream(chunks: &[String]) -> reqwest::Response {
+    fn upstream(chunks: &[String]) -> client::Completion {
         let mut opener = String::from(
             "event: ready\ndata: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}\n\n",
         );
@@ -650,7 +720,11 @@ mod tests {
         let mut all = vec![Ok::<_, std::io::Error>(opener)];
         all.extend(chunks.iter().cloned().map(Ok));
         let body = reqwest::Body::wrap_stream(futures_util::stream::iter(all));
-        reqwest::Response::from(axum::http::Response::new(body))
+        // Nothing listens on port 9, so a stop from a test fails fast and is
+        // only logged; the stop's wire shape is tested in the client crate.
+        let client = client::Client::with_base_url("test".into(), "http://127.0.0.1:9");
+        let resp = reqwest::Response::from(axum::http::Response::new(body));
+        client::Completion::new(resp, client, "session".into())
     }
 
     async fn pump_chunks(chunks: &[String]) -> Pumped {
@@ -712,6 +786,40 @@ mod tests {
             pumped.text.contains("AFTER-THE-RUN"),
             "ADR-0011 territory, not a cut"
         );
+    }
+
+    async fn read_chunks(chunks: &[String]) -> ReadBody {
+        let mut resp = upstream(chunks);
+        read_body(&mut resp, "test").await.expect("read")
+    }
+
+    #[tokio::test]
+    async fn repair_read_cuts_a_closer_spam_run() {
+        let body = read_chunks(&run_then_after(&format!("{CALL}\n"), 4)).await;
+        assert!(body.cut);
+        assert!(
+            !body.raw.contains("AFTER-THE-RUN"),
+            "the repair read kept going past the run"
+        );
+        // `raw` is the JSON-escaped SSE text; the decoded answer is what counts.
+        let (_, answer, _) = route_all(&body.raw);
+        assert!(answer.contains(CALL), "the call before the run is kept");
+    }
+
+    #[tokio::test]
+    async fn repair_read_without_spam_reads_to_the_end() {
+        let body = read_chunks(&run_then_after("x", 3)).await;
+        assert!(!body.cut);
+        assert!(body.raw.contains("AFTER-THE-RUN"));
+    }
+
+    #[tokio::test]
+    async fn repair_read_ignores_structural_closers() {
+        let closers =
+            "</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>\n".repeat(3);
+        let body = read_chunks(&[text_event(&closers), text_event("AFTER-THE-RUN")]).await;
+        assert!(!body.cut);
+        assert!(body.raw.contains("AFTER-THE-RUN"));
     }
 
     #[tokio::test]

@@ -246,7 +246,9 @@ impl Config {
             search: env_flag("SEARCH_ENABLED", file.deepseek.search),
             disabled_accounts: env_str("DEEPSEEK_DISABLED_ACCOUNTS")
                 .map(|raw| DisabledAccounts::from_csv(&raw))
-                .unwrap_or_else(|| DisabledAccounts::from_entries(&file.deepseek.disabled_accounts)),
+                .unwrap_or_else(|| {
+                    DisabledAccounts::from_entries(&file.deepseek.disabled_accounts)
+                }),
             request_delay_secs: env_num("REQUEST_DELAY")
                 .unwrap_or(file.limits.request_delay_secs)
                 .max(0.0),
@@ -467,10 +469,8 @@ mod tests {
 
     #[test]
     fn disabled_accounts_accept_numbers_and_emails() {
-        let f: FileConfig = toml::from_str(
-            "[deepseek]\ndisabled_accounts = [2, 5, \"C@D.com\"]\n",
-        )
-        .unwrap();
+        let f: FileConfig =
+            toml::from_str("[deepseek]\ndisabled_accounts = [2, 5, \"C@D.com\"]\n").unwrap();
         let d = DisabledAccounts::from_entries(&f.deepseek.disabled_accounts);
         assert_eq!(d.numbers, vec![2, 5]);
         assert_eq!(d.emails, vec!["C@D.com".to_string()]);

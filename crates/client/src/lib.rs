@@ -4,9 +4,11 @@
 //! The proxy is the only consumer; there is deliberately no `Conversation`
 //! abstraction (that was the main source of monkey-patching in Python).
 
+pub mod completion;
 pub mod device_ids;
 pub mod images;
 
+pub use completion::Completion;
 pub use device_ids::get_device_id;
 
 use base64::Engine;
@@ -51,6 +53,9 @@ pub struct UploadedImage {
 const LOGIN_PATH: &str = "/api/v0/users/login";
 const SESSION_CREATE_PATH: &str = "/api/v0/chat_session/create";
 const POW_CHALLENGE_PATH: &str = "/api/v0/chat/create_pow_challenge";
+/// The web client's stop button. Dropping the connection alone leaves the
+/// message `wip` upstream; this call is what finishes it (ADR-0020).
+pub const STOP_STREAM_PATH: &str = "/api/v0/chat/stop_stream";
 
 /// Headers the shipped iOS client sends. Kept byte-identical to Python so the
 /// server sees the same client identity.
@@ -456,11 +461,30 @@ impl Client {
         })
     }
 
-    /// Start a streaming completion. Caller drives the byte stream.
+    /// `POST /api/v0/chat/stop_stream`: ask DeepSeek to end the message it is
+    /// generating, as the web client does on stop. `message_id` is the
+    /// `response_message_id` of that stream.
+    pub async fn stop_stream(&self, session_id: &str, message_id: i64) -> Result<(), ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}{STOP_STREAM_PATH}", self.base))
+            .headers(self.authed_headers())
+            .json(&json!({ "chat_session_id": session_id, "message_id": message_id }))
+            .send()
+            .await?;
+        let data: Value = resp.json().await?;
+        match data.pointer("/data/biz_code").and_then(Value::as_i64) {
+            Some(0) => Ok(()),
+            _ => Err(ClientError::Shape(format!("stop_stream: {data}"))),
+        }
+    }
+
+    /// Start a streaming completion. The returned [`Completion`] stops the
+    /// remote message if it is dropped before the stream ends.
     pub async fn stream_completion(
         &self,
         body: &CompletionBody,
-    ) -> Result<reqwest::Response, ClientError> {
+    ) -> Result<Completion, ClientError> {
         let pow = self.pow_header(COMPLETION_PATH).await?;
         let mut headers = self.authed_headers();
         headers.insert(
@@ -486,7 +510,11 @@ impl Client {
                 message: text.chars().take(400).collect(),
             });
         }
-        Ok(resp)
+        Ok(Completion::new(
+            resp,
+            self.clone(),
+            body.chat_session_id.clone(),
+        ))
     }
 }
 

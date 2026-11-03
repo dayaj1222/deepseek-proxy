@@ -51,8 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut body = CompletionBody::new(&session, "What is 17*23? Answer in one short line.");
     body.thinking_enabled = true;
     let resp = client.stream_completion(&body).await?;
-    println!("   status: {}", resp.status());
-
     let raw = resp.text().await?;
     println!("   raw SSE: {} bytes", raw.len());
 

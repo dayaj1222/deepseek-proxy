@@ -6,6 +6,59 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-03 - A backend mute is its own failure, with a real deadline
+
+**`{"biz_code":5,"biz_msg":"user is muted"}` was reported as a generic 502
+`backend_error`,** because it matched none of the hint classifiers: not a
+context limit, not a rate-limit marker, not a dead login. The message says
+exactly what happened and carries `biz_data.mute_until` (epoch seconds as a
+float), so treating it as "backend request failed" hid both the reason and the
+recovery time — and routed the thread straight back to the muted account on the
+next turn.
+
+A mute is now `CompletionError::AccountMuted` → HTTP 429 `account_muted`, with
+the deadline in the message and `Retry-After`. `Pool::mute` records
+`mute_until` on the account; `Connection::healthy()` treats a muted account as
+unhealthy, so routing sends new threads elsewhere and moves existing ones off,
+and the cooldown shows up in `/admin/throttled` where `deepseek-rs rebind` reads
+it. Deliberately **not** `record_failure`: a mute is not a fault and its
+recovery time is known, so it must not compound the exponential breaker.
+
+The turn that hits the mute rebinds the running thread once (`AccountTarget::Next`,
+`RebuildReason::Manual`) and replays the transcript, so the mute does not reach
+the client when another account can serve. If no rebind is possible, the 429 is
+returned rather than a 502.
+
+Also: `deepseek-rs rebind next` used to rebind a thread literally named `next`
+(the positional argument is the thread, not the account), silently leaving the
+conversation untouched. That now fails with a hint to use `--account next`.
+Limit: a mute is held in memory only; a proxy restart forgets it and the
+account is retried once.
+
+
+
+**A repair reply could repeat closing tags for hundreds of lines.** The repair
+turn is non-streaming and read its whole body with `text()`, so the closer-spam
+cut in `sse::pump` never ran on it, and no stop was sent. The repair now reads
+through `sse::read_body`, which applies the same check (`dialect_dsml::closer_spam`)
+and stops the remote message on a cut. A cut is logged at info with the attempt.
+Limit: the check counts bare closers in a plain run; a run interleaved with bare
+opening tags does not reach the threshold and is not cut.
+
+## 2026-11-01 - Stop the remote message before closing the connection
+
+**Closing the connection left DeepSeek's message `wip`.** After the closer-spam
+cut, the next request on that message failed with `biz_code 11, message still
+wip`, so the thread could not continue. A HAR of the web client's stop button
+showed the missing step: `POST /api/v0/chat/stop_stream` with the session and
+message id.
+
+The stop now lives in the `client` crate. `stream_completion` returns a
+`Completion` that stops its message when asked (`stop()`) and, when dropped
+unfinished, in the background. Every early exit benefits: the cut, a client
+hang-up, a timeout, an error. Decision and the rejected proxy-level alternative:
+ADR-0020, which amends ADR-0019.
+
 ## 2026-11-01 - Closer spam ends the upstream read
 
 **The model burned its whole token budget spraying closing tags.** It repeated

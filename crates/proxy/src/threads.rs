@@ -406,7 +406,10 @@ mod tests {
         // Newest-first: 5, 4, 3, 2, 1 - the whole ring, not just one step.
         for expected in [5, 4, 3, 2, 1] {
             assert_eq!(threads.rewind("t1"), Some(expected));
-            assert_eq!(threads.resume("t1").unwrap().parent_message_id, Some(expected));
+            assert_eq!(
+                threads.resume("t1").unwrap().parent_message_id,
+                Some(expected)
+            );
             assert_eq!(persist.rows()["t1"].parent_message_id, Some(expected));
         }
         // Exhausted: the caller must rebuild instead.

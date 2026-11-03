@@ -357,7 +357,10 @@ async fn an_interval_of_zero_turns_the_periodic_reminder_off() {
     let prompts = prompts_over_turns(&[("TOOL_REMINDER_INTERVAL", "0")], 3).await;
     assert_eq!(prompts.len(), 3);
     for (i, p) in prompts.iter().enumerate() {
-        assert!(!p.contains(REMINDER_MARK), "turn {i} still has a reminder: {p}");
+        assert!(
+            !p.contains(REMINDER_MARK),
+            "turn {i} still has a reminder: {p}"
+        );
     }
 }
 
@@ -545,7 +548,10 @@ async fn a_throttled_repair_waits_before_the_next_attempt() {
     )
     .await;
     let text = resp.text().await.unwrap();
-    assert!(text.contains("tool_calls"), "the repair should deliver: {text}");
+    assert!(
+        text.contains("tool_calls"),
+        "the repair should deliver: {text}"
+    );
     assert!(
         started.elapsed() >= std::time::Duration::from_secs(1),
         "the retry after a throttled repair must wait the backoff, took {:?}",

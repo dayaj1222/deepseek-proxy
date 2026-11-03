@@ -17,3 +17,6 @@ tokio.workspace = true
 reqwest.workspace = true
 base64 = { workspace = true }
 thiserror.workspace = true
+bytes = "1"
+futures-util = "0.3"
+tracing = "0.1"
