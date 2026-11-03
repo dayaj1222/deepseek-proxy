@@ -1499,14 +1499,12 @@ async fn stream_response(live: LiveTurn) -> Response {
                 let until =
                     pool::mute_until_secs(&hint).unwrap_or_else(|| sse::unix_secs() as i64 + 60);
                 state.stats.errors.fetch_add(1, Ordering::Relaxed);
-                // Mark the account unhealthy until the mute deadline, so the
-                // next turn on this thread is routed off it. A mute longer than
-                // a day is not worth routing around on every future turn, so it
-                // also disables the account (and persists that).
-                let disabled = match state.pool().mute_and_maybe_disable(&account, until) {
-                    Some((_, disabled)) => disabled,
-                    None => false,
-                };
+                // Leave the account out of rotation until the mute deadline. The
+                // deadline is persisted, so a restart does not forget it, and the
+                // mute sweep clears it (plus a grace margin) and reloads the
+                // pool — that is what brings the account back without a human
+                // running `accounts enable`.
+                state.pool().mute_account(&account, until);
                 if let Err(e) = state.store.mark_throttled(&key) {
                     tracing::warn!(thread = %key, error = %e, "could not record mute");
                 }
@@ -1515,7 +1513,6 @@ async fn stream_response(live: LiveTurn) -> Response {
                     account = %account,
                     until,
                     retry_after = %pool::humanize_duration((until - sse::unix_secs() as i64).max(1) as u64),
-                    disabled,
                     "upstream muted the account: {hint}"
                 );
                 // A mute rebinds the running thread for this turn. The mute just
@@ -2317,6 +2314,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the process hostage is worse than truncating one stream.
     // Hot reload: SIGHUP re-reads the config. Spawned, never awaited here.
     tokio::spawn(reload_loop(state.clone()));
+    // Mute expiry: a backend mute is a deadline, not a disable, so something has
+    // to notice it passing and put the account back in rotation.
+    tokio::spawn(mute_sweep_loop(state.clone()));
 
     let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
     let stats_for_signal = state.stats.clone();
@@ -2445,6 +2445,62 @@ async fn rebuild_pool(state: &AppState, cfg: config::Config, old: Arc<pool::Pool
 
 /// Apply SIGHUP forever. Separate from [`shutdown_signal`] so the two never
 /// compete for the same signal.
+/// Put muted accounts back in rotation once their deadline has passed.
+///
+/// A mute is a deadline, not a disable, so nothing else would ever clear it:
+/// the in-memory deadline only filters routing, and the database row would keep
+/// the account out across restarts. The grace margin is applied by
+/// [`pool::Pool::expire_mutes`].
+///
+/// The reload is what actually matters: clearing the flag alone leaves the
+/// running pool without the account, because the pool is built from
+/// `load_accounts`. Ticking every 30s means the worst case is half a minute of
+/// missing capacity on top of the 15s grace.
+async fn mute_sweep_loop(state: AppState) {
+    // Overridable so the expiry path can be tested without waiting 30s. Default
+    // is a compromise: a mute is measured in hours, so half a minute of latency
+    // is invisible, and a tighter tick would just wake the process for nothing.
+    let secs = std::env::var("MUTE_SWEEP_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(secs));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if state.stats.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = sse::unix_secs() as i64;
+        let back = state.pool().expire_mutes(now);
+        if back.is_empty() {
+            continue;
+        }
+        for email in &back {
+            tracing::info!(account = %email, "mute deadline passed; returning the account to rotation");
+        }
+        // Rebuild off the request path, exactly like a SIGHUP reload. A failure
+        // leaves the running pool alone; the next tick retries, because the
+        // database is already cleared and the accounts are therefore wanted.
+        let cfg = match config::Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "could not load config to un-mute; will retry");
+                continue;
+            }
+        };
+        let old = state.pool();
+        if !cli::load_accounts(&state.store)
+            .iter()
+            .any(|a| back.contains(&a.email))
+        {
+            continue;
+        }
+        rebuild_pool(&state, cfg, old).await;
+    }
+}
+
 async fn reload_loop(state: AppState) {
     use tokio::signal::unix::{signal, SignalKind};
     let Ok(mut hup) = signal(SignalKind::hangup()) else {

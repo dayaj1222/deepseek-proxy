@@ -243,6 +243,21 @@ pub fn load_accounts(store: &store::Store) -> Vec<pool::AccountSpec> {
             );
             continue;
         }
+        // A backend mute is separate from `disabled`: it expires on its own, and
+        // the sweep in `main` clears the deadline and reloads. Skipping here is
+        // what keeps a muted account out across a restart.
+        if row
+            .muted_until
+            .is_some_and(|until| until > crate::sse::unix_secs() as i64)
+        {
+            tracing::debug!(
+                number,
+                account = %row.email,
+                muted_until = row.muted_until.unwrap_or_default(),
+                "account muted by the backend, skipping"
+            );
+            continue;
+        }
         if disabled.contains(number, &row.email) {
             tracing::debug!(
                 number,
@@ -1344,6 +1359,15 @@ fn accounts(sub: &str, args: &[String]) -> Result<i32, Box<dyn std::error::Error
                     (true, false) => "  (disabled)",
                     (false, true) => "  (disabled: config)",
                     (false, false) => "",
+                };
+                let mark = match a.muted_until {
+                    Some(until) if until > crate::sse::unix_secs() as i64 => format!(
+                        "{mark}  (muted {})",
+                        pool::humanize_duration(
+                            (until - crate::sse::unix_secs() as i64).max(0) as u64
+                        )
+                    ),
+                    _ => mark.to_string(),
                 };
                 println!(
                     "{:<4} {:<32} {:<8} {:<9}  {}{}",

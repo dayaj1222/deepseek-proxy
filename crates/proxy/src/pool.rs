@@ -108,10 +108,10 @@ pub struct Connection {
     /// the breaker: a mute has a known recovery time, so it must not compound
     /// the exponential backoff or count as a fault.
     muted_until: std::sync::Mutex<Option<i64>>,
-    /// Hard-off switch for a mute too long to wait out (see
-    /// [`Pool::mute_and_maybe_disable`]). Distinct from `muted_until`: this is
-    /// the same state `accounts disable` writes, so it survives a restart and
-    /// only an explicit `accounts enable` clears it.
+    /// Hard-off switch for an operator disable (`accounts disable`). A backend
+    /// mute does **not** set this: a mute carries its own deadline and is
+    /// cleared by the sweep, so a human's decision and a backend's cool-off
+    /// never share a flag that has to be interpreted later.
     disabled: AtomicBool,
     store: crate::store::Store,
 }
@@ -349,11 +349,9 @@ impl Connection {
             && self.muted_until_at(now_secs()).is_none()
     }
 
-    /// Take this connection out of rotation for good (until re-enabled).
-    ///
-    /// A mute longer than a day is not worth waiting on: the deadline is far
-    /// enough out that the account is effectively gone, and leaving it in the
-    /// pool means every rebind walks past it again.
+    /// Take this connection out of rotation. Used by `accounts disable` on a
+    /// running pool; a backend mute is tracked separately by `muted_until`.
+    #[allow(dead_code)]
     pub fn disable(&self) {
         self.disabled.store(true, Ordering::Relaxed);
     }
@@ -815,50 +813,61 @@ impl Pool {
         out
     }
 
-    /// Mute the account named `email` until `until` (unix seconds), and disable
-    /// it outright when the mute is longer than [`MUTE_DISABLE_AFTER_SECS`].
+    /// Persist and record a mute, then leave the account out of rotation until
+    /// `until` (unix seconds).
     ///
-    /// Returns the deadline actually applied and whether the account was
-    /// disabled. A mute of a day or more is not worth routing around forever,
-    /// and `AccountTarget::Next` would keep walking past the same dead account;
-    /// disabling also persists, so a restart does not resurrect it. The database
-    /// write is best-effort: an env-configured account has no row, and a failed
-    /// write must not lose the mute already recorded in memory.
-    pub fn mute_and_maybe_disable(&self, email: &str, until: i64) -> Option<(i64, bool)> {
-        let conn = self.mute(email, until)?;
-        Some(self.finish_mute(&conn, until))
-    }
-
-    /// The disable half of a mute, shared by the two places a mute is detected
-    /// (the pre-flight read in [`Pool::lease`] and the mid-stream hint in the
-    /// request path). Returns the deadline and whether the account was disabled.
-    fn finish_mute(&self, conn: &Arc<Connection>, until: i64) -> (i64, bool) {
-        let retry_after_s = (until - now_secs()).max(1) as u64;
-        if retry_after_s < MUTE_DISABLE_AFTER_SECS {
-            return (until, false);
-        }
-        conn.disable();
-        match self.store.set_account_disabled(&conn.email, true) {
+    /// The deadline is the *only* mute state: `disabled` stays an operator flag,
+    /// so nothing has to decide later whether a mute or a human switched an
+    /// account off. `muted_until` is written to the database so a restart does
+    /// not forget it, and the sweep in `main` clears it (plus a grace margin)
+    /// and reloads the pool, which is what brings the account back.
+    ///
+    /// An env-configured account has no row to write to; it is still muted in
+    /// memory and recovers when the deadline passes.
+    fn record_mute(&self, conn: &Arc<Connection>, until: i64) {
+        conn.mute_until(until);
+        match self.store.set_account_muted_until(&conn.email, until) {
             Ok(Some(_)) => {}
             Ok(None) => tracing::info!(
                 account = %conn.email,
-                "long mute, but this account has no database row; disabled for this process only"
+                "mute has no database row to persist to (env account); in memory only"
             ),
             Err(e) => {
-                tracing::warn!(account = %conn.email, error = %e, "could not persist the disable")
+                tracing::warn!(account = %conn.email, error = %e, "could not persist the mute")
             }
         }
-        (until, true)
     }
 
-    /// Mute the account named `email` until `until` (unix seconds).
+    /// Mute the account named `email` until `until` (unix seconds), recording the
+    /// deadline in the pool and, when it has a database row, in the database.
     ///
-    /// Returns the connection so the caller can report the deadline actually
-    /// applied when a second mute extends the first.
-    pub fn mute(&self, email: &str, until: i64) -> Option<Arc<Connection>> {
+    /// Returns the connection so the caller can report the deadline applied when
+    /// a second mute extends the first, or `None` when the account is not in the
+    /// running pool.
+    pub fn mute_account(&self, email: &str, until: i64) -> Option<Arc<Connection>> {
         let conn = self.conns.iter().find(|c| c.email == email)?.clone();
-        conn.mute_until(until);
+        self.record_mute(&conn, until);
         Some(conn)
+    }
+
+    /// Clear mutes whose deadline plus `MUTE_CLEAR_GRACE_SECS` has passed.
+    ///
+    /// Returns the accounts that came back, so the caller can reload the pool
+    /// (which is what actually puts them into rotation again). The grace margin
+    /// exists because a mute deadline is a second-resolution estimate from a
+    /// float in the response body, and re-enabling a moment early costs a failed
+    /// turn.
+    pub fn expire_mutes(&self, now: i64) -> Vec<String> {
+        match self
+            .store
+            .clear_expired_mutes(now, MUTE_CLEAR_GRACE_SECS as i64)
+        {
+            Ok(emails) => emails,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not clear expired mutes");
+                Vec::new()
+            }
+        }
     }
 
     /// Try to re-login an account (invalid/expired token recovery).
@@ -986,13 +995,12 @@ impl Pool {
                         // on the same account would only burn a turn and count a
                         // failure that did not happen.
                         let until = mute_until_secs(&last).unwrap_or_else(|| now_secs() + 60);
-                        let (until, disabled) = self.finish_mute(&conn, until);
+                        self.record_mute(&conn, until);
                         let retry_after_s = (until - now_secs()).max(1) as u64;
                         tracing::warn!(
                             account = %conn.email,
                             until,
                             retry_after = %humanize_duration(retry_after_s),
-                            disabled,
                             "account muted by the backend"
                         );
                         drop(slot);
@@ -1091,10 +1099,12 @@ pub fn is_rate_limit(msg: &str) -> bool {
 }
 
 /// Unix seconds, for mute deadlines that arrive in wall-clock time.
-/// A mute this long is treated as terminal: the account is disabled instead of
-/// held out of rotation, because waiting a day or more is worse than dropping
-/// it and asking for `accounts enable` when it comes back.
-pub const MUTE_DISABLE_AFTER_SECS: u64 = 24 * 60 * 60;
+/// How long after a mute deadline before the account is put back in rotation.
+///
+/// A mute deadline is second-resolution, parsed from a float, so re-enabling a
+/// moment early would just burn a turn and record the mute again. 15s is cheap
+/// insurance and imperceptible next to a mute measured in hours.
+pub const MUTE_CLEAR_GRACE_SECS: u64 = 15;
 
 /// Format a duration for humans as `1d 3h`, `5h 12m`, or `45s`.
 ///
@@ -1234,9 +1244,10 @@ mod tests {
     }
 
     #[test]
-    fn a_mute_at_or_past_the_threshold_disables_the_account() {
-        // The boundary is inclusive: exactly one day is "not worth waiting".
-        assert_eq!(MUTE_DISABLE_AFTER_SECS, 86_400);
+    fn a_mute_is_cleared_only_after_its_grace_window() {
+        // The sweep passes the grace margin down as a plain number so the store
+        // stays testable without a clock of its own.
+        assert_eq!(MUTE_CLEAR_GRACE_SECS, 15);
     }
 
     #[test]

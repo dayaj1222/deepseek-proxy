@@ -6,7 +6,51 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
-## 2026-11-03 - A mute reads as days and hours, and a long one disables the account
+## 2026-11-03 - A mute is a deadline that expires on its own, not a disable
+
+**Reversing the previous entry: a long mute no longer sets `accounts.disabled`.**
+It was wrong for the reason that entry half-noticed — `disabled` means "a human
+switched this off" and must never be cleared automatically, while a mute means
+"the backend will accept this account again at a known time" and must expire
+without anyone running `accounts enable`. One flag cannot be both, so a mute now
+has its own column:
+
+```sql
+ALTER TABLE accounts ADD COLUMN muted_until INTEGER
+```
+
+`load_accounts` skips a row while `muted_until > now`, so a mute survives a
+restart; `disabled` is untouched and keeps its "permanent until a human says
+otherwise" meaning. `accounts list` shows both (`(disabled)` vs `(muted 2d 4h)`),
+so the reason an account is out is visible instead of guessed.
+
+**`mute_sweep_loop` clears expired mutes and reloads the pool**, every 30s
+(`MUTE_SWEEP_SECS` overrides it for tests). Clearing the deadline alone would not
+be enough: the running pool was built from the account list, so it has to be
+rebuilt for the account to actually serve again. That is the same
+`rebuild_pool` path SIGHUP uses, so it stays off the request path and a failed
+rebuild just leaves the old pool and retries on the next tick.
+
+**The grace margin is 15 seconds past the deadline** (`MUTE_CLEAR_GRACE_SECS`).
+`mute_until` arrives as a float of epoch seconds and is truncated to whole
+seconds, so re-enabling at the exact instant can be a hair early; that costs a
+failed turn and records the mute again. 15s is invisible next to a mute measured
+in hours. Written with `MAX(COALESCE(muted_until, 0), ?)` so a stale in-flight
+reply can never walk a deadline backwards.
+
+`Pool::mute_account` is now the single entry point, and `finish_mute` /
+`mute_and_maybe_disable` are gone with `MUTE_DISABLE_AFTER_SECS`. The `lease` and
+mid-stream paths still share one `record_mute`, so they cannot drift.
+
+The `least_crowded` fix from the previous entry stays and now only guards
+operator disables, which is what it was written for.
+
+---
+
+## 2026-11-03 - A mute reads as days and hours instead of raw seconds
+
+> Superseded below: the same-day entry after this one replaces the disable-on-
+> long-mute behaviour with an expiring deadline. The duration formatting stands.
 
 **`retry after 93784s` was technically correct and useless.** The mute deadline
 is a wall-clock instant, so the wait is whatever is left of it — hours, usually

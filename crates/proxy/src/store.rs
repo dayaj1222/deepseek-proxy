@@ -44,6 +44,11 @@ pub struct AccountRow {
     pub created_at: i64,
     /// Switched off with `accounts disable`; never loaded into the pool.
     pub disabled: bool,
+    /// Unix seconds until which the backend has muted this account. Unlike
+    /// `disabled` this is not an operator decision: it is cleared automatically
+    /// once the deadline passes (plus a safety margin), so the account comes
+    /// back without anyone running `accounts enable`.
+    pub muted_until: Option<i64>,
 }
 
 /// One registered API key (only its hash is stored).
@@ -148,6 +153,10 @@ impl Store {
             "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // A backend mute with a known deadline. Separate from `disabled` on
+        // purpose: that flag is an operator decision and must never be cleared
+        // automatically, while this one exists only to expire.
+        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN muted_until INTEGER", []);
         Ok(())
     }
 
@@ -273,7 +282,7 @@ impl Store {
     pub fn accounts(&self) -> Result<Vec<AccountRow>, StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT email, password, token, created_at, disabled FROM accounts
+            "SELECT email, password, token, created_at, disabled, muted_until FROM accounts
              ORDER BY created_at, email",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -283,6 +292,7 @@ impl Store {
                 token: r.get(2)?,
                 created_at: r.get(3)?,
                 disabled: r.get::<_, i64>(4)? != 0,
+                muted_until: r.get::<_, Option<i64>>(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -338,6 +348,62 @@ impl Store {
             )?;
         }
         Ok(Some(disabled))
+    }
+
+    /// Record a backend mute deadline for `email`. Returns `None` when no such
+    /// account exists (an env-configured account has no row to record into).
+    ///
+    /// A later, shorter mute never shortens an earlier deadline: a stale
+    /// in-flight reply could otherwise walk the deadline backwards.
+    pub fn set_account_muted_until(
+        &self,
+        email: &str,
+        until: i64,
+    ) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let n = conn.execute(
+            "UPDATE accounts SET muted_until = MAX(COALESCE(muted_until, 0), ?2)
+             WHERE email = ?1",
+            params![email, until],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let applied: i64 = conn.query_row(
+            "SELECT muted_until FROM accounts WHERE email = ?1",
+            params![email],
+            |r| r.get(0),
+        )?;
+        Ok(Some(applied))
+    }
+
+    /// Clear every mute whose deadline plus `grace_secs` has passed. Returns the
+    /// emails that came back, so the caller can reload the pool and log who
+    /// returned.
+    pub fn clear_expired_mutes(
+        &self,
+        now: i64,
+        grace_secs: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let cutoff = now - grace_secs;
+        let mut stmt = conn.prepare(
+            "SELECT email FROM accounts WHERE muted_until IS NOT NULL AND muted_until <= ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))?;
+        let mut expired = Vec::new();
+        for row in rows {
+            expired.push(row?);
+        }
+        if expired.is_empty() {
+            return Ok(expired);
+        }
+        conn.execute(
+            "UPDATE accounts SET muted_until = NULL
+             WHERE muted_until IS NOT NULL AND muted_until <= ?1",
+            params![cutoff],
+        )?;
+        Ok(expired)
     }
 
     /// Remove an account and any token cached for it. True when a row was deleted.
@@ -495,6 +561,75 @@ mod tests {
         // A rejected token is dropped so the next start logs in again.
         s.forget_token("a@b").unwrap();
         assert_eq!(s.get_token("a@b").unwrap(), None);
+    }
+
+    #[test]
+    fn account_mute_deadline_roundtrips_and_only_moves_forward() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_account("a@b", "pw", None).unwrap();
+
+        // Recording a deadline stores it.
+        assert_eq!(
+            s.set_account_muted_until("a@b", 1_000).unwrap(),
+            Some(1_000)
+        );
+        let row = s.accounts().unwrap().into_iter().next().unwrap();
+        assert_eq!(row.muted_until, Some(1_000));
+
+        // A later, shorter deadline never walks it backwards: a stale in-flight
+        // reply must not cut a long mute short.
+        assert_eq!(s.set_account_muted_until("a@b", 500).unwrap(), Some(1_000));
+        assert_eq!(s.accounts().unwrap()[0].muted_until, Some(1_000));
+
+        // A longer one extends it.
+        assert_eq!(
+            s.set_account_muted_until("a@b", 2_000).unwrap(),
+            Some(2_000)
+        );
+
+        // An unknown account is `None`, not a silent no-op.
+        assert_eq!(s.set_account_muted_until("nope@x", 1_000).unwrap(), None);
+    }
+
+    #[test]
+    fn expired_mutes_clear_only_after_the_grace_margin() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_account("a@b", "pw", None).unwrap();
+        s.upsert_account("c@d", "pw", None).unwrap();
+        s.set_account_muted_until("a@b", 1_000).unwrap();
+        s.set_account_muted_until("c@d", 5_000).unwrap();
+
+        // Still inside the grace window: nothing clears, and the account stays
+        // out, which is the point of the margin.
+        assert!(s.clear_expired_mutes(1_010, 15).unwrap().is_empty());
+        assert_eq!(s.accounts().unwrap()[0].muted_until, Some(1_000));
+
+        // Past the deadline plus grace: only that one clears.
+        let cleared = s.clear_expired_mutes(1_020, 15).unwrap();
+        assert_eq!(cleared, vec!["a@b".to_string()]);
+        let rows = s.accounts().unwrap();
+        assert_eq!(rows[0].muted_until, None);
+        assert_eq!(rows[1].muted_until, Some(5_000), "the later mute stays");
+
+        // A second sweep is a no-op rather than a repeat reload.
+        assert!(s.clear_expired_mutes(1_030, 15).unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_and_muted_are_independent_flags() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_account("a@b", "pw", None).unwrap();
+        s.set_account_disabled("a@b", true).unwrap();
+        s.set_account_muted_until("a@b", 9_999).unwrap();
+
+        // Clearing the mute must not re-enable an operator disable.
+        s.clear_expired_mutes(99_999, 0).unwrap();
+        let row = s.accounts().unwrap().into_iter().next().unwrap();
+        assert_eq!(row.muted_until, None);
+        assert!(
+            row.disabled,
+            "the operator disable survives the mute expiring"
+        );
     }
 
     #[test]
