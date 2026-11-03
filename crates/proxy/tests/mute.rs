@@ -29,9 +29,9 @@ fn muted_body(until: f64) -> String {
     .to_string()
 }
 
-/// A mute must be reported as `429 account_muted` with the real deadline in
-/// `Retry-After`, and the account put on cooldown for exactly that long instead
-/// of an exponential breaker backoff.
+/// A mute must be reported as `429 account_muted`, with the wait in days and
+/// hours, and the account put on cooldown for exactly that long instead of an
+/// exponential breaker backoff.
 #[tokio::test]
 async fn a_muted_account_reports_429_with_the_mute_deadline() {
     let until = now_secs() + 3600.5;
@@ -46,8 +46,8 @@ async fn a_muted_account_reports_429_with_the_mute_deadline() {
     assert_eq!(body["error"]["code"], json!("account_muted"), "{body}");
     let message = body["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("muted until") && (message.contains("3600") || message.contains("3601")),
-        "the message names the deadline and the wait: {message}"
+        message.contains("muted") && message.contains("1h 0m"),
+        "the message says how long the wait is, in days/hours: {message}"
     );
 
     // The mute puts the account on the `rebind` list with the real cooldown.
@@ -112,6 +112,59 @@ async fn a_mute_rebinds_the_running_thread_and_replays() {
         s["accounts"]
             .as_array()
             .is_some_and(|a| a.iter().any(|c| c["healthy"] == json!(false)))
+    })
+    .await;
+    assert_eq!(stats["accounts"].as_array().unwrap().len(), 2, "{stats}");
+}
+
+/// A mute longer than a day is terminal: the account is disabled, not just
+/// cooled down, and the next turn must not route back to it.
+#[tokio::test]
+async fn a_mute_longer_than_a_day_disables_the_account() {
+    let three_days = now_secs() + 3.0 * 86_400.0;
+    let script = MockScript::new(vec![
+        Step::NonSse(muted_body(three_days)),
+        Step::Sse(sse_reply(4, 1, &["391"])),
+    ]);
+    let (upstream, _script) = start_mock(script).await;
+    let app = spawn_app(
+        &upstream,
+        &[("a@example.com", "pw"), ("b@example.com", "pw")],
+    )
+    .await;
+
+    let resp = complete(&app, hello_turn()).await;
+    assert_eq!(resp.status(), 429, "the first turn still reports the mute");
+    let body: serde_json::Value = resp.json().await.expect("json error body");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("3d 0h"),
+        "a three-day mute reads as days and hours, not seconds: {message}"
+    );
+
+    // Three days is past the threshold, so the account is out of the pool for
+    // good, which `/admin/throttled` reflects through `account_healthy`.
+    let listed: serde_json::Value = reqwest::get(format!("{}/admin/throttled", app.base))
+        .await
+        .expect("GET /admin/throttled")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["threads"][0]["account_healthy"], json!(false));
+
+    // A new thread must land on the other account, never the disabled one.
+    let second = complete(&app, hello_turn()).await;
+    assert_eq!(
+        second.status(),
+        200,
+        "the remaining account must serve new threads"
+    );
+    assert!(second.text().await.unwrap().contains("391"));
+
+    let stats = stats_until(&app, "the muted account to be disabled", |s| {
+        s["accounts"]
+            .as_array()
+            .is_some_and(|a| a.iter().filter(|c| c["healthy"] == json!(false)).count() == 1)
     })
     .await;
     assert_eq!(stats["accounts"].as_array().unwrap().len(), 2, "{stats}");

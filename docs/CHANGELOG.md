@@ -6,6 +6,42 @@ Decisions are `ADR-nnnn` in [`adr/`](adr/).
 
 ---
 
+## 2026-11-03 - A mute reads as days and hours, and a long one disables the account
+
+**`retry after 93784s` was technically correct and useless.** The mute deadline
+is a wall-clock instant, so the wait is whatever is left of it — hours, usually
+days. Printed as raw seconds, an operator has to do arithmetic to learn whether
+the account is out for an hour or a week, which is exactly the decision they are
+trying to make. `humanize_duration` now formats it as `1d 2h`, `3h 40m`, `12m`
+or `45s` (the finest unit is hours, so a day-long mute never reads `0d 0h`), and
+that form appears in the `account_muted` message, the `CompletionError` /
+`PoolError` `Display`, and the mute log lines. `Retry-After` stays in seconds,
+because that is what the header is specified in.
+
+**A mute of a day or more now disables the account** (`MUTE_DISABLE_AFTER_SECS`,
+inclusive at exactly 24 h). The old behaviour was to hold the account out of
+rotation until `mute_until` and route around it, which is wrong in two ways once
+the deadline is far out: `AccountTarget::Next` keeps walking past an account
+that will not serve for days, and a proxy restart forgets the mute entirely so
+the next turn lands back on it. Disabling writes the same `accounts.disabled`
+flag `accounts disable` sets, so it survives a restart and only `accounts enable`
+clears it — a deliberate asymmetry, because the backend decided this, not an
+operator, and un-muting early is a guess.
+
+Both mute-detection sites go through one `finish_mute`, so the pre-flight read in
+`lease` and the mid-stream hint in the request path cannot drift apart. The
+persistence is best-effort: an env-configured account has no database row, so it
+is disabled for the process only and says so in the log; a failed write never
+loses the mute already recorded in memory.
+
+Also: `Pool::least_crowded`, the "every account is unhealthy" fallback, skipped
+nothing and would hand a disabled account back out the moment the healthy ones
+tripped their breakers — which quietly defeated both `accounts disable` and this
+new mute disable. It now skips disabled connections and logs when nothing is
+left.
+
+---
+
 ## 2026-11-03 - A backend mute is its own failure, with a real deadline
 
 **`{"biz_code":5,"biz_msg":"user is muted"}` was reported as a generic 502

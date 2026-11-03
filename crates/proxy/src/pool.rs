@@ -12,7 +12,7 @@
 
 use client::Client;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
@@ -108,6 +108,11 @@ pub struct Connection {
     /// the breaker: a mute has a known recovery time, so it must not compound
     /// the exponential backoff or count as a fault.
     muted_until: std::sync::Mutex<Option<i64>>,
+    /// Hard-off switch for a mute too long to wait out (see
+    /// [`Pool::mute_and_maybe_disable`]). Distinct from `muted_until`: this is
+    /// the same state `accounts disable` writes, so it survives a restart and
+    /// only an explicit `accounts enable` clears it.
+    disabled: AtomicBool,
     store: crate::store::Store,
 }
 
@@ -139,6 +144,7 @@ impl Connection {
             })),
             breaker: std::sync::Mutex::new(BreakerState::default()),
             muted_until: std::sync::Mutex::new(None),
+            disabled: AtomicBool::new(false),
             request_delay,
             waiting: AtomicUsize::new(0),
             queue_limit,
@@ -321,7 +327,9 @@ impl Connection {
         let cooldown_ms = gate_cooldown_ms.max(mute_ms);
         ConnectionSnapshot {
             email: self.email.clone(),
-            healthy: cooldown_ms.is_none() && breaker != Breaker::Open,
+            healthy: !self.disabled.load(Ordering::Relaxed)
+                && cooldown_ms.is_none()
+                && breaker != Breaker::Open,
             bound_threads,
             waiting: self.waiting.load(Ordering::Relaxed),
             cooldown_ms,
@@ -336,7 +344,18 @@ impl Connection {
     /// refuses every turn until `muted_until`, so routing must not send new
     /// threads there and `route` moves an existing one off.
     fn healthy(&self) -> bool {
-        !self.breaker_open() && self.muted_until_at(now_secs()).is_none()
+        !self.disabled.load(Ordering::Relaxed)
+            && !self.breaker_open()
+            && self.muted_until_at(now_secs()).is_none()
+    }
+
+    /// Take this connection out of rotation for good (until re-enabled).
+    ///
+    /// A mute longer than a day is not worth waiting on: the deadline is far
+    /// enough out that the account is effectively gone, and leaving it in the
+    /// pool means every rebind walks past it again.
+    pub fn disable(&self) {
+        self.disabled.store(true, Ordering::Relaxed);
     }
 
     /// Unix seconds until which this account is muted, if still muted at `now`.
@@ -716,12 +735,24 @@ impl Pool {
         let counts = self.occupancy().await;
         let mut best = 0usize;
         let mut best_score = usize::MAX;
+        let mut found = false;
         for (i, c) in self.conns.iter().enumerate() {
+            // A disabled account is out of service on purpose, so the
+            // "everything is unhealthy" fallback must not quietly resurrect it:
+            // that would make `accounts disable` and a long-mute disable both
+            // meaningless the moment the other accounts trip their breakers.
+            if c.disabled.load(Ordering::Relaxed) {
+                continue;
+            }
             let score = counts.get(&c.email).copied().unwrap_or(0);
             if score < best_score {
                 best_score = score;
                 best = i;
+                found = true;
             }
+        }
+        if !found {
+            tracing::error!("every account is disabled; serving nothing");
         }
         best
     }
@@ -784,6 +815,42 @@ impl Pool {
         out
     }
 
+    /// Mute the account named `email` until `until` (unix seconds), and disable
+    /// it outright when the mute is longer than [`MUTE_DISABLE_AFTER_SECS`].
+    ///
+    /// Returns the deadline actually applied and whether the account was
+    /// disabled. A mute of a day or more is not worth routing around forever,
+    /// and `AccountTarget::Next` would keep walking past the same dead account;
+    /// disabling also persists, so a restart does not resurrect it. The database
+    /// write is best-effort: an env-configured account has no row, and a failed
+    /// write must not lose the mute already recorded in memory.
+    pub fn mute_and_maybe_disable(&self, email: &str, until: i64) -> Option<(i64, bool)> {
+        let conn = self.mute(email, until)?;
+        Some(self.finish_mute(&conn, until))
+    }
+
+    /// The disable half of a mute, shared by the two places a mute is detected
+    /// (the pre-flight read in [`Pool::lease`] and the mid-stream hint in the
+    /// request path). Returns the deadline and whether the account was disabled.
+    fn finish_mute(&self, conn: &Arc<Connection>, until: i64) -> (i64, bool) {
+        let retry_after_s = (until - now_secs()).max(1) as u64;
+        if retry_after_s < MUTE_DISABLE_AFTER_SECS {
+            return (until, false);
+        }
+        conn.disable();
+        match self.store.set_account_disabled(&conn.email, true) {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::info!(
+                account = %conn.email,
+                "long mute, but this account has no database row; disabled for this process only"
+            ),
+            Err(e) => {
+                tracing::warn!(account = %conn.email, error = %e, "could not persist the disable")
+            }
+        }
+        (until, true)
+    }
+
     /// Mute the account named `email` until `until` (unix seconds).
     ///
     /// Returns the connection so the caller can report the deadline actually
@@ -833,7 +900,8 @@ impl std::fmt::Display for PoolError {
             ),
             PoolError::Muted { retry_after_s, .. } => write!(
                 f,
-                "DeepSeek muted this account (retry after {retry_after_s}s)"
+                "DeepSeek muted this account (retry after {})",
+                humanize_duration(*retry_after_s)
             ),
         }
     }
@@ -918,12 +986,13 @@ impl Pool {
                         // on the same account would only burn a turn and count a
                         // failure that did not happen.
                         let until = mute_until_secs(&last).unwrap_or_else(|| now_secs() + 60);
+                        let (until, disabled) = self.finish_mute(&conn, until);
                         let retry_after_s = (until - now_secs()).max(1) as u64;
-                        conn.mute_until(until);
                         tracing::warn!(
                             account = %conn.email,
                             until,
-                            retry_after_s,
+                            retry_after = %humanize_duration(retry_after_s),
+                            disabled,
                             "account muted by the backend"
                         );
                         drop(slot);
@@ -1022,6 +1091,32 @@ pub fn is_rate_limit(msg: &str) -> bool {
 }
 
 /// Unix seconds, for mute deadlines that arrive in wall-clock time.
+/// A mute this long is treated as terminal: the account is disabled instead of
+/// held out of rotation, because waiting a day or more is worse than dropping
+/// it and asking for `accounts enable` when it comes back.
+pub const MUTE_DISABLE_AFTER_SECS: u64 = 24 * 60 * 60;
+
+/// Format a duration for humans as `1d 3h`, `5h 12m`, or `45s`.
+///
+/// Used in error messages: `retry after 93784s` is unreadable, while
+/// `retry after 1d 2h` says the same thing at a glance. Days and hours are the
+/// finest units, so a sub-hour mute stays in minutes and a sub-minute one in
+/// seconds — never a bare `0d 0h`.
+pub fn humanize_duration(total_secs: u64) -> String {
+    let s = total_secs;
+    if s >= 86_400 {
+        let (d, rem) = (s / 86_400, s % 86_400);
+        format!("{d}d {}h", rem / 3_600)
+    } else if s >= 3_600 {
+        let (h, rem) = (s / 3_600, s % 3_600);
+        format!("{h}h {}m", rem / 60)
+    } else if s >= 60 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1119,6 +1214,29 @@ mod tests {
         assert_eq!(Breaker::Closed.as_str(), "closed");
         assert_eq!(Breaker::Open.as_str(), "open");
         assert_eq!(Breaker::HalfOpen.as_str(), "half_open");
+    }
+
+    #[test]
+    fn mute_durations_read_as_days_and_hours() {
+        // A day or more keeps days+hours: `retry after 93784s` is unreadable.
+        assert_eq!(humanize_duration(86_400), "1d 0h");
+        assert_eq!(humanize_duration(93_784), "1d 2h");
+        assert_eq!(humanize_duration(7 * 86_400 + 5 * 3_600), "7d 5h");
+        // Under a day, hours+minutes.
+        assert_eq!(humanize_duration(3_600), "1h 0m");
+        assert_eq!(humanize_duration(3_601), "1h 0m");
+        assert_eq!(humanize_duration(3_600 + 12 * 60), "1h 12m");
+        // Under an hour, minutes; under a minute, seconds.
+        assert_eq!(humanize_duration(59), "59s");
+        assert_eq!(humanize_duration(60), "1m");
+        assert_eq!(humanize_duration(90), "1m");
+        assert_eq!(humanize_duration(0), "0s");
+    }
+
+    #[test]
+    fn a_mute_at_or_past_the_threshold_disables_the_account() {
+        // The boundary is inclusive: exactly one day is "not worth waiting".
+        assert_eq!(MUTE_DISABLE_AFTER_SECS, 86_400);
     }
 
     #[test]

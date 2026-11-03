@@ -1500,12 +1500,24 @@ async fn stream_response(live: LiveTurn) -> Response {
                     pool::mute_until_secs(&hint).unwrap_or_else(|| sse::unix_secs() as i64 + 60);
                 state.stats.errors.fetch_add(1, Ordering::Relaxed);
                 // Mark the account unhealthy until the mute deadline, so the
-                // next turn on this thread is routed off it.
-                state.pool().mute(&account, until);
+                // next turn on this thread is routed off it. A mute longer than
+                // a day is not worth routing around on every future turn, so it
+                // also disables the account (and persists that).
+                let disabled = match state.pool().mute_and_maybe_disable(&account, until) {
+                    Some((_, disabled)) => disabled,
+                    None => false,
+                };
                 if let Err(e) = state.store.mark_throttled(&key) {
                     tracing::warn!(thread = %key, error = %e, "could not record mute");
                 }
-                tracing::error!(thread = %key, account = %account, until, "upstream muted the account: {hint}");
+                tracing::error!(
+                    thread = %key,
+                    account = %account,
+                    until,
+                    retry_after = %pool::humanize_duration((until - sse::unix_secs() as i64).max(1) as u64),
+                    disabled,
+                    "upstream muted the account: {hint}"
+                );
                 // A mute rebinds the running thread for this turn. The mute just
                 // marked the account unhealthy, so `Next` cannot land back on it,
                 // and the transcript is replayed into a session that has never

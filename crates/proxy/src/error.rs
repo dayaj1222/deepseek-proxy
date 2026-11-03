@@ -61,7 +61,8 @@ impl std::fmt::Display for CompletionError {
             CompletionError::QueueUnavailable(msg) => f.write_str(msg),
             CompletionError::AccountMuted { retry_after_s, .. } => write!(
                 f,
-                "DeepSeek muted this account (retry after {retry_after_s}s)"
+                "DeepSeek muted this account (retry after {})",
+                pool::humanize_duration(*retry_after_s)
             ),
         }
     }
@@ -171,16 +172,17 @@ pub(crate) async fn error_for(state: &AppState, key: &str, err: CompletionError)
         } => {
             // The account is time-muted by DeepSeek, not broken and not
             // throttled: say so, and put the real deadline in Retry-After.
+            // `retry_after_s` is seconds on the wire (Retry-After is specified
+            // in seconds); the message and log use the readable form.
+            let human = pool::humanize_duration(retry_after_s);
             tracing::error!(
                 thread = %key,
                 until,
-                retry_after_s,
+                retry_after = %human,
                 "account muted by the backend"
             );
             let mut e = ProxyError::new(
-                format!(
-                    "DeepSeek account is muted until {until} (unix); retry after {retry_after_s}s"
-                ),
+                format!("DeepSeek account is muted; retry after {human}"),
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 "account_muted",
             );
